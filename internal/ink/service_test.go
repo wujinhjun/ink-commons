@@ -26,14 +26,16 @@ type recordedDelivery struct {
 }
 
 type testExecutor struct {
-	prepared   int
-	deliveries []recordedDelivery
+	prepared      int
+	preparedTasks []execution.Delivery
+	deliveries    []recordedDelivery
 }
 
 func (*testExecutor) Validate(execution.Route, bool) error { return nil }
 
-func (e *testExecutor) Prepare(context.Context, execution.Route, execution.Delivery) (string, error) {
+func (e *testExecutor) Prepare(_ context.Context, _ execution.Route, task execution.Delivery) (string, error) {
 	e.prepared++
+	e.preparedTasks = append(e.preparedTasks, task)
 	return "review-session", nil
 }
 
@@ -143,6 +145,9 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 		t.Fatalf("review dispatch: %+v, %v", w, executor.deliveries)
 	}
 
+	if source := executor.preparedTasks[0].Source; source == nil || source.Session != "dev-session" {
+		t.Fatalf("missing preparation source: %+v", source)
+	}
 	s = makeService()
 	poll()
 	if executor.prepared != 1 || len(executor.deliveries) != 1 {

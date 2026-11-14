@@ -23,10 +23,10 @@ func review(args []string) error {
 	login := flags.String("github-login", "", "GitHub account that will submit the review")
 	provider := flags.String("provider", "cc-connect", "execution provider")
 	target := flags.String("target", "", "execution target, e.g. a cc-connect project")
-	parent := flags.String("parent", "", "parent for a new session, e.g. a Discord channel ID")
+	parent := flags.String("parent", "", "parent channel override (default: development conversation channel)")
 	session := flags.String("session", "", "existing execution session to reuse")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: ink review --github-login LOGIN [--target PROJECT --parent CHANNEL_ID] PR_URL")
+		fmt.Fprintln(flags.Output(), "Usage: ink review --github-login LOGIN [--target PROJECT [--parent CHANNEL_ID]] PR_URL")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {

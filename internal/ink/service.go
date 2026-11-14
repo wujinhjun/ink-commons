@@ -264,6 +264,12 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 		return s.saveDelivery(id, work)
 	}
 	delivery := execution.Delivery{Repository: work.Repo, Number: work.Pull.Number, URL: work.Pull.URL, Role: task.Role, SHA: task.SHA, ReviewID: task.ReviewID, ReviewURL: task.ReviewURL}
+	if task.Role == "reviewer" {
+		delivery.Source = work.Developer.Route
+		if delivery.Source == nil {
+			delivery.Source = work.Origin
+		}
+	}
 	if route.Session == "" {
 		if fallback := repo.ReviewerRoute; route.Parent == "" && fallback != nil && fallback.Provider == route.Provider && fallback.Target == route.Target {
 			route.Parent = fallback.Parent
