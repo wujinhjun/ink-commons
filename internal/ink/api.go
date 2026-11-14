@@ -10,12 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"ink-commons/internal/execution"
 )
 
 type workChange struct {
-	Role        string `json:"role,omitempty"`
-	GitHubLogin string `json:"github_login,omitempty"`
-	Route       *Route `json:"route,omitempty"`
+	Role        string           `json:"role,omitempty"`
+	GitHubLogin string           `json:"github_login,omitempty"`
+	Route       *execution.Route `json:"route,omitempty"`
 }
 
 type apiError struct {
@@ -96,7 +98,7 @@ func (s *Service) pushes(w http.ResponseWriter, r *http.Request) {
 	for i := range input {
 		p := &input[i]
 		p.Repo = strings.ToLower(p.Repo)
-		if !repoName.MatchString(p.Repo) || p.Ref == "" || !validSHA(p.SHA) || !p.Route.valid() {
+		if !repoName.MatchString(p.Repo) || p.Ref == "" || !validSHA(p.SHA) || execution.ValidateDestination(s.providers, p.Route, false) != nil {
 			fail(w, apiError{400, "invalid push observation"})
 			return
 		}
@@ -132,8 +134,8 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 			fail(w, err)
 			return
 		}
-		if change.Route != nil && !change.Route.valid() {
-			fail(w, apiError{400, "invalid Discord route"})
+		if change.Route != nil && execution.ValidateDestination(s.providers, *change.Route, false) != nil {
+			fail(w, apiError{400, "invalid execution destination"})
 			return
 		}
 	}
@@ -173,7 +175,7 @@ func applyChange(work *Work, action string, change workChange) error {
 	switch action {
 	case "link":
 		if assignee.GitHubLogin == "" && assignee.Route == nil {
-			return apiError{400, "specify a developer login or a Discord route"}
+			return apiError{400, "specify a developer login or an execution destination"}
 		}
 		if work.Linked {
 			return apiError{409, "PR already linked"}
@@ -190,11 +192,6 @@ func applyChange(work *Work, action string, change workChange) error {
 			work.Developer = assignee
 		} else if change.Role == "reviewer" {
 			work.Reviewer = assignee
-			work.ReviewThread = ""
-			if assignee.Route != nil {
-				thread, _, _ := strings.Cut(strings.TrimPrefix(assignee.Route.SessionKey, "discord:"), ":")
-				work.ReviewThread = thread
-			}
 		} else {
 			return apiError{400, "role must be developer or reviewer"}
 		}

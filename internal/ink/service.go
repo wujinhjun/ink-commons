@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"ink-commons/internal/execution"
 )
 
 type Service struct {
@@ -16,13 +18,14 @@ type Service struct {
 	up         upstream
 	mu         sync.Mutex
 	delivering map[string]bool
+	providers  map[string]execution.Executor
 }
 
-func NewService(config Config, path string) (*Service, error) {
+func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
 	if _, err := openState(path); err != nil {
 		return nil, err
 	}
-	return &Service{store: path, config: config, up: newUpstream(config), delivering: make(map[string]bool)}, nil
+	return &Service{store: path, config: config, up: newUpstream(config.GitHubToken), providers: providers, delivering: make(map[string]bool)}, nil
 }
 
 func (s *Service) repo(name string) (Repository, bool) {
@@ -54,11 +57,11 @@ func (s *Service) recordPushes(st *state, pushes []Push, now time.Time) {
 	}
 }
 
-func matchOrigin(pushes []Push, pull Pull) *Route {
+func matchOrigin(pushes []Push, pull Pull) *execution.Route {
 	if pull.Head.Repo == nil || !validSHA(pull.Head.SHA) {
 		return nil
 	}
-	var match *Route
+	var match *execution.Route
 	for _, p := range pushes {
 		if !strings.EqualFold(p.Repo, pull.Head.Repo.FullName) || p.Ref != pull.Head.Ref || p.SHA != pull.Head.SHA {
 			continue
@@ -148,8 +151,9 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	work := st.Work[id]
 	if work == nil {
 		work = &Work{Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
-		if repo.ReviewerProject != "" {
-			work.Reviewer.Route = &Route{Project: repo.ReviewerProject}
+		if repo.ReviewerRoute != nil {
+			route := *repo.ReviewerRoute
+			work.Reviewer.Route = &route
 		}
 		st.Work[id] = work
 	}
@@ -254,20 +258,38 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 	if route == nil {
 		return fmt.Errorf("pending task has no assignee route")
 	}
-	if task.Role == "reviewer" && route.SessionKey == "" {
-		thread, err := s.up.createThread(ctx, repo, *work)
-		if err != nil {
-			task.Error = "create Discord thread: " + err.Error()
+	executor, ok := s.providers[route.Provider]
+	if !ok {
+		task.Error = "execution provider is not configured"
+		return s.saveDelivery(id, work)
+	}
+	delivery := execution.Delivery{Repository: work.Repo, Number: work.Pull.Number, URL: work.Pull.URL, Role: task.Role, SHA: task.SHA, ReviewID: task.ReviewID, ReviewURL: task.ReviewURL}
+	if route.Session == "" {
+		if fallback := repo.ReviewerRoute; route.Parent == "" && fallback != nil && fallback.Provider == route.Provider && fallback.Target == route.Target {
+			route.Parent = fallback.Parent
+		}
+		if err := execution.ValidateDestination(s.providers, *route, true); err != nil {
+			task.Error = "invalid unallocated destination: " + err.Error()
 			return s.saveDelivery(id, work)
 		}
-		work.ReviewThread = thread
-		route.SessionKey = "discord:" + thread
+		session, err := executor.Prepare(ctx, *route, delivery)
+		if err != nil {
+			task.Error = "prepare destination: " + err.Error()
+			return s.saveDelivery(id, work)
+		}
+		prepared := *route
+		prepared.Session = session
+		if err := execution.ValidateDestination(s.providers, prepared, false); err != nil {
+			task.Error = "provider returned an invalid destination"
+			return s.saveDelivery(id, work)
+		}
+		*route = prepared
 		if err := s.saveDelivery(id, work); err != nil {
 			return err
 		}
 	}
-	if err := s.up.notify(ctx, *route, *work); err != nil {
-		task.Error = "notify cc-connect: " + err.Error()
+	if err := executor.Deliver(ctx, *route, delivery); err != nil {
+		task.Error = "deliver task: " + err.Error()
 	} else {
 		task.Delivery, task.Error = "accepted", ""
 	}

@@ -1,13 +1,10 @@
 {
   "poll_seconds": 60,
-  "cc_connect_url": "",
   "repositories": [
     {
       "repo": "owner/repository",
       "human_developer": "developer-login",
-      "reviewer_login": "reviewer-login",
-      "reviewer_project": "",
-      "review_channel_id": ""
+      "reviewer_login": "reviewer-login"
     }
   ]
 }

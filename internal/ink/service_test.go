@@ -10,12 +10,36 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"ink-commons/internal/execution"
 )
 
 type testTransport func(*http.Request) (*http.Response, error)
 
 func (f testTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+type recordedDelivery struct {
+	route execution.Route
+	task  execution.Delivery
+}
+
+type testExecutor struct {
+	prepared   int
+	deliveries []recordedDelivery
+}
+
+func (*testExecutor) Validate(execution.Route, bool) error { return nil }
+
+func (e *testExecutor) Prepare(context.Context, execution.Route, execution.Delivery) (string, error) {
+	e.prepared++
+	return "review-session", nil
+}
+
+func (e *testExecutor) Deliver(_ context.Context, route execution.Route, task execution.Delivery) error {
+	e.deliveries = append(e.deliveries, recordedDelivery{route: route, task: task})
+	return nil
 }
 
 func TestReviewLoopAndHumanTakeover(t *testing.T) {
@@ -28,8 +52,7 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 		t.Fatal(err)
 	}
 	var reviews []Review
-	var messages []map[string]string
-	threads := 0
+	executor := &testExecutor{}
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/repos/acme/project/pulls":
@@ -42,36 +65,27 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 			reply(w, 200, pull)
 		case "/repos/acme/project/pulls/42/reviews":
 			reply(w, 200, reviews)
-		case "/channels/77/threads":
-			threads++
-			reply(w, 201, map[string]string{"id": "99"})
-		case "/hook":
-			var message map[string]string
-			if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
-				t.Error(err)
-			}
-			messages = append(messages, message)
-			reply(w, 200, map[string]string{"status": "accepted"})
 		default:
 			t.Errorf("unexpected upstream endpoint %s", r.URL.Path)
 			w.WriteHeader(404)
 		}
 	})
 
-	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer-bot", ReviewerProject: "reviewer", ReviewChannel: "77"}
-	cfg := Config{Repositories: []Repository{repo}, CCConnectURL: "https://stub.invalid/hook"}
+	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer-bot", ReviewerRoute: &execution.Route{Provider: "test", Target: "reviewer"}}
+	cfg := Config{Repositories: []Repository{repo}}
 	path := filepath.Join(t.TempDir(), "state.json")
 	makeService := func() *Service {
-		service, err := NewService(cfg, path)
+		service, err := NewService(cfg, path, map[string]execution.Executor{"test": executor})
 		if err != nil {
 			t.Fatal(err)
 		}
-		service.up.github, service.up.discord = "https://stub.invalid", "https://stub.invalid"
-		service.up.http.Transport = testTransport(func(r *http.Request) (*http.Response, error) {
+		service.up.github = "https://stub.invalid"
+		transport := testTransport(func(r *http.Request) (*http.Response, error) {
 			w := httptest.NewRecorder()
 			mock.ServeHTTP(w, r)
 			return w.Result(), nil
 		})
+		service.up.http.Transport = transport
 		return service
 	}
 	s := makeService()
@@ -109,7 +123,7 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 
 	poll()
 	work("unclaimed")
-	pushes, err := ReadPush("git@github.com:Acme/Project.git", Route{Project: "developer", SessionKey: "discord:11"}, strings.NewReader("refs/heads/local "+sha1+" refs/heads/feat/export "+strings.Repeat("0", 40)+"\n"))
+	pushes, err := ReadPush("git@github.com:Acme/Project.git", execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}, strings.NewReader("refs/heads/local "+sha1+" refs/heads/feat/export "+strings.Repeat("0", 40)+"\n"))
 	if err != nil || len(pushes) != 1 {
 		t.Fatalf("parsed pushes %v: %v", pushes, err)
 	}
@@ -119,19 +133,19 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 	}
 	request("POST", "/v1/pushes", data, 202)
 	poll()
-	if w := work("draft"); w.Origin == nil || w.Origin.SessionKey != "discord:11" || threads != 0 {
+	if w := work("draft"); w.Origin == nil || w.Origin.Session != "dev-session" || executor.prepared != 0 {
 		t.Fatalf("draft routing: %+v", w)
 	}
 
 	pull.Draft = false
 	poll()
-	if w := work("review_pending"); w.Task.Delivery != "accepted" || w.ReviewThread != "99" || len(messages) != 1 || messages[0]["session_key"] != "discord:99" {
-		t.Fatalf("review dispatch: %+v, %v", w, messages)
+	if w := work("review_pending"); w.Task.Delivery != "accepted" || w.Reviewer.Route.Session != "review-session" || len(executor.deliveries) != 1 || executor.deliveries[0].route.Session != "review-session" || executor.deliveries[0].task.SHA != sha1 {
+		t.Fatalf("review dispatch: %+v, %v", w, executor.deliveries)
 	}
 
 	s = makeService()
 	poll()
-	if threads != 1 || len(messages) != 1 {
+	if executor.prepared != 1 || len(executor.deliveries) != 1 {
 		t.Fatal("restart repeated review delivery")
 	}
 	addReview(1, sha1, "someone-else", "APPROVED")
@@ -140,19 +154,19 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 	work("review_pending")
 	addReview(3, sha1, "reviewer-bot", "CHANGES_REQUESTED")
 	poll()
-	if w := work("changes_requested"); w.Task.Delivery != "accepted" || len(messages) != 2 || messages[1]["session_key"] != "discord:11" {
-		t.Fatalf("developer dispatch: %+v, %v", w, messages)
+	if w := work("changes_requested"); w.Task.Delivery != "accepted" || len(executor.deliveries) != 2 || executor.deliveries[1].route.Session != "dev-session" || executor.deliveries[1].task.ReviewID != 3 {
+		t.Fatalf("developer dispatch: %+v, %v", w, executor.deliveries)
 	}
 
 	request("POST", "/v1/work/acme/project/42/assign", []byte(`{"role":"developer","github_login":"human-dev"}`), 200)
 	w := work("changes_requested")
-	if w.Task.Delivery != "manual" || w.Developer.Route != nil || w.Origin == nil || w.Origin.SessionKey != "discord:11" {
+	if w.Task.Delivery != "manual" || w.Developer.Route != nil || w.Origin == nil || w.Origin.Session != "dev-session" {
 		t.Fatalf("developer takeover: %+v", w)
 	}
 	pull.Head.SHA = sha3
 	poll()
-	if w := work("review_pending"); w.Task.SHA != sha3 || threads != 1 || len(messages) != 3 || messages[2]["session_key"] != "discord:99" {
-		t.Fatalf("re-review: %+v, %v", w, messages)
+	if w := work("review_pending"); w.Task.SHA != sha3 || executor.prepared != 1 || len(executor.deliveries) != 3 || executor.deliveries[2].route.Session != "review-session" || executor.deliveries[2].task.SHA != sha3 {
+		t.Fatalf("re-review: %+v, %v", w, executor.deliveries)
 	}
 
 	request("POST", "/v1/work/acme/project/42/assign", []byte(`{"role":"reviewer","github_login":"human-reviewer"}`), 200)
@@ -168,7 +182,7 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 	pull.State, pull.Merged = "closed", true
 	poll()
 	work("merged")
-	if threads != 1 || len(messages) != 3 {
+	if executor.prepared != 1 || len(executor.deliveries) != 3 {
 		t.Fatal("manual assignments triggered bot deliveries")
 	}
 }
@@ -179,9 +193,9 @@ func TestAmbiguousOrigin(t *testing.T) {
 	pull.Head.Repo = &struct {
 		FullName string `json:"full_name"`
 	}{"acme/project"}
-	first := Push{Repo: "acme/project", Ref: pull.Head.Ref, SHA: pull.Head.SHA, Route: Route{"dev", "discord:11"}}
+	first := Push{Repo: "acme/project", Ref: pull.Head.Ref, SHA: pull.Head.SHA, Route: execution.Route{Provider: "test", Target: "dev", Session: "dev-session"}}
 	second := first
-	second.Route.SessionKey = "discord:12"
+	second.Route.Session = "other-session"
 	if matchOrigin([]Push{first, second}, pull) != nil {
 		t.Fatal("matched ambiguous origin")
 	}

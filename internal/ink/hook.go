@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/url"
 	"strings"
+
+	"ink-commons/internal/execution"
 )
 
 func githubRepo(remote string) string {
@@ -22,10 +24,10 @@ func githubRepo(remote string) string {
 	return path
 }
 
-func ReadPush(remote string, route Route, input io.Reader) ([]Push, error) {
+func ReadPush(remote string, route execution.Route, input io.Reader) ([]Push, error) {
 	var pushes []Push
 	repo := githubRepo(remote)
-	if repo == "" || !route.valid() {
+	if repo == "" || !route.Valid(false) {
 		return nil, nil
 	}
 	scanner := bufio.NewScanner(input)

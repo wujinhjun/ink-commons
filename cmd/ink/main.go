@@ -75,17 +75,17 @@ func serve(args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("unexpected serve arguments")
 	}
-	config, err := ink.LoadConfig(*configPath)
+	config, providers, err := loadConfig(*configPath)
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return ink.Serve(ctx, config, *data)
+	return ink.Serve(ctx, config, *data, providers)
 }
 
 func push(remote string) error {
-	route := ink.Route{Project: os.Getenv("CC_PROJECT"), SessionKey: os.Getenv("CC_SESSION_KEY")}
+	route := routeFromEnv(os.Getenv)
 	pushes, err := ink.ReadPush(remote, route, os.Stdin)
 	if err != nil || len(pushes) == 0 {
 		return err

@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"ink-commons/internal/execution"
 )
 
-func Serve(ctx context.Context, cfg Config, dir string) error {
+func Serve(ctx context.Context, cfg Config, dir string, providers map[string]execution.Executor) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -29,7 +31,7 @@ func Serve(ctx context.Context, cfg Config, dir string) error {
 		return err
 	}
 	defer lock.Close()
-	service, err := NewService(cfg, statePath)
+	service, err := NewService(cfg, statePath, providers)
 	if err != nil {
 		return err
 	}

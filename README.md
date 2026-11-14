@@ -4,7 +4,7 @@
 
 ## 开始
 
-需要 Go 1.23+ 和 Git。daemon 跟踪配置中的仓库。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。bot 模式另外需要 `INK_DISCORD_TOKEN`、`INK_CC_CONNECT_TOKEN`，以及启用 Discord thread 隔离的 cc-connect reviewer project。Discord bot 需要能创建和访问目标频道的公共 thread。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。
+需要 Go 1.23+ 和 Git。daemon 跟踪配置中的仓库。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。可以把任务留给人工处理，或配置执行端自动接单。
 
 ```sh
 go build -o ink ./cmd/ink
@@ -12,16 +12,59 @@ cp config.example.json config.json
 ./ink serve -config config.json
 ```
 
-默认状态目录是 `$XDG_STATE_HOME/ink-commons` 或 `~/.local/state/ink-commons`。daemon 与 hook 可以通过同一个 `INK_DATA_DIR` 覆盖。HTTP API 通过仅当前用户可访问的 `ink.sock` 提供。配置文件使用 `config.example.json` 的结构，凭据从环境变量读取。若启用 cc-connect，`cc_connect_url` 填其完整的本机 webhook 地址，例如 `http://127.0.0.1:9111/hook`。
+默认状态目录是 `$XDG_STATE_HOME/ink-commons` 或 `~/.local/state/ink-commons`。daemon 与 hook 可以通过同一个 `INK_DATA_DIR` 覆盖。HTTP API 通过仅当前用户可访问的 `ink.sock` 提供。配置文件使用 `config.example.json` 的结构，凭据从环境变量读取。
 
-受管仓库从 `git rev-parse --git-path hooks/pre-push` 确认默认 hook 位置。使用 `core.hooksPath` 的工作区按该设置安装。没有现有 hook 时，把 `scripts/ink-pre-push` 安装为可执行的 `pre-push`。已有 hook 时，从现有 hook 为同砚和原检查分别传入同一份标准输入。让 cc-connect agent 的 PATH 能找到 `ink`，或通过 `INK_BIN` 指定绝对路径。
+受管仓库从 `git rev-parse --git-path hooks/pre-push` 确认默认 hook 位置。使用 `core.hooksPath` 的工作区按该设置安装。没有现有 hook 时，把 `scripts/ink-pre-push` 安装为可执行的 `pre-push`。已有 hook 时，从现有 hook 为同砚和原检查分别传入同一份标准输入。让执行 Git 命令的进程能在 PATH 找到 `ink`，或通过 `INK_BIN` 指定绝对路径。
+
+## 代码结构
+
+| 目录 | 职责 |
+|---|---|
+| `cmd/ink/` | CLI 入口，读取配置和凭据，注册执行端并启动 daemon。 |
+| `internal/ink/` | GitHub 同步、PR 工作流、本地 API、Git hook 和状态存储。 |
+| `internal/execution/` | 定义 `Route`、`Delivery` 和 `Executor`，供工作流和执行端共同使用。 |
+| `internal/execution/ccconnect/` | 创建 Discord thread，并通过 cc-connect webhook 投递任务。 |
+| `internal/execution/httpagent/` | 通过版本化 HTTP 协议接入其他 agent runtime。 |
+
+同砚核心从命令入口接收已注册的执行端，通过 `Executor` 验证路由、准备会话和投递任务。兼容现有 HTTP 协议的服务可以直接配置接入。新增原生执行端时，实现这个接口并在 `cmd/ink` 注册即可。
+
+## 执行端
+
+每个 PR 的开发和审查任务可以交给人或不同的执行端。配置 `reviewer_route` 指定默认审查执行端。路由包含 `provider`、`target`，以及可选的 `session` 和 `parent`。已有会话可以直接指定 `session`。需要新建会话时，由执行端根据目标和上级位置创建，随后同砚保存会话标识供复审使用。
+
+### cc-connect
+
+配置 `cc_connect_url` 为本机 webhook 完整地址，例如 `http://127.0.0.1:9111/hook`，并注入 `INK_CC_CONNECT_TOKEN`。例如：
+
+```json
+{
+  "provider": "cc-connect",
+  "target": "reviewer-project",
+  "parent": "123456789012345678"
+}
+```
+
+`target` 是 cc-connect project。用 `parent` 指定 Discord 父频道以便自动建 thread，并注入有权限创建和访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
+
+### 通用 HTTP
+
+配置 `http_provider_url` 为执行端的接收地址，再用 `{"provider":"http","target":"reviewer"}` 作为仓库的 `reviewer_route`。执行端可以是一个本地服务，也可以连接其他 agent runtime。远端地址需要 HTTPS，并通过 `INK_HTTP_PROVIDER_TOKEN` 提供 Bearer 认证。
+
+同砚向该地址发送 JSON POST，包含 `version: 1`、`operation`、`route` 和 `task`。任务含 `repository`、`pull_number`、`pull_url`、`role`、`sha`，以及适用的 `review_id` 和 `review_url`。执行端按操作返回 HTTP 2xx 和 JSON：
+
+| 操作 | 返回值 |
+|---|---|
+| `prepare` | `{"session":"your-session-id"}`。当路由缺少会话时调用。 |
+| `deliver` | `{"status":"accepted"}`。执行端已接收任务。 |
+
+其他运行时可在启动开发会话时设置 `INK_PROVIDER=http`、`INK_TARGET` 和 `INK_SESSION`，Git hook 就能记录它们的来源。
 
 ## 走完一轮
 
-1. 开发 agent 在自己的 Discord thread 里建分支、推送并开 Draft PR。hook 从 cc-connect 环境读取路由，并登记 Git 准备推送的源仓库、目标分支和 SHA。daemon 轮询 GitHub 找到匹配的 PR 后确认关联。同一版本有两个候选会话时，PR 等待认领。
-2. 在 GitHub 标记 Ready for review。同砚为当前 head SHA 建立待办。配置了 reviewer bot 时，创建一个 Discord thread 并唤醒它。可以将随附的 review skill 提供给对应 agent。
+1. 开发 agent 在自己的会话里建分支、推送并开 Draft PR。hook 从当前会话环境读取路由，并登记 Git 准备推送的源仓库、目标分支和 SHA。daemon 轮询 GitHub 找到匹配的 PR 后确认关联。同一版本有两个候选会话时，PR 等待认领。
+2. 在 GitHub 标记 Ready for review。同砚为当前 head SHA 建立待办。配置了审查执行端时，创建或复用对应会话并投递任务。可以将随附的 review skill 提供给对应 agent。
 3. reviewer 在 GitHub 提交 Approve 或 Request changes。机器人和人在 GitHub 上提交的 review 使用同一同步逻辑。只有指定 reviewer 对当前 SHA 的正式结论才会推进状态。需要修改时把任务投递给开发会话，或留给当前人工负责人。
-4. 新 commit 将进入下一轮，沿用已有 review thread。历史 review 按原 SHA 保留。工作项合并或关闭后结束待办。
+4. 新 commit 将进入下一轮，沿用已有审查会话。历史 review 按原 SHA 保留。工作项合并或关闭后结束待办。
 
 GitHub 的当前 PR 快照是状态来源。轮询间隔默认 60 秒。hook 路由候选保留七天，仅精确匹配 PR 已观察到的 head SHA。漏装 hook、首次观察之前 head 已变化或归属含糊时，可以用 `link` 补登记。
 
@@ -41,11 +84,11 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 | `GET /healthz` | 检查本地 API 可达。 |
 | `GET /v1/work` | 列出已观察的 PR 和当前待办。 |
 | `GET /v1/work/{owner}/{repo}/{number}` | 查看一条 PR 的来源、负责人、审查版本和投递状态。 |
-| `POST /v1/work/{owner}/{repo}/{number}/link` | 手动关联未认领 PR。请求体提供 `github_login` 或 `route`。路由包含 `project`、`session_key`。 |
+| `POST /v1/work/{owner}/{repo}/{number}/link` | 手动关联未认领 PR。请求体提供 `github_login` 或 `route`。路由包含 `provider`、`target`、`session`。 |
 | `POST /v1/work/{owner}/{repo}/{number}/assign` | 为 `developer` 或 `reviewer` 更新负责人。传 `github_login` 即可转给人。传 `route` 可指定已有 bot 会话。 |
-| `POST /v1/work/{owner}/{repo}/{number}/retry` | 在下次轮询重试当前 bot 待办。先检查 Discord 是否已经开始，避免重复执行。 |
+| `POST /v1/work/{owner}/{repo}/{number}/retry` | 在下次轮询重试当前 bot 待办。先检查执行端是否已经开始，避免重复执行。 |
 | `POST /v1/pushes` | Git hook 提交候选关联记录。 |
 
-`assign` 修改未来任务的投递。接手之前如果 bot 正在工作，先在 cc-connect 停止它，再接管目录或处理未提交改动。`accepted` 表示 cc-connect 接收请求，正式 GitHub review 或新的 PR 版本才表示工作状态推进。cc-connect 忙时可能跳过任务，待办仍可在 API 中查看、重试或转给人。
+`assign` 修改未来任务的投递。接手之前如果 bot 正在工作，先在原执行端停止它，再接管目录或处理未提交改动。`accepted` 表示执行端接收请求，正式 GitHub review 或新的 PR 版本才表示工作状态推进。cc-connect 忙时可能跳过任务，待办仍可在 API 中查看、重试或转给人。
 
 未来可从 Discord 开发 thread 按需分配 worktree 和分支，见 [TODO](TODO.md)。
