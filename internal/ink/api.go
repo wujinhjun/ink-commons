@@ -134,9 +134,12 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 			fail(w, err)
 			return
 		}
-		if change.Route != nil && execution.ValidateDestination(s.providers, *change.Route, false) != nil {
-			fail(w, apiError{400, "invalid execution destination"})
-			return
+		if change.Route != nil {
+			allocate := action == "assign" && change.Role == "reviewer"
+			if err := execution.ValidateDestination(s.providers, *change.Route, allocate); err != nil {
+				fail(w, apiError{400, "invalid execution destination: " + err.Error()})
+				return
+			}
 		}
 	}
 	s.mu.Lock()
@@ -154,6 +157,15 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		reply(w, 200, work)
 		return
+	}
+	// Return an existing reviewer assignment even during delivery so a
+	// repeated request cannot reset the task or allocate another session.
+	if action == "assign" && change.Role == "reviewer" && work.Linked {
+		requested := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), Route: change.Route}
+		if requested.GitHubLogin != "" && sameReviewer(work.Reviewer, requested) {
+			reply(w, 200, work)
+			return
+		}
 	}
 	if s.delivering[key(repo, number)] {
 		fail(w, apiError{409, "delivery in progress"})
@@ -208,4 +220,18 @@ func applyChange(work *Work, action string, change workChange) error {
 	}
 	work.derive()
 	return nil
+}
+
+func sameReviewer(current, requested Assignee) bool {
+	if !strings.EqualFold(current.GitHubLogin, requested.GitHubLogin) {
+		return false
+	}
+	if current.Route == nil || requested.Route == nil {
+		return current.Route == nil && requested.Route == nil
+	}
+	want := *requested.Route
+	if want.Session == "" {
+		want.Session = current.Route.Session
+	}
+	return *current.Route == want
 }

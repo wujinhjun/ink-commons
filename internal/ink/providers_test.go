@@ -18,7 +18,6 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	sha := strings.Repeat("a", 40)
 	repo := Repository{
 		Repo: "acme/project", ReviewerLogin: "reviewer",
-		ReviewerRoute: &execution.Route{Provider: "http", Target: "reviewer"},
 	}
 	var requests []string
 	client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
@@ -61,7 +60,7 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	var pull Pull
-	pull.Number, pull.State, pull.Head.SHA = 3, "open", sha
+	pull.Number, pull.State, pull.Head.SHA, pull.Draft = 3, "open", sha, true
 	if err := service.observe(repo, pull, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -71,10 +70,29 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	if response.Code != 200 {
 		t.Fatalf("link failed: %s", response.Body)
 	}
-	for range 2 {
-		if err := service.dispatch(ctx, repo, 3); err != nil {
-			t.Fatal(err)
+	assign := func() {
+		t.Helper()
+		request := httptest.NewRequest("POST", "/v1/work/acme/project/3/assign", strings.NewReader(`{"role":"reviewer","github_login":"reviewer","route":{"provider":"http","target":"reviewer"}}`))
+		response := httptest.NewRecorder()
+		service.Handler().ServeHTTP(response, request)
+		if response.Code != 200 {
+			t.Fatalf("assign failed: %s", response.Body)
 		}
+	}
+	assign()
+	if err := service.dispatch(ctx, repo, 3); err != nil || len(requests) != 0 {
+		t.Fatalf("draft was dispatched: %v, %v", requests, err)
+	}
+	pull.Draft = false
+	if err := service.observe(repo, pull, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.dispatch(ctx, repo, 3); err != nil {
+		t.Fatal(err)
+	}
+	assign()
+	if err := service.dispatch(ctx, repo, 3); err != nil {
+		t.Fatal(err)
 	}
 	st, err := openState(service.store)
 	if err != nil {
@@ -83,8 +101,5 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	work := st.Work["acme/project#3"]
 	if work.Task.Delivery != "accepted" || work.Reviewer.Route.Session != "review-session/3" || strings.Join(requests, ",") != "prepare,deliver" {
 		t.Fatalf("unexpected work or duplicate delivery: %+v, %v", work, requests)
-	}
-	if repo.ReviewerRoute.Session != "" {
-		t.Fatal("mutated repository default")
 	}
 }

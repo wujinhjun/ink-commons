@@ -68,6 +68,20 @@ cp config.example.json config.json
 
 GitHub 的当前 PR 快照是状态来源。轮询间隔默认 60 秒。hook 路由候选保留七天，仅精确匹配 PR 已观察到的 head SHA。漏装 hook、首次观察之前 head 已变化或归属含糊时，可以用 `link` 补登记。
 
+## 为单条 PR 指定 reviewer
+
+GitHub 上开 Draft PR，等同砚发现并关联后，在 Mini 上执行：
+
+```sh
+ink review --github-login 'yanshi-reviewer[bot]' \
+  --target que-zhou-hermes --parent DISCORD_CHANNEL_ID \
+  https://github.com/owner/repository/pull/42
+```
+
+`--target` 是 cc-connect 项目，`--parent` 是 reviewer 可访问、同砚可创建 thread 的父频道。`--github-login` 是正式提交 review 的 GitHub 身份。用 `--session discord:THREAD_ID` 可以复用已有会话，只传 `--github-login` 则交给真人。开发 agent 可以用同一条命令代办。
+
+设好 reviewer 后，在 GitHub 标记 Ready for review。同砚在下一轮轮询中创建审查会话并派发任务。PR 已经是 Ready 时，指派会直接进入待派发。重复提交相同指派会保留已有会话和投递状态。修改后推送新 commit，同砚会沿用该 reviewer 复审。
+
 ## 本地 API
 
 ```sh
@@ -85,10 +99,16 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 | `GET /v1/work` | 列出已观察的 PR 和当前待办。 |
 | `GET /v1/work/{owner}/{repo}/{number}` | 查看一条 PR 的来源、负责人、审查版本和投递状态。 |
 | `POST /v1/work/{owner}/{repo}/{number}/link` | 手动关联未认领 PR。请求体提供 `github_login` 或 `route`。路由包含 `provider`、`target`、`session`。 |
-| `POST /v1/work/{owner}/{repo}/{number}/assign` | 为 `developer` 或 `reviewer` 更新负责人。传 `github_login` 即可转给人。传 `route` 可指定已有 bot 会话。 |
+| `POST /v1/work/{owner}/{repo}/{number}/assign` | 为 `developer` 或 `reviewer` 更新负责人。传 `github_login` 即可转给人。传 `route` 可指定已有 bot 会话。指定 reviewer 时也可以省略 `session`，让执行端按 `provider`、`target` 和适用的 `parent` 创建会话。 |
 | `POST /v1/work/{owner}/{repo}/{number}/retry` | 在下次轮询重试当前 bot 待办。先检查执行端是否已经开始，避免重复执行。 |
 | `POST /v1/pushes` | Git hook 提交候选关联记录。 |
 
 `assign` 修改未来任务的投递。接手之前如果 bot 正在工作，先在原执行端停止它，再接管目录或处理未提交改动。`accepted` 表示执行端接收请求，正式 GitHub review 或新的 PR 版本才表示工作状态推进。cc-connect 忙时可能跳过任务，待办仍可在 API 中查看、重试或转给人。
 
-未来可从 Discord 开发 thread 按需分配 worktree 和分支，见 [TODO](TODO.md)。
+## TODO
+
+- [ ] 在 Discord 开发 thread 提供原生 `/review` 命令，校验改派权限，并在同一个 thread 对应多条 PR 时让操作者选择 PR。命令复用同砚指派 API。
+
+- [ ] 将 daemon 状态从 `state.json` 迁移到 SQLite，保留现有 PR、会话绑定和投递记录，并提供备份与回滚方式。
+
+按需分配 worktree 和分支等事项见 [TODO](TODO.md)。

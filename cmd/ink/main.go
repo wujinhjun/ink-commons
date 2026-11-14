@@ -27,11 +27,13 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ink serve [-config FILE] [-data DIR] | ink pre-push REMOTE_URL")
+		return errors.New("usage: ink serve [-config FILE] [-data DIR] | ink pre-push REMOTE_URL | ink review [flags] PR_URL")
 	}
 	switch args[0] {
 	case "serve":
 		return serve(args[1:])
+	case "review":
+		return review(args[1:])
 	case "pre-push":
 		if len(args) != 2 {
 			return errors.New("usage: ink pre-push REMOTE_URL")
@@ -42,7 +44,7 @@ func run(args []string) error {
 		}
 		return nil
 	default:
-		return errors.New("expected serve or pre-push")
+		return errors.New("expected serve, pre-push, or review")
 	}
 }
 
@@ -98,12 +100,7 @@ func push(remote string) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{
-		Timeout: 2 * time.Second,
-		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dir, "ink.sock"))
-		}},
-	}
+	client := localClient(dir, 2*time.Second)
 	res, err := client.Post("http://ink/v1/pushes", "application/json", bytes.NewReader(data))
 	if err != nil {
 		return errors.New("daemon unavailable")
@@ -113,4 +110,13 @@ func push(remote string) error {
 		return fmt.Errorf("daemon HTTP %d", res.StatusCode)
 	}
 	return nil
+}
+
+func localClient(dir string, timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dir, "ink.sock"))
+		}},
+	}
 }
