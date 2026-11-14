@@ -1,0 +1,6 @@
+#!/bin/sh
+# Install in a managed checkout or call from its existing pre-push hook.
+if [ "$#" -ge 2 ]; then
+  "${INK_BIN:-ink}" pre-push "$2"
+fi
+exit 0

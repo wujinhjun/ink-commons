@@ -1,0 +1,91 @@
+package ink
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+func Serve(ctx context.Context, cfg Config, dir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("daemon state directory must be a directory with private permissions")
+	}
+	statePath := filepath.Join(dir, "state.json")
+	lock, err := lockState(statePath)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	service, err := NewService(cfg, statePath)
+	if err != nil {
+		return err
+	}
+	socket := filepath.Join(dir, "ink.sock")
+	if info, err := os.Lstat(socket); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return errors.New("ink.sock exists and is not a socket")
+		}
+		if err := os.Remove(socket); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	if err := os.Chmod(socket, 0600); err != nil {
+		return err
+	}
+
+	server := &http.Server{Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second}
+	pollCtx, cancel := context.WithCancel(ctx)
+	var done = make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Duration(cfg.PollSeconds) * time.Second)
+		defer ticker.Stop()
+		for {
+			service.Poll(pollCtx)
+			select {
+			case <-pollCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	defer func() { cancel(); <-done }()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		<-pollCtx.Done()
+		shutdown, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if err := server.Shutdown(shutdown); err != nil {
+			_ = server.Close()
+		}
+	}()
+	log.Printf("Ink Commons listening on Unix socket %s", socket)
+	err = server.Serve(ln)
+	cancel()
+	<-stopped
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}

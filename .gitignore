@@ -1,0 +1,6 @@
+/ink
+/config.json
+.env
+*.sock
+/state.json
+/state.json.lock
