@@ -55,10 +55,11 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), "state.json"), map[string]execution.Executor{httpagent.Name: executor})
+	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{httpagent.Name: executor})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { service.Close() })
 	var pull Pull
 	pull.Number, pull.State, pull.Head.SHA, pull.Draft = 3, "open", sha, true
 	if err := service.observe(repo, pull, nil); err != nil {
@@ -94,7 +95,7 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	if err := service.dispatch(ctx, repo, 3); err != nil {
 		t.Fatal(err)
 	}
-	st, err := openState(service.store)
+	st, err := service.store.load()
 	if err != nil {
 		t.Fatal(err)
 	}
