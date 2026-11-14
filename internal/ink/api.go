@@ -171,6 +171,16 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError{409, "delivery in progress"})
 		return
 	}
+	if action == "assign" && change.Role == "reviewer" && change.Route != nil && change.Route.Session == "" {
+		route := *change.Route
+		if repository, ok := s.repo(repo); ok {
+			route = allocationRoute(repository, route)
+		}
+		if err := execution.ValidatePreparation(s.providers, route, execution.Delivery{Role: "reviewer", Source: reviewSource(work)}); err != nil {
+			fail(w, apiError{400, err.Error()})
+			return
+		}
+	}
 	if err := applyChange(work, action, change); err != nil {
 		fail(w, err)
 		return

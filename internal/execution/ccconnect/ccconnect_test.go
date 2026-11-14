@@ -82,7 +82,7 @@ func TestReviewThreadFollowsDevelopmentConversation(t *testing.T) {
 		name, session, response, override, parent string
 	}{
 		{"public thread", "discord:123", `{"id":"123","type":11,"parent_id":"77","name":"实现同砚 SQLite"}`, "", "77"},
-		{"private thread with user", "discord:123:456", `{"id":"123","type":12,"parent_id":"77","name":"实现同砚 SQLite"}`, "", "77"},
+		{"public thread with user", "discord:123:456", `{"id":"123","type":11,"parent_id":"77","name":"实现同砚 SQLite"}`, "", "77"},
 		{"text channel", "discord:123", `{"id":"123","type":0,"name":"实现同砚 SQLite"}`, "", "123"},
 		{"explicit parent", "discord:123", `{"id":"123","type":11,"parent_id":"77","name":"实现同砚 SQLite"}`, "88", "88"},
 	} {
@@ -139,6 +139,8 @@ func TestInvalidDevelopmentConversationDoesNotAllocateElsewhere(t *testing.T) {
 		{"missing parent", "discord:123", `{"id":"123","type":11,"name":"dev"}`, 200},
 		{"wrong channel", "discord:123", `{"id":"456","type":11,"parent_id":"77","name":"dev"}`, 200},
 		{"unsupported channel", "discord:123", `{"id":"123","type":4,"name":"category"}`, 200},
+		{"announcement thread", "discord:123", `{"id":"123","type":10,"parent_id":"77","name":"dev"}`, 200},
+		{"private thread", "discord:123:456", `{"id":"123","type":12,"parent_id":"77","name":"private title"}`, 200},
 		{"invalid session", "discord:123:456:789", `{}`, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,6 +154,12 @@ func TestInvalidDevelopmentConversationDoesNotAllocateElsewhere(t *testing.T) {
 			_, err := executor.Prepare(context.Background(), execution.Route{Provider: Name, Target: "reviewer"}, execution.Delivery{Repository: "acme/project", Number: 42, Role: "reviewer", Source: &execution.Route{Provider: Name, Target: "dev", Session: tc.session}})
 			if err == nil {
 				t.Fatal("unresolved source accepted")
+			}
+			if tc.name == "announcement thread" && !strings.Contains(err.Error(), "announcement threads") {
+				t.Fatalf("missing announcement explanation: %v", err)
+			}
+			if tc.name == "private thread" && !strings.Contains(err.Error(), "private threads") {
+				t.Fatalf("missing visibility explanation: %v", err)
 			}
 		})
 	}
@@ -185,5 +193,47 @@ func TestReviewThreadNamePreservesPRAndUnicode(t *testing.T) {
 	}
 	if len([]rune(name)) != 100 || !strings.HasPrefix(name, "Review acme/project #42 · 同砚") {
 		t.Fatalf("invalid truncated name %q", name)
+	}
+}
+
+func TestExplicitParentSurvivesUnavailableSource(t *testing.T) {
+	for _, tc := range []struct {
+		name, session, response string
+		status                  int
+	}{
+		{"forbidden", "discord:123", `{}`, 403},
+		{"deleted", "discord:123", `{}`, 404},
+		{"invalid session", "discord:123:invalid", `{}`, 200},
+		{"announcement source", "discord:123", `{"id":"123","type":10,"parent_id":"77","name":"announcement"}`, 200},
+		{"private source", "discord:123", `{"id":"123","type":12,"parent_id":"77","name":"private title"}`, 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created := false
+			client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet {
+					return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.response))}, nil
+				}
+				if r.Method != http.MethodPost || r.URL.Path != "/api/v10/channels/88/threads" {
+					t.Fatalf("wrong destination: %s %s", r.Method, r.URL.Path)
+				}
+				var body struct {
+					Name string
+					Type int
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if body.Name != "Review acme/project #42" || body.Type != 11 {
+					t.Fatalf("unexpected fallback or leaked source title: %+v", body)
+				}
+				created = true
+				return &http.Response{StatusCode: 201, Body: io.NopCloser(strings.NewReader(`{"id":"99"}`))}, nil
+			})}
+			executor, _ := New(client, "", "", "discord-test")
+			session, err := executor.Prepare(context.Background(), execution.Route{Provider: Name, Target: "reviewer", Parent: "88"}, execution.Delivery{Repository: "acme/project", Number: 42, Source: &execution.Route{Provider: Name, Session: tc.session}})
+			if err != nil || session != "discord:99" || !created {
+				t.Fatalf("explicit parent failed: %s, %v", session, err)
+			}
+		})
 	}
 }

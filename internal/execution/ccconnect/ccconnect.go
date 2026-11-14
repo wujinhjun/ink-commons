@@ -53,42 +53,22 @@ func (e *Executor) Prepare(ctx context.Context, route execution.Route, task exec
 	parent := route.Parent
 	name := fmt.Sprintf("Review %s #%d", task.Repository, task.Number)
 	if source := task.Source; source != nil && source.Provider == Name {
-		channelID, err := discordChannel(source.Session)
-		if err != nil {
-			return "", fmt.Errorf("invalid development conversation: %w", err)
+		sourceParent, sourceName, err := e.developmentConversation(ctx, source.Session)
+		if err != nil && parent == "" {
+			return "", err
 		}
-		var channel struct {
-			ID     string `json:"id"`
-			Type   int    `json:"type"`
-			Parent string `json:"parent_id"`
-			Name   string `json:"name"`
+		if err == nil {
+			if parent == "" {
+				parent = sourceParent
+			}
+			// Keep the PR identifier even when a long Unicode title must be truncated.
+			prefix := fmt.Sprintf("Review %s #%d · ", task.Repository, task.Number)
+			if len([]rune(prefix)) > 90 {
+				prefix = fmt.Sprintf("Review #%d · ", task.Number)
+			}
+			title := []rune(sourceName)
+			name = prefix + string(title[:min(len(title), 100-len([]rune(prefix)))])
 		}
-		if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+channelID, "Bot "+e.discordToken, &channel); err != nil {
-			return "", fmt.Errorf("read development conversation: %w", err)
-		}
-		if channel.ID != channelID || strings.TrimSpace(channel.Name) == "" {
-			return "", fmt.Errorf("Discord returned an invalid development conversation")
-		}
-		sourceParent := channel.ID
-		switch channel.Type {
-		case 10, 11, 12:
-			sourceParent = channel.Parent
-		case 0: // A development session in a normal text channel.
-		default:
-			return "", fmt.Errorf("development conversation must be a Discord thread or text channel")
-		}
-		if !snowflake(sourceParent) {
-			return "", fmt.Errorf("development conversation has no valid parent channel")
-		}
-		if parent == "" {
-			parent = sourceParent
-		}
-		// Keep the PR identifier even when a long Unicode title must be truncated.
-		prefix := fmt.Sprintf("Review %s #%d · ", task.Repository, task.Number)
-		if len([]rune(prefix)) > 90 {
-			prefix = fmt.Sprintf("Review #%d · ", task.Number)
-		}
-		name = prefix + string([]rune(channel.Name)[:min(len([]rune(channel.Name)), 100-len([]rune(prefix)))])
 	}
 	if !snowflake(parent) {
 		return "", fmt.Errorf("new review session needs a Discord development conversation or an explicit parent")
@@ -108,6 +88,56 @@ func (e *Executor) Prepare(ctx context.Context, route execution.Route, task exec
 		return "", fmt.Errorf("Discord returned an invalid thread ID")
 	}
 	return "discord:" + thread.ID, nil
+}
+
+// ValidatePreparation performs the local checks that can be reported immediately
+// by assignment, without a Discord request or allocating a session.
+func (e *Executor) ValidatePreparation(route execution.Route, task execution.Delivery) error {
+	if route.Session != "" || route.Parent != "" {
+		return nil
+	}
+	if task.Source == nil || task.Source.Provider != Name {
+		return fmt.Errorf("new review session needs a Discord development conversation or an explicit parent")
+	}
+	if _, err := discordChannel(task.Source.Session); err != nil {
+		return fmt.Errorf("invalid development conversation: %w", err)
+	}
+	return nil
+}
+
+func (e *Executor) developmentConversation(ctx context.Context, session string) (string, string, error) {
+	channelID, err := discordChannel(session)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid development conversation: %w", err)
+	}
+	var channel struct {
+		ID     string `json:"id"`
+		Type   int    `json:"type"`
+		Parent string `json:"parent_id"`
+		Name   string `json:"name"`
+	}
+	if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+channelID, "Bot "+e.discordToken, &channel); err != nil {
+		return "", "", fmt.Errorf("read development conversation: %w", err)
+	}
+	if channel.ID != channelID || strings.TrimSpace(channel.Name) == "" {
+		return "", "", fmt.Errorf("Discord returned an invalid development conversation")
+	}
+	parent := channel.ID
+	switch channel.Type {
+	case 11:
+		parent = channel.Parent
+	case 0: // A development session in a normal text channel.
+	case 10:
+		return "", "", fmt.Errorf("automatic review placement does not support announcement threads; specify an explicit text-channel parent")
+	case 12:
+		return "", "", fmt.Errorf("automatic review placement does not support private threads; specify an explicit public review parent or an existing review session")
+	default:
+		return "", "", fmt.Errorf("development conversation must be a public Discord thread or text channel")
+	}
+	if !snowflake(parent) {
+		return "", "", fmt.Errorf("development conversation has no valid parent channel")
+	}
+	return parent, channel.Name, nil
 }
 
 func (e *Executor) Deliver(ctx context.Context, route execution.Route, task execution.Delivery) error {
