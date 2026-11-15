@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	_ "modernc.org/sqlite"
@@ -33,6 +34,18 @@ type stateStore struct{ db *sql.DB }
 func openStore(path string) (*stateStore, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
+		return nil, err
+	}
+	// A leftover migration backup proves that restoring an absent database must
+	// be deliberate. Do not replay a stale JSON snapshot after a failed restore.
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		backup := filepath.Join(filepath.Dir(path), legacyState+".pre-sqlite.bak")
+		if _, err := os.Lstat(backup); err == nil {
+			return nil, errors.New("state database is missing but a migration backup exists; restore the SQLite backup, or archive the migration backup before intentionally importing JSON")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, err
 	}
 	// Pre-create privately: SQLite's default file mode depends on the process umask.
@@ -154,14 +167,56 @@ func validateState(st state) error {
 }
 
 func decodeState(data []byte) (state, error) {
+	var raw struct {
+		Pushes []Push                     `json:"pushes"`
+		Work   map[string]json.RawMessage `json:"work"`
+	}
 	var st state
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&st); err != nil {
+	if err := d.Decode(&raw); err != nil {
 		return st, err
 	}
 	if d.Decode(new(any)) != io.EOF {
 		return st, errors.New("expected one state object")
+	}
+	st.Pushes = raw.Pushes
+	if raw.Work != nil {
+		st.Work = make(map[string]*Work, len(raw.Work))
+	}
+	for id, payload := range raw.Work {
+		entry := struct {
+			*Work
+			ReviewThread string `json:"review_thread_id"`
+		}{Work: &Work{}}
+		decoder := json.NewDecoder(bytes.NewReader(payload))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&entry); err != nil {
+			return st, fmt.Errorf("work %s: %w", id, err)
+		}
+		if entry.ReviewThread != "" {
+			if strings.Trim(entry.ReviewThread, "0123456789") != "" {
+				return st, fmt.Errorf("work %s: invalid legacy review_thread_id", id)
+			}
+			route := entry.Reviewer.Route
+			if route == nil || route.Provider != "cc-connect" || strings.TrimSpace(route.Target) == "" {
+				return st, fmt.Errorf("work %s: legacy review_thread_id needs a cc-connect reviewer route", id)
+			}
+			session := "discord:" + entry.ReviewThread
+			if route.Session != "" && route.Session != session {
+				user, sameThread := strings.CutPrefix(route.Session, session+":")
+				if !sameThread || user == "" || strings.Trim(user, "0123456789") != "" {
+					return st, fmt.Errorf("work %s: review_thread_id conflicts with reviewer session", id)
+				}
+			}
+			// Route.UnmarshalJSON already maps legacy project/session_key fields.
+			copy := *route
+			if copy.Session == "" {
+				copy.Session = session
+			}
+			entry.Reviewer.Route = &copy
+		}
+		st.Work[id] = entry.Work
 	}
 	return st, validateState(st)
 }
@@ -282,15 +337,56 @@ func writeNewFile(path string, data []byte) error {
 }
 
 func publishFile(temp, path string) error {
-	if err := os.Link(temp, path); err != nil {
-		return err
+	return publishFileWithLink(temp, path, os.Link)
+}
+
+func publishFileWithLink(temp, path string, link func(string, string) error) error {
+	if err := link(temp, path); err != nil {
+		if !errors.Is(err, syscall.ENOTSUP) && !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EXDEV) && !errors.Is(err, syscall.ENOSYS) {
+			return err
+		}
+		// Filesystems without hard links still get exclusive creation and fsync.
+		// An interrupted copy may leave an incomplete destination; migration will
+		// reject it on retry rather than accept a different/partial legacy backup.
+		if err := copyExclusiveFile(temp, path); err != nil {
+			return err
+		}
 	}
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
 	defer dir.Close()
-	return dir.Sync()
+	err = dir.Sync()
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+		return nil
+	}
+	return err
+}
+
+func copyExclusiveFile(source, destination string) (err error) {
+	sourceFile, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		output.Close()
+		if err != nil {
+			os.Remove(destination)
+		}
+	}()
+	if _, err = io.Copy(output, sourceFile); err != nil {
+		return err
+	}
+	if err = output.Sync(); err != nil {
+		return err
+	}
+	return output.Close()
 }
 
 // StateSnapshot requires the daemon to be stopped. It shares the legacy lock so

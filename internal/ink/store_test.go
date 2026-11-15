@@ -3,10 +3,13 @@ package ink
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -305,5 +308,159 @@ func TestSnapshotDoesNotCreateMissingDatabase(t *testing.T) {
 				t.Fatalf("created %s", path)
 			}
 		}
+	}
+}
+
+func TestMissingMigratedDatabaseDoesNotReplayLegacyTasks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, stateDatabase)
+	initial := storedFixture()
+	initial.Work["acme/project#42"].Task.Delivery = "pending"
+	data, _ := json.Marshal(initial)
+	if err := os.WriteFile(filepath.Join(dir, legacyState), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.Work["acme/project#42"].Task.Delivery = "accepted"
+	initial.Work["acme/project#42"].Task.Attempts++
+	if err := store.save(initial); err != nil {
+		t.Fatal(err)
+	}
+	store.db.Close()
+	backup := filepath.Join(dir, "current.sqlite3")
+	if err := StateSnapshot(dir, backup, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := openStore(path); err == nil {
+		reopened.db.Close()
+		t.Fatal("silently imported stale pending task")
+	} else if !strings.Contains(err.Error(), "database is missing") {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("failed startup created a new database")
+	}
+	restoredData, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, restoredData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.db.Close()
+	checkState(t, restored, initial)
+}
+
+func TestInterruptedMigrationWithMatchingBackupCanRetry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, stateDatabase)
+	fixture := storedFixture()
+	data, _ := json.Marshal(fixture)
+	for name, content := range map[string][]byte{stateDatabase: nil, legacyState: data, legacyState + ".pre-sqlite.bak": data} {
+		if err := os.WriteFile(filepath.Join(dir, name), content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	checkState(t, store, fixture)
+}
+
+func TestMigrationMapsLegacyReviewThreadWithoutReplayingDelivery(t *testing.T) {
+	for _, session := range []string{"", "discord:99", "discord:99:456", "discord:100"} {
+		t.Run(session, func(t *testing.T) {
+			dir := t.TempDir()
+			data := []byte(fmt.Sprintf(`{"work":{"acme/project#42":{"repo":"acme/project","pull_request":{"number":42,"state":"open"},"linked":true,"origin":{"project":"dev","session_key":"discord:123"},"developer":{"route":{"project":"dev","session_key":"discord:123"}},"reviewer":{"github_login":"reviewer","route":{"project":"reviewer","session_key":%q}},"review_thread_id":"99","phase":"review_pending","task":{"role":"reviewer","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","delivery":"accepted","attempts":3}}}}`, session))
+			if err := os.WriteFile(filepath.Join(dir, legacyState), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := openStore(filepath.Join(dir, stateDatabase))
+			if session == "discord:100" {
+				if err == nil {
+					store.db.Close()
+					t.Fatal("conflicting reviewer session migrated")
+				}
+				if !strings.Contains(err.Error(), "conflicts") {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.db.Close()
+			st, err := store.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			work := st.Work["acme/project#42"]
+			wantSession := session
+			if wantSession == "" {
+				wantSession = "discord:99"
+			}
+			if work.Reviewer.Route.Provider != "cc-connect" || work.Reviewer.Route.Target != "reviewer" || work.Reviewer.Route.Session != wantSession || work.Origin.Session != "discord:123" || work.Task.Delivery != "accepted" || work.Task.Attempts != 3 {
+				t.Fatalf("legacy binding/delivery changed: %+v", work)
+			}
+			backup, err := os.ReadFile(filepath.Join(dir, legacyState+".pre-sqlite.bak"))
+			if err != nil || !bytes.Equal(backup, data) {
+				t.Fatal("legacy source not preserved byte-for-byte")
+			}
+		})
+	}
+}
+
+func TestPublishFallbackPreservesBytesPermissionsAndNoOverwrite(t *testing.T) {
+	for _, unsupported := range []error{syscall.ENOTSUP, syscall.EPERM, syscall.EXDEV, syscall.ENOSYS} {
+		t.Run(unsupported.Error(), func(t *testing.T) {
+			dir := t.TempDir()
+			source, destination := filepath.Join(dir, "source"), filepath.Join(dir, "backup")
+			data := bytes.Repeat([]byte("current database snapshot\n"), 1024)
+			if err := os.WriteFile(source, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			noLink := func(string, string) error { return unsupported }
+			if err := publishFileWithLink(source, destination, noLink); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(destination)
+			if err != nil || !bytes.Equal(got, data) {
+				t.Fatal("fallback backup changed")
+			}
+			info, err := os.Stat(destination)
+			if err != nil || info.Mode().Perm() != 0600 {
+				t.Fatal("fallback backup not private")
+			}
+			if err := os.WriteFile(source, []byte("new data"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := publishFileWithLink(source, destination, noLink); !errors.Is(err, os.ErrExist) {
+				t.Fatalf("fallback overwrote existing file: %v", err)
+			}
+			got, _ = os.ReadFile(destination)
+			if !bytes.Equal(got, data) {
+				t.Fatal("existing backup was overwritten")
+			}
+		})
+	}
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "failed-copy")
+	if err := copyExclusiveFile(dir, destination); err == nil {
+		t.Fatal("copy from directory succeeded")
+	}
+	if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatal("failed copy left a partial output")
 	}
 }
