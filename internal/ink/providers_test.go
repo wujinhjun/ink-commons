@@ -106,17 +106,28 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	}
 }
 
-func TestConfiguredParentAndOriginAfterHumanTakeover(t *testing.T) {
-	for _, takeover := range []bool{false, true} {
-		t.Run(map[bool]string{false: "current developer", true: "origin after human takeover"}[takeover], func(t *testing.T) {
+func TestReviewPlacementIgnoresRepositoryParent(t *testing.T) {
+	for _, mode := range []string{"repository default", "assignment", "human takeover", "explicit parent", "unreadable source"} {
+		takeover := mode == "human takeover"
+		parent := "77"
+		if mode == "explicit parent" {
+			parent = "66"
+		}
+		t.Run(mode, func(t *testing.T) {
 			var operations []string
 			client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
 				operations = append(operations, r.Method+" "+r.URL.Path)
 				w := httptest.NewRecorder()
 				switch r.Method + " " + r.URL.Path {
 				case "GET /api/v10/channels/123":
-					reply(w, 404, map[string]string{"error": "deleted source"})
-				case "POST /api/v10/channels/88/threads":
+					if mode == "unreadable source" {
+						reply(w, 404, map[string]string{"error": "deleted source"})
+						break
+					}
+					reply(w, 200, map[string]any{"id": "123", "type": 11, "parent_id": "77", "name": "Development"})
+				case "GET /api/v10/channels/77":
+					reply(w, 200, map[string]any{"id": "77", "type": 0})
+				case "POST /api/v10/channels/" + parent + "/threads":
 					var body struct {
 						Name string
 						Type int
@@ -124,7 +135,7 @@ func TestConfiguredParentAndOriginAfterHumanTakeover(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 						t.Fatal(err)
 					}
-					if body.Name != "Review acme/project #3" || body.Type != 11 {
+					if body.Name != "Review acme/project #3 · Development" || body.Type != 11 {
 						t.Fatalf("bad fallback: %+v", body)
 					}
 					reply(w, 201, map[string]string{"id": "99"})
@@ -162,9 +173,13 @@ func TestConfiguredParentAndOriginAfterHumanTakeover(t *testing.T) {
 			if takeover {
 				request("assign", `{"role":"developer","github_login":"human-dev"}`)
 			}
-			// Omit parent in the request while targeting the configured reviewer. Both
-			// assignment validation and dispatch must use the repository fallback.
-			request("assign", `{"role":"reviewer","github_login":"reviewer","route":{"provider":"cc-connect","target":"reviewer"}}`)
+			if mode != "repository default" {
+				parentJSON := ""
+				if mode == "explicit parent" {
+					parentJSON = `,"parent":"66"`
+				}
+				request("assign", `{"role":"reviewer","github_login":"assigned-reviewer","route":{"provider":"cc-connect","target":"reviewer"`+parentJSON+`}}`)
+			}
 			pull.Draft = false
 			if err := service.observe(repo, pull, nil); err != nil {
 				t.Fatal(err)
@@ -177,11 +192,20 @@ func TestConfiguredParentAndOriginAfterHumanTakeover(t *testing.T) {
 				t.Fatal(err)
 			}
 			work := st.Work["acme/project#3"]
+			if mode == "unreadable source" {
+				if work.Reviewer.Route.Session != "" || !strings.Contains(work.Task.Error, "read development conversation") || strings.Join(operations, ",") != "GET /api/v10/channels/123" {
+					t.Fatalf("unreadable source fell back to a different channel: %+v, %v", work.Task, operations)
+				}
+				return
+			}
 			if work.Task.Delivery != "accepted" || work.Reviewer.Route.Session != "discord:99" {
 				t.Fatalf("dispatch failed: %+v", work.Task)
 			}
-			if strings.Join(operations, ",") != "GET /api/v10/channels/123,POST /api/v10/channels/88/threads,POST /hook" {
-				t.Fatalf("missing origin lookup or fallback: %v", operations)
+			if strings.Join(operations, ",") != "GET /api/v10/channels/123,GET /api/v10/channels/77,POST /api/v10/channels/"+parent+"/threads,POST /hook" {
+				t.Fatalf("wrong review placement: %v", operations)
+			}
+			if repo.ReviewerRoute.Parent != "88" {
+				t.Fatal("mutated repository config")
 			}
 			if takeover && work.Developer.Route != nil {
 				t.Fatal("test did not exercise human takeover")
@@ -195,7 +219,7 @@ func TestReviewerAssignmentRejectsMissingSourceBeforeMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer"}
+	repo := Repository{Repo: "acme/project", ReviewerLogin: "default-reviewer", ReviewerRoute: &execution.Route{Provider: ccconnect.Name, Target: "reviewer", Parent: "88"}}
 	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: executor})
 	if err != nil {
 		t.Fatal(err)
@@ -225,7 +249,7 @@ func TestReviewerAssignmentRejectsMissingSourceBeforeMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Work["acme/project#3"].Reviewer.Route != nil {
+	if got := st.Work["acme/project#3"].Reviewer; got.GitHubLogin != "default-reviewer" || got.Route.Parent != "" || got.Route.Session != "" {
 		t.Fatal("rejected assignment changed reviewer")
 	}
 }

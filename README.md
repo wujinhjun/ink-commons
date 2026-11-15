@@ -35,8 +35,7 @@ ink register
     "reviewer_command": "your-reviewer-cli",
     "reviewer_route": {
       "provider": "cc-connect",
-      "target": "reviewer-project",
-      "parent": "123456789012345678"
+      "target": "reviewer-project"
     }
   },
   "repositories": []
@@ -47,7 +46,7 @@ ink register
 
 ```sh
 ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-cli \
-  --target reviewer-project --parent 123456789012345678 owner/repository
+  --target reviewer-project owner/repository
 ```
 
 注册管理的是 GitHub 仓库，不安装 Git hook。自动关联开发会话仍需安装前述 pre-push hook，或通过 `link` 登记。只注册仓库不会把未认领 PR 自动指派给某个开发会话。
@@ -105,7 +104,7 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 }
 ```
 
-`target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。显式 `parent` 可以覆盖创建位置；已有仓库默认路由中的 `parent` 继续生效。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
+`target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。单条 PR 指派中的显式 `parent` 可以覆盖创建位置；仓库及 `repository_defaults` 路由中的 `parent` 不再用于新建 cc-connect 审查会话，遗留配置无需清理即可默认跟随开发频道。已有工作项保存的路由和审查会话保持原位；需要迁移时，应先确认旧执行结束，再按 PR 重新指派。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
 
 ### 通用 HTTP
 

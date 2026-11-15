@@ -24,7 +24,7 @@ func register(args []string) error {
 	command := flags.String("github-command", "", "reviewer GitHub CLI/App command")
 	provider := flags.String("provider", "cc-connect", "review execution provider")
 	target := flags.String("target", "", "review execution target")
-	parent := flags.String("parent", "", "review parent channel")
+	parent := flags.String("parent", "", "legacy parent (ignored for new cc-connect review threads; use ink review --parent per PR)")
 	session := flags.String("session", "", "existing reviewer session")
 	developer := flags.String("developer", "", "human developer login")
 	hook := flags.String("post-approval", "", "absolute path of postApproval executable; receives event JSON on stdin")
