@@ -75,12 +75,13 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 
 	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer-bot", ReviewerRoute: &execution.Route{Provider: "test", Target: "reviewer"}}
 	cfg := Config{Repositories: []Repository{repo}}
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), stateDatabase)
 	makeService := func() *Service {
 		service, err := NewService(cfg, path, map[string]execution.Executor{"test": executor})
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { service.Close() })
 		service.up.github = "https://stub.invalid"
 		transport := testTransport(func(r *http.Request) (*http.Response, error) {
 			w := httptest.NewRecorder()
@@ -148,6 +149,10 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 	if source := executor.preparedTasks[0].Source; source == nil || source.Session != "dev-session" {
 		t.Fatalf("missing preparation source: %+v", source)
 	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	s = makeService()
 	poll()
 	if executor.prepared != 1 || len(executor.deliveries) != 1 {

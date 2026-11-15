@@ -70,7 +70,7 @@ func decode(w http.ResponseWriter, r *http.Request, result any) error {
 
 func (s *Service) listWork(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	st, err := openState(s.store)
+	st, err := s.store.load()
 	s.mu.Unlock()
 	if err != nil {
 		fail(w, err)
@@ -105,7 +105,7 @@ func (s *Service) pushes(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := openState(s.store)
+	st, err := s.store.load()
 	if err != nil {
 		fail(w, err)
 		return
@@ -113,7 +113,7 @@ func (s *Service) pushes(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	prunePushes(&st, now)
 	s.recordPushes(&st, input, now)
-	if err := saveState(s.store, st); err != nil {
+	if err := s.store.save(st); err != nil {
 		fail(w, err)
 		return
 	}
@@ -144,7 +144,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := openState(s.store)
+	st, err := s.store.load()
 	if err != nil {
 		fail(w, err)
 		return
@@ -189,7 +189,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	if err := saveState(s.store, st); err != nil {
+	if err := s.store.save(st); err != nil {
 		fail(w, err)
 		return
 	}

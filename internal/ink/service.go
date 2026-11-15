@@ -13,7 +13,7 @@ import (
 )
 
 type Service struct {
-	store      string
+	store      *stateStore
 	config     Config
 	up         upstream
 	mu         sync.Mutex
@@ -22,11 +22,18 @@ type Service struct {
 }
 
 func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
-	if _, err := openState(path); err != nil {
+	store, err := openStore(path)
+	if err != nil {
 		return nil, err
 	}
-	return &Service{store: path, config: config, up: newUpstream(config.GitHubToken), providers: providers, delivering: make(map[string]bool)}, nil
+	if _, err := store.load(); err != nil {
+		store.db.Close()
+		return nil, err
+	}
+	return &Service{store: store, config: config, up: newUpstream(config.GitHubToken), providers: providers, delivering: make(map[string]bool)}, nil
 }
+
+func (s *Service) Close() error { return s.store.db.Close() }
 
 func (s *Service) repo(name string) (Repository, bool) {
 	for _, r := range s.config.Repositories {
@@ -95,7 +102,7 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 		return err
 	}
 	s.mu.Lock()
-	snapshot, err := openState(s.store)
+	snapshot, err := s.store.load()
 	s.mu.Unlock()
 	if err != nil {
 		return err
@@ -142,7 +149,7 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := openState(s.store)
+	st, err := s.store.load()
 	if err != nil {
 		return err
 	}
@@ -167,7 +174,7 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		work.Reviews = mergeReviews(work.Reviews, reviews)
 	}
 	work.derive()
-	return saveState(s.store, st)
+	return s.store.save(st)
 }
 
 func mergeReviews(previous, current []Review) []Review {
@@ -204,7 +211,7 @@ func prunePushes(st *state, now time.Time) {
 func (s *Service) beginDelivery(id string) (*Work, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := openState(s.store)
+	st, err := s.store.load()
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +224,7 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 	// during delivery, the operator can inspect the unknown outcome before retrying.
 	work.Task.Delivery, work.Task.Error = "unknown", "delivery interrupted or in progress"
 	work.Task.Attempts++
-	if err := saveState(s.store, st); err != nil {
+	if err := s.store.save(st); err != nil {
 		return nil, err
 	}
 	s.delivering[id] = true
@@ -228,12 +235,12 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Reload so hooks and operations on other PRs can save while delivery runs.
-	st, err := openState(s.store)
+	st, err := s.store.load()
 	if err != nil {
 		return err
 	}
 	st.Work[id] = work
-	return saveState(s.store, st)
+	return s.store.save(st)
 }
 
 func (s *Service) dispatch(ctx context.Context, repo Repository, number int) error {

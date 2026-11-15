@@ -25,8 +25,8 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
 		return fmt.Errorf("daemon state directory must be a directory with private permissions")
 	}
-	statePath := filepath.Join(dir, "state.json")
-	lock, err := lockState(statePath)
+	statePath := filepath.Join(dir, stateDatabase)
+	lock, err := lockState(filepath.Join(dir, legacyState))
 	if err != nil {
 		return err
 	}
@@ -35,6 +35,8 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 	if err != nil {
 		return err
 	}
+	defer service.Close()
+
 	socket := filepath.Join(dir, "ink.sock")
 	if info, err := os.Lstat(socket); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {

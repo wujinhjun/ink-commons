@@ -27,11 +27,13 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ink serve [-config FILE] [-data DIR] | ink pre-push REMOTE_URL | ink review [flags] PR_URL")
+		return errors.New("usage: ink serve [-config FILE] [-data DIR] | ink pre-push REMOTE_URL | ink review [flags] PR_URL | ink state backup|export [flags]")
 	}
 	switch args[0] {
 	case "serve":
 		return serve(args[1:])
+	case "state":
+		return stateCommand(args[1:])
 	case "review":
 		return review(args[1:])
 	case "pre-push":
@@ -44,7 +46,7 @@ func run(args []string) error {
 		}
 		return nil
 	default:
-		return errors.New("expected serve, pre-push, or review")
+		return errors.New("expected serve, pre-push, review, or state")
 	}
 }
 

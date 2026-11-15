@@ -56,10 +56,11 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), "state.json"), map[string]execution.Executor{httpagent.Name: executor})
+	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{httpagent.Name: executor})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { service.Close() })
 	var pull Pull
 	pull.Number, pull.State, pull.Head.SHA, pull.Draft = 3, "open", sha, true
 	if err := service.observe(repo, pull, nil); err != nil {
@@ -95,7 +96,7 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	if err := service.dispatch(ctx, repo, 3); err != nil {
 		t.Fatal(err)
 	}
-	st, err := openState(service.store)
+	st, err := service.store.load()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,10 +140,11 @@ func TestConfiguredParentAndOriginAfterHumanTakeover(t *testing.T) {
 				t.Fatal(err)
 			}
 			repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer", ReviewerRoute: &execution.Route{Provider: ccconnect.Name, Target: "reviewer", Parent: "88"}}
-			service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), "state.json"), map[string]execution.Executor{ccconnect.Name: executor})
+			service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: executor})
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { service.Close() })
 			var pull Pull
 			pull.Number, pull.State, pull.Draft, pull.Head.SHA = 3, "open", true, strings.Repeat("a", 40)
 			if err := service.observe(repo, pull, nil); err != nil {
@@ -170,7 +172,7 @@ func TestConfiguredParentAndOriginAfterHumanTakeover(t *testing.T) {
 			if err := service.dispatch(context.Background(), repo, 3); err != nil {
 				t.Fatal(err)
 			}
-			st, err := openState(service.store)
+			st, err := service.store.load()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,10 +196,11 @@ func TestReviewerAssignmentRejectsMissingSourceBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer"}
-	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), "state.json"), map[string]execution.Executor{ccconnect.Name: executor})
+	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: executor})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { service.Close() })
 	var pull Pull
 	pull.Number, pull.State, pull.Head.SHA = 3, "open", strings.Repeat("a", 40)
 	if err := service.observe(repo, pull, nil); err != nil {
@@ -218,7 +221,7 @@ func TestReviewerAssignmentRejectsMissingSourceBeforeMutation(t *testing.T) {
 	if response.Code != 400 || !strings.Contains(response.Body.String(), "Discord development conversation") {
 		t.Fatalf("missing immediate validation: %d %s", response.Code, response.Body)
 	}
-	st, err := openState(service.store)
+	st, err := service.store.load()
 	if err != nil {
 		t.Fatal(err)
 	}
