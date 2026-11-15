@@ -15,6 +15,10 @@ import (
 )
 
 type workChange struct {
+	TaskID      string           `json:"task_id,omitempty"`
+	AttemptID   string           `json:"attempt_id,omitempty"`
+	Stopped     bool             `json:"stopped,omitempty"`
+	Reason      string           `json:"reason,omitempty"`
 	Role        string           `json:"role,omitempty"`
 	GitHubLogin string           `json:"github_login,omitempty"`
 	Route       *execution.Route `json:"route,omitempty"`
@@ -222,13 +226,40 @@ func applyChange(work *Work, action string, change workChange) error {
 			return apiError{400, "role must be developer or reviewer"}
 		}
 		if work.Task != nil && work.Task.Role == change.Role {
-			work.Task = nil
+			work.replaceTask(nil)
+		}
+	case "confirm-stopped":
+		if !change.Stopped || strings.TrimSpace(change.Reason) == "" || change.TaskID == "" || change.AttemptID == "" {
+			return apiError{400, "task_id, attempt_id, stopped=true and reason are required"}
+		}
+		found := false
+		for _, t := range work.executionTasks() {
+			if t.ID != change.TaskID {
+				continue
+			}
+			for i := range t.Runs {
+				a := &t.Runs[i]
+				if a.ID != change.AttemptID {
+					continue
+				}
+				if execution.Terminal(a.State) {
+					return apiError{409, "attempt already ended"}
+				}
+				a.State, a.EndedAt, a.ManualReason, a.Error = "stopped", time.Now(), change.Reason, ""
+				found = true
+			}
+		}
+		if !found {
+			return apiError{404, "execution attempt not found"}
 		}
 	case "retry":
+		if work.executionBlocked() {
+			return apiError{409, "confirm all previous executions stopped before retry"}
+		}
 		if work.Task == nil || (work.Task.Delivery != "unknown" && work.Task.Delivery != "accepted") {
 			return apiError{409, "no retryable task"}
 		}
-		work.Task.Delivery, work.Task.Error = "pending", ""
+		work.Task.Delivery, work.Task.Error, work.Task.RetryAt = "pending", "", time.Time{}
 	default:
 		return apiError{404, fmt.Sprintf("unknown action %q", action)}
 	}

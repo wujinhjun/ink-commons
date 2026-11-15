@@ -21,7 +21,20 @@ func New(client *http.Client, endpoint, token string) (*Executor, error) {
 	return &Executor{client: client, endpoint: endpoint, token: token}, nil
 }
 
+// NewManaged opts into status/stop operations. Legacy HTTP endpoints must never
+// receive these operations implicitly: some treat every POST as a delivery.
+func NewManaged(client *http.Client, endpoint, token string) (*Executor, error) {
+	e, err := New(client, endpoint, token)
+	if err == nil {
+		e.managed = true
+	}
+	return e, err
+}
+
+func (e *Executor) MonitoringEnabled() bool { return e.managed }
+
 type Executor struct {
+	managed  bool
 	client   *http.Client
 	endpoint string
 	token    string
@@ -51,9 +64,26 @@ func (e *Executor) Deliver(ctx context.Context, route execution.Route, task exec
 	return nil
 }
 
+func (e *Executor) Status(ctx context.Context, route execution.Route, task execution.Delivery) (execution.Receipt, error) {
+	if !e.managed {
+		return execution.Receipt{}, fmt.Errorf("HTTP execution monitoring is not enabled")
+	}
+	response, err := e.call(ctx, "status", route, task)
+	return response.Receipt, err
+}
+
+func (e *Executor) Stop(ctx context.Context, route execution.Route, task execution.Delivery) (execution.Receipt, error) {
+	if !e.managed {
+		return execution.Receipt{}, fmt.Errorf("HTTP execution monitoring is not enabled")
+	}
+	response, err := e.call(ctx, "stop", route, task)
+	return response.Receipt, err
+}
+
 type providerResponse struct {
-	Session string `json:"session"`
-	Status  string `json:"status"`
+	Receipt execution.Receipt `json:"receipt"`
+	Session string            `json:"session"`
+	Status  string            `json:"status"`
 }
 
 func (e *Executor) call(ctx context.Context, operation string, route execution.Route, task execution.Delivery) (providerResponse, error) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,5 +41,32 @@ func TestLegacyCCConnectConfigAndRoute(t *testing.T) {
 	}
 	if route != routeFromEnv(getenv) || route != (execution.Route{Provider: ccconnect.Name, Target: "dev", Session: "discord:19"}) {
 		t.Fatalf("legacy routing mismatch: %+v", route)
+	}
+}
+
+func TestExecutionConfigRequiresExplicitMonitoring(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		body := fmt.Sprintf(`{"http_provider_url":"http://127.0.0.1:9999","http_provider_execution":%v,"execution":{"ack_seconds":5,"max_attempts":1},"repositories":[{"repo":"acme/project","reviewer_login":"reviewer"}]}`, enabled)
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, providers, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		capability, ok := providers["http"].(interface{ MonitoringEnabled() bool })
+		if !ok || capability.MonitoringEnabled() != enabled || cfg.Reliability.ACKSeconds != 5 || cfg.Reliability.MaxAttempts != 1 {
+			t.Fatal("execution configuration not applied")
+		}
+	}
+	for _, extra := range []string{`"http_provider_execution":true,`, `"execution":{"ack_seconds":-1},`, `"execution":{"max_attempts":101},`} {
+		path := filepath.Join(t.TempDir(), "invalid.json")
+		if err := os.WriteFile(path, []byte(`{`+extra+`"repositories":[{"repo":"acme/project","reviewer_login":"reviewer"}]}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := loadConfig(path); err == nil {
+			t.Fatal("invalid execution configuration accepted", extra)
+		}
 	}
 }

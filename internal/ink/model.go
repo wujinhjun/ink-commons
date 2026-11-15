@@ -1,6 +1,7 @@
 package ink
 
 import (
+	"github.com/google/uuid"
 	"strings"
 	"time"
 
@@ -47,14 +48,34 @@ type Review struct {
 	} `json:"user"`
 }
 
+type Attempt struct {
+	StopRequestedAt time.Time          `json:"stop_requested_at,omitempty"`
+	RecoveryReason  string             `json:"recovery_reason,omitempty"`
+	RetryAt         time.Time          `json:"retry_at,omitempty"`
+	State           string             `json:"state"`
+	Legacy          bool               `json:"legacy,omitempty"`
+	ID              string             `json:"attempt_id"`
+	Number          int                `json:"number"`
+	Route           execution.Route    `json:"route"`
+	Request         execution.Delivery `json:"request"`
+	Receipt         execution.Receipt  `json:"receipt"`
+	CreatedAt       time.Time          `json:"created_at"`
+	EndedAt         time.Time          `json:"ended_at,omitempty"`
+	Error           string             `json:"error,omitempty"`
+	ManualReason    string             `json:"manual_reason,omitempty"`
+}
+
 type Task struct {
-	Role      string `json:"role"`
-	SHA       string `json:"sha"`
-	ReviewID  int64  `json:"review_id,omitempty"`
-	ReviewURL string `json:"review_url,omitempty"`
-	Delivery  string `json:"delivery"`
-	Error     string `json:"error,omitempty"`
-	Attempts  int    `json:"attempts"`
+	ID        string    `json:"task_id,omitempty"`
+	Runs      []Attempt `json:"runs,omitempty"`
+	RetryAt   time.Time `json:"retry_at,omitempty"`
+	Role      string    `json:"role"`
+	SHA       string    `json:"sha"`
+	ReviewID  int64     `json:"review_id,omitempty"`
+	ReviewURL string    `json:"review_url,omitempty"`
+	Delivery  string    `json:"delivery"`
+	Error     string    `json:"error,omitempty"`
+	Attempts  int       `json:"attempts"`
 }
 
 type Work struct {
@@ -66,6 +87,7 @@ type Work struct {
 	Reviewer  Assignee         `json:"reviewer"`
 	Phase     string           `json:"phase"`
 	Task      *Task            `json:"task,omitempty"`
+	History   []*Task          `json:"execution_history,omitempty"`
 	Reviews   []Review         `json:"reviews,omitempty"`
 }
 
@@ -75,15 +97,17 @@ func (w *Work) derive() {
 		if w.Pull.Merged {
 			w.Phase = "merged"
 		}
-		w.Task = nil
+		w.replaceTask(nil)
 		return
 	}
 	if !w.Linked {
-		w.Phase, w.Task = "unclaimed", nil
+		w.Phase = "unclaimed"
+		w.replaceTask(nil)
 		return
 	}
 	if w.Pull.Draft {
-		w.Phase, w.Task = "draft", nil
+		w.Phase = "draft"
+		w.replaceTask(nil)
 		return
 	}
 	var latest *Review
@@ -99,7 +123,8 @@ func (w *Work) derive() {
 		return
 	}
 	if latest.State == "APPROVED" {
-		w.Phase, w.Task = "approved", nil
+		w.Phase = "approved"
+		w.replaceTask(nil)
 		return
 	}
 	w.Phase = "changes_requested"
@@ -114,5 +139,32 @@ func (w *Work) setTask(task Task, assignee Assignee) {
 	if assignee.Route != nil {
 		task.Delivery = "pending"
 	}
-	w.Task = &task
+	task.ID = uuid.NewString()
+	w.replaceTask(&task)
+}
+
+func (w *Work) replaceTask(task *Task) {
+	if w.Task != nil && len(w.Task.Runs) > 0 {
+		w.History = append(w.History, w.Task)
+	}
+	w.Task = task
+}
+
+func (w *Work) executionTasks() []*Task {
+	tasks := append([]*Task{}, w.History...)
+	if w.Task != nil {
+		tasks = append(tasks, w.Task)
+	}
+	return tasks
+}
+
+func (w *Work) executionBlocked() bool {
+	for _, t := range w.executionTasks() {
+		for _, a := range t.Runs {
+			if !execution.Terminal(a.State) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -22,9 +22,11 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 			ReviewerProject string `json:"reviewer_project,omitempty"`
 			ReviewChannel   string `json:"review_channel_id,omitempty"`
 		} `json:"repositories"`
-		PollSeconds  int    `json:"poll_seconds"`
-		CCConnectURL string `json:"cc_connect_url"`
-		HTTPURL      string `json:"http_provider_url,omitempty"`
+		Reliability   ink.Reliability `json:"execution"`
+		PollSeconds   int             `json:"poll_seconds"`
+		CCConnectURL  string          `json:"cc_connect_url"`
+		HTTPURL       string          `json:"http_provider_url,omitempty"`
+		HTTPExecution bool            `json:"http_provider_execution,omitempty"`
 	}
 	var cfg ink.Config
 	f, err := os.Open(path)
@@ -40,6 +42,10 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	var extra json.RawMessage
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return cfg, nil, fmt.Errorf("expected one configuration object")
+	}
+	cfg.Reliability = file.Reliability
+	if err := cfg.Reliability.Validate(); err != nil {
+		return cfg, nil, err
 	}
 	cfg.PollSeconds = file.PollSeconds
 	cfg.GitHubToken = os.Getenv("INK_GITHUB_TOKEN")
@@ -65,13 +71,20 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	}
 	providers := map[string]execution.Executor{ccconnect.Name: cc}
 	if file.HTTPURL != "" {
-		agent, err := httpagent.New(client, file.HTTPURL, os.Getenv("INK_HTTP_PROVIDER_TOKEN"))
+		newAgent := httpagent.New
+		if file.HTTPExecution {
+			newAgent = httpagent.NewManaged
+		}
+		agent, err := newAgent(client, file.HTTPURL, os.Getenv("INK_HTTP_PROVIDER_TOKEN"))
 		if err != nil {
 			return cfg, nil, err
 		}
 		providers[httpagent.Name] = agent
 	}
 
+	if file.HTTPExecution && file.HTTPURL == "" {
+		return cfg, nil, fmt.Errorf("http_provider_execution requires http_provider_url")
+	}
 	seen := make(map[string]bool)
 	for _, entry := range file.Repositories {
 		repo := entry.Repository

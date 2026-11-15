@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Route addresses an executor and an optional reusable session. Parent is an
@@ -47,6 +48,9 @@ func (r *Route) UnmarshalJSON(data []byte) error {
 
 // Delivery is the work description shared by execution providers.
 type Delivery struct {
+	TaskID     string `json:"task_id,omitempty"`
+	AttemptID  string `json:"attempt_id,omitempty"`
+	Attempt    int    `json:"attempt,omitempty"`
 	Repository string `json:"repository"`
 	Number     int    `json:"pull_number"`
 	URL        string `json:"pull_url"`
@@ -88,4 +92,28 @@ func ValidatePreparation(providers map[string]Executor, route Route, task Delive
 		return provider.ValidatePreparation(route, task)
 	}
 	return nil
+}
+
+// Receipt is an authenticated snapshot obtained from the executor, not a
+// workflow result. Terminal states promise the attempt can no longer act.
+type Receipt struct {
+	TaskID      string    `json:"task_id"`
+	AttemptID   string    `json:"attempt_id"`
+	Sequence    int64     `json:"sequence"`
+	State       string    `json:"state"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	HeartbeatAt time.Time `json:"heartbeat_at,omitempty"`
+	FinishedAt  time.Time `json:"finished_at,omitempty"`
+}
+
+func Terminal(state string) bool {
+	return state == "succeeded" || state == "failed" || state == "stopped"
+}
+
+// Monitor is optional. Status must use durable executor ownership, and Stop
+// must fence delayed deliveries as well as stop all side effects before returning
+// a terminal receipt. A missing record is unknown, never proof of termination.
+type Monitor interface {
+	Status(context.Context, Route, Delivery) (Receipt, error)
+	Stop(context.Context, Route, Delivery) (Receipt, error)
 }

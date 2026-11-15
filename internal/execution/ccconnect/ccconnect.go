@@ -157,7 +157,7 @@ func (e *Executor) Deliver(ctx context.Context, route execution.Route, task exec
 	if e.endpoint == "" {
 		return fmt.Errorf("cc-connect endpoint is not configured")
 	}
-	prompt := fmt.Sprintf("Ink Commons %s task for PR %s\nCommit: %s\n", task.Role, task.URL, task.SHA)
+	prompt := fmt.Sprintf("Ink Commons %s task for PR %s\nCommit: %s\nTask: %s\nAttempt: %s (%d)\n", task.Role, task.URL, task.SHA, task.TaskID, task.AttemptID, task.Attempt)
 	if task.Role == "reviewer" {
 		prompt += "Review this exact commit and submit the official review in GitHub against that commit. Use Approve or Request changes."
 	} else {
