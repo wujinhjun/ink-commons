@@ -95,7 +95,8 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 
 | 接口 | 行为 |
 |---|---|
-| `GET /healthz` | 检查本地 API 可达。 |
+| `GET /healthz` | 查看运行 revision、gate、last_poll 和 last_github_ok。 |
+| `GET /v1/self-check` | 由 daemon 用自身环境验证所有配置仓库的 PR 读取权限，不派发任务。 |
 | `GET /v1/work` | 列出已观察的 PR 和当前待办。 |
 | `GET /v1/work/{owner}/{repo}/{number}` | 查看一条 PR 的来源、负责人、审查版本和投递状态。 |
 | `POST /v1/work/{owner}/{repo}/{number}/link` | 手动关联未认领 PR。请求体提供 `github_login` 或 `route`。路由包含 `provider`、`target`、`session`。 |

@@ -203,6 +203,36 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(env['INK_CC_CONNECT_TOKEN'], 'webhook')
         self.assertEqual(env['INK_DISCORD_TOKEN'], 'discord')
 
+class MacOSOutputTest(unittest.TestCase):
+    def test_disabled_supports_current_macos_and_boolean_formats(self):
+        sample=b'''disabled services = {\n"com.apple.ManagedClientAgent.enrollagent" => disabled\n"com.cc-connect.service" => enabled\n"legacy.disabled" => true\n"legacy.enabled" => false\n}'''
+        with patch.object(m.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=sample)):
+            self.assertTrue(m.disabled('gui/501','com.apple.ManagedClientAgent.enrollagent'))
+            self.assertFalse(m.disabled('gui/501',m.CC_LABEL))
+            self.assertTrue(m.disabled('gui/501','legacy.disabled'))
+            self.assertFalse(m.disabled('gui/501','legacy.enabled'))
+            self.assertFalse(m.disabled('gui/501','unknown'))
+
+    def test_ps_finds_absolute_binary_paths_and_duplicate_instances(self):
+        sample=b'''50420 /Users/user/.local/share/cc-connect/builds/current/cc-connect\n60420 /Users/user/.local/lib/ink-commons/releases/abc/cc-connect\n44 /bin/sh\n55 /tmp/cc-connect-helper\n'''
+        with patch.object(m.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=sample)):
+            self.assertEqual(m.cc_process_pids(),[50420,60420])
+
+    def test_lock_retries_a_slow_release_and_has_deadline(self):
+        stream=MagicMock()
+        with patch.object(m.fcntl,'flock',side_effect=[BlockingIOError(),None]) as call, patch.object(m.time,'sleep'):
+            m.acquire_state_lock(stream)
+            self.assertEqual(call.call_count,2)
+        with patch.object(m.fcntl,'flock',side_effect=BlockingIOError()), patch.object(m.time,'monotonic',side_effect=[0,6]):
+            with self.assertRaises(m.DeploymentError):
+                m.acquire_state_lock(stream)
+
+    def test_no_proxy_rejects_non_host_text(self):
+        self.assertEqual(m.parse_env(['NO_PROXY=localhost,127.0.0.1,.example.com,[::1]'])['NO_PROXY'],'localhost,127.0.0.1,.example.com,[::1]')
+        for value in ('user:password@host','secret text','a'*300,'host,,other'):
+            with self.assertRaises(m.DeploymentError):
+                m.parse_env(['NO_PROXY='+value])
+
 
 if __name__ == '__main__':
     unittest.main()

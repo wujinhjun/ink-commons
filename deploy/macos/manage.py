@@ -61,6 +61,9 @@ def parse_env(entries):
             raise DeploymentError('only non-secret proxy environment is supported')
         if key == 'NODE_OPTIONS' and value != '--use-env-proxy':
             raise DeploymentError('only NODE_OPTIONS=--use-env-proxy is supported')
+        if key == 'NO_PROXY':
+            if len(value)>2048 or any(not re.fullmatch(r'(?:\*|\*?\.?[A-Za-z0-9][A-Za-z0-9.-]{0,252}|\[[0-9a-fA-F:]+\])(?::[0-9]{1,5})?',host) or any(len(label)>63 for label in host.split('.')) for host in value.split(',')):
+                raise DeploymentError('NO_PROXY must be a bounded comma-separated host list without spaces or credentials')
         if key.endswith('_PROXY') and key != 'NO_PROXY':
             parsed = urlsplit(value)
             if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.scheme not in ('http','https','socks5','socks5h') or not parsed.hostname:
@@ -72,7 +75,10 @@ def parse_env(entries):
 def existing_cc_binary(home):
     for path in (home / 'Library/LaunchAgents' / (CC_LABEL+'.plist'), SYSTEM_DIR / (CC_LABEL+'.plist')):
         if path.is_file():
-            return Path(plistlib.loads(path.read_bytes())['ProgramArguments'][0])
+            binary=Path(plistlib.loads(path.read_bytes())['ProgramArguments'][0])
+            if not binary.is_file():
+                raise DeploymentError('installed cc-connect binary is missing; specify --cc-connect-binary')
+            return binary
     raise DeploymentError('cc-connect service missing; specify --cc-connect-binary')
 
 
@@ -80,7 +86,7 @@ def disabled(domain,label):
     result = subprocess.run(['/bin/launchctl','print-disabled',domain],capture_output=True)
     if result.returncode:
         return False  # 尚不存在的 GUI domain 没有已加载服务。
-    pattern = r'"' + re.escape(label) + r'"\s*=>\s*true'
+    pattern = r'"' + re.escape(label) + r'"\s*=>\s*(?:true|disabled)\b'
     return re.search(pattern,result.stdout.decode()) is not None
 
 
@@ -93,6 +99,28 @@ def cc_listener_healthy(domain,port):
     result = subprocess.run(['/bin/launchctl','print',domain+'/'+CC_LABEL],capture_output=True)
     match = re.search(r'\bpid = (\d+)',result.stdout.decode())
     return bool(match) and listener_pids(port) == [int(match.group(1))]
+
+
+def acquire_state_lock(stream,timeout=5):
+    deadline=time.monotonic()+timeout
+    while True:
+        try:
+            fcntl.flock(stream.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise DeploymentError('state lock remains held; refusing to copy or overwrite the database')
+            time.sleep(0.1)
+
+
+def cc_process_pids():
+    result=subprocess.run(['/bin/ps','-ww','-Ao','pid=,comm='],capture_output=True)
+    pids=[]
+    for line in result.stdout.decode().splitlines():
+        fields=line.strip().split(None,1)
+        if len(fields)==2 and fields[0].isdigit() and Path(fields[1]).name=='cc-connect':
+            pids.append(int(fields[0]))
+    return sorted(set(pids))
 
 
 def stage(args):
@@ -132,6 +160,11 @@ def stage(args):
              '-X ink-commons/internal/ink.BuildRevision=' + revision,
              '-o', candidate / 'ink', './cmd/ink'], cwd=source)
         cc_source = Path(args.cc_connect_binary).expanduser().resolve() if args.cc_connect_binary else existing_cc_binary(home)
+        if not cc_source.is_file():
+            raise DeploymentError('cc-connect source binary is missing')
+        if 'releases' in cc_source.parts and not args.cc_connect_binary:
+            raise DeploymentError('cc-connect is already release-pinned; explicitly select --cc-connect-binary to reuse or upgrade it')
+        print('cc-connect source:',cc_source,'sha256:',hashlib.sha256(cc_source.read_bytes()).hexdigest()[:16])
         shutil.copy2(cc_source, candidate / 'cc-connect')
         for name in ('runtime.py', 'manage.py'):
             shutil.copy2(source / 'deploy/macos' / name, candidate / name)
@@ -379,7 +412,7 @@ def activate(args):
                 unload(job_domain, label)
             if snapshot_ready:
                 with open(data/'state.json.lock','a') as recovery_lock:
-                    fcntl.flock(recovery_lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    acquire_state_lock(recovery_lock)
                     for item in data.iterdir():
                         if item.name not in ('ink.sock', 'state.json.lock') and not item.name.endswith('.log'):
                             if item.is_dir():
@@ -443,6 +476,17 @@ def status(args):
                 if manifest.is_file():
                     data = Path(json.loads(manifest.read_text())['data'])
                     break
+    config_path=home/'.config/ink-commons/config.json'
+    if 'manifest' in locals() and manifest.is_file():
+        config_path=manifest.parent/'config.json'
+    from urllib.parse import urlparse
+    endpoint=json.loads(config_path.read_text()).get('cc_connect_url','') if config_path.is_file() else ''
+    port=urlparse(endpoint).port or 9111
+    binaries={}
+    for name,path in [('system',SYSTEM_DIR/(CC_LABEL+'.plist')),('login',home/'Library/LaunchAgents'/(CC_LABEL+'.plist'))]:
+        if path.is_file():
+            binary=Path(plistlib.loads(path.read_bytes())['ProgramArguments'][0])
+            binaries[name]={'path':str(binary),'exists':binary.is_file()}
     report = {'user': args.user, 'services': {}}
     for label in (LABEL, CC_LABEL, WATCHDOG):
         report['services'][label] = {
@@ -452,9 +496,8 @@ def status(args):
         report['runtime'] = health(data)
     except (OSError, ValueError, IndexError):
         report['runtime'] = {'status': 'unavailable'}
-    pids = subprocess.run(['/usr/bin/pgrep','-x','cc-connect'],capture_output=True).stdout.split()
-    report['cc_connect']={'process_pids':[int(p) for p in pids if p.isdigit()],
-                          'listener_9111_pids':listener_pids(9111)}
+    report['cc_connect']={'process_pids':cc_process_pids(),'port':port,
+                          'listener_pids':listener_pids(port),'binaries':binaries}
     print(json.dumps(report, indent=2))
 
 
