@@ -31,6 +31,7 @@ type Repository struct {
 type Config struct {
 	Repositories []Repository
 	PollSeconds  int
+	Reliability  Reliability
 	GitHubToken  string
 }
 

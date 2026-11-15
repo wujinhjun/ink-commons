@@ -100,12 +100,23 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 | `GET /v1/work/{owner}/{repo}/{number}` | 查看一条 PR 的来源、负责人、审查版本和投递状态。 |
 | `POST /v1/work/{owner}/{repo}/{number}/link` | 手动关联未认领 PR。请求体提供 `github_login` 或 `route`。路由包含 `provider`、`target`、`session`。 |
 | `POST /v1/work/{owner}/{repo}/{number}/assign` | 为 `developer` 或 `reviewer` 更新负责人。传 `github_login` 即可转给人。传 `route` 可指定已有 bot 会话。指定 reviewer 时也可以省略 `session`，让执行端按 `provider`、`target` 和适用的 `parent` 创建会话。 |
-| `POST /v1/work/{owner}/{repo}/{number}/retry` | 在下次轮询重试当前 bot 待办。先检查执行端是否已经开始，避免重复执行。 |
+| `POST /v1/work/{owner}/{repo}/{number}/retry` | 在下次轮询重试当前 bot 待办。所有旧轮次已确认结束才允许重试；保留 task_id，生成新的 attempt_id。 |
+| `POST /v1/work/{owner}/{repo}/{number}/confirm-stopped` | 人工确认指定轮次已停止且延迟投递已被禁止。必须提供 task_id、attempt_id、stopped: true 和 reason，保留确认记录。 |
 | `POST /v1/pushes` | Git hook 提交候选关联记录。 |
 
-`assign` 修改未来任务的投递。接手之前如果 bot 正在工作，先在原执行端停止它，再接管目录或处理未提交改动。`accepted` 表示执行端接收请求，正式 GitHub review 或新的 PR 版本才表示工作状态推进。cc-connect 忙时可能跳过任务，待办仍可在 API 中查看、重试或转给人。
+`assign` 修改未来任务的投递。新 SHA、改派、Draft 和 PR 关闭都会保留旧轮次记录；旧执行未确认结束时，不会投递后续 bot 任务。接手之前如果 bot 正在工作，先在原执行端停止它并禁止延迟投递，再接管目录或处理未提交改动。`accepted` 表示执行端接收请求，正式 GitHub review 或新的 PR 版本才表示工作状态推进。cc-connect 忙时可能跳过任务，待办仍可在 API 中查看、重试或转给人。
 
 开发计划与完成记录统一维护在 [TODO.md](TODO.md)。
+
+## 执行可靠性
+
+工作项的 `phase` 继续由 GitHub review 和 head SHA 决定；`task.runs` 单独记录投递、开始 ACK、心跳、结束、停止请求和重试计划。`execution_history` 保存已被业务状态替换的任务。执行成功本身不会把 PR 标成审查通过。
+
+HTTP 执行端可以通过 `http_provider_execution: true` 显式启用 `status` / `stop` 协议。默认关闭，旧 HTTP 服务不会收到额外操作。执行端必须持久化去重和运行归属，并保证终态表示 Agent 及所有工具已停止、延迟投递不能重新启动旧轮次。仓库提供 SQLite 执行端账本及恢复测试，接入约定见 [执行协议](docs/execution.md)。
+
+配置 `execution` 可设置 `ack_seconds`（默认 120）、`heartbeat_seconds`（180）、`execution_seconds`（3600）、`backoff_seconds`（30）、`max_attempts`（3，含首次投递）。零值使用默认值，`max_attempts: 1` 关闭自动重派。超时先查询、再请求停止；只有终止确认后才按指数退避重试，退避上限一小时。耗尽次数或无法确认停止时需要人工处理。每轮 daemon 轮询先恢复执行状态，即使 GitHub 暂时不可用也会核查执行端。
+
+cc-connect 当前 webhook 不支持执行级状态查询、停止或持久化去重，仍按保守模式处理：`accepted` 仅表示接收，失联后保留 `unknown`，不自动重派。历史版本投递的任务也需要人工确认。人工停止并禁止旧请求重新启动后，调用 `confirm-stopped`，再用 `retry` 重试；若未耗尽自动重试次数，当前任务的停止确认也会触发退避重派。人工确认只是可信本地操作者的声明，daemon 不会据此停止外部进程。
 
 ## 状态、备份与回滚
 

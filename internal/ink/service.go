@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"ink-commons/internal/execution"
 )
 
@@ -22,13 +23,29 @@ type Service struct {
 }
 
 func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
+	if err := config.Reliability.Validate(); err != nil {
+		return nil, err
+	}
 	store, err := openStore(path)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := store.load(); err != nil {
+	st, err := store.load()
+	if err != nil {
 		store.db.Close()
 		return nil, err
+	}
+	changed := false
+	for _, w := range st.Work {
+		if migrateExecution(w) {
+			changed = true
+		}
+	}
+	if changed {
+		if err := store.save(st); err != nil {
+			store.db.Close()
+			return nil, err
+		}
 	}
 	return &Service{store: store, config: config, up: newUpstream(config.GitHubToken), providers: providers, delivering: make(map[string]bool)}, nil
 }
@@ -85,6 +102,9 @@ func matchOrigin(pushes []Push, pull Pull) *execution.Route {
 func key(repo string, number int) string { return fmt.Sprintf("%s#%d", repo, number) }
 
 func (s *Service) Poll(ctx context.Context) {
+	if err := s.reconcileExecutions(ctx); err != nil {
+		log.Printf("execution recovery: %v", err)
+	}
 	for _, repo := range s.config.Repositories {
 		if ctx.Err() != nil {
 			return
@@ -216,7 +236,7 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 		return nil, err
 	}
 	work := st.Work[id]
-	if work == nil || work.Task == nil || work.Task.Delivery != "pending" || s.delivering[id] {
+	if work == nil || work.Task == nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
 		return nil, nil
 	}
 
@@ -224,6 +244,16 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 	// during delivery, the operator can inspect the unknown outcome before retrying.
 	work.Task.Delivery, work.Task.Error = "unknown", "delivery interrupted or in progress"
 	work.Task.Attempts++
+	if work.Task.ID == "" {
+		work.Task.ID = uuid.NewString()
+	}
+	route := taskRoute(work, work.Task)
+	if route == nil {
+		return nil, fmt.Errorf("pending task has no execution route")
+	}
+	attemptID := uuid.NewString()
+	work.Task.RetryAt = time.Time{}
+	work.Task.Runs = append(work.Task.Runs, Attempt{ID: attemptID, Number: work.Task.Attempts, Route: *route, Request: deliveryFor(work, work.Task, attemptID, work.Task.Attempts), State: "unknown", CreatedAt: time.Now()})
 	if err := s.store.save(st); err != nil {
 		return nil, err
 	}
@@ -239,7 +269,27 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 	if err != nil {
 		return err
 	}
-	st.Work[id] = work
+	live := st.Work[id]
+	if live == nil {
+		return nil
+	}
+	for _, t := range live.executionTasks() {
+		if t.ID != work.Task.ID {
+			continue
+		}
+		t.Runs = work.Task.Runs
+		if live.Task == t {
+			t.Delivery, t.Error = work.Task.Delivery, work.Task.Error
+			if route := taskRoute(work, work.Task); route != nil {
+				copyRoute := *route
+				if t.Role == "reviewer" {
+					live.Reviewer.Route = &copyRoute
+				} else {
+					live.Developer.Route = &copyRoute
+				}
+			}
+		}
+	}
 	return s.store.save(st)
 }
 
@@ -270,12 +320,14 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 		task.Error = "execution provider is not configured"
 		return s.saveDelivery(id, work)
 	}
-	delivery := execution.Delivery{Repository: work.Repo, Number: work.Pull.Number, URL: work.Pull.URL, Role: task.Role, SHA: task.SHA, ReviewID: task.ReviewID, ReviewURL: task.ReviewURL}
-	if task.Role == "reviewer" {
-		delivery.Source = reviewSource(work)
-	}
+	attempt := &task.Runs[len(task.Runs)-1]
+	delivery := attempt.Request
 	if route.Session == "" {
 		*route = allocationRoute(repo, *route)
+		attempt.Route = *route
+		if err := s.saveDelivery(id, work); err != nil {
+			return err
+		}
 		if err := execution.ValidateDestination(s.providers, *route, true); err != nil {
 			task.Error = "invalid unallocated destination: " + err.Error()
 			return s.saveDelivery(id, work)
@@ -296,14 +348,29 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 			return s.saveDelivery(id, work)
 		}
 		*route = prepared
+		attempt.Route = prepared
 		if err := s.saveDelivery(id, work); err != nil {
 			return err
 		}
 	}
+	// Do not deliver a task superseded while its session was being allocated.
+	s.mu.Lock()
+	latest, loadErr := s.store.load()
+	live := latest.Work[id]
+	current := loadErr == nil && live != nil && live.Task != nil && live.Task.ID == task.ID
+	s.mu.Unlock()
+	if loadErr != nil {
+		return loadErr
+	}
+	if !current {
+		return nil
+	}
 	if err := executor.Deliver(ctx, *route, delivery); err != nil {
 		task.Error = "deliver task: " + err.Error()
+		attempt.Error = task.Error
 	} else {
 		task.Delivery, task.Error = "accepted", ""
+		attempt.State = "accepted"
 	}
 	return s.saveDelivery(id, work)
 }

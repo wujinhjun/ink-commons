@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ink-commons/internal/execution"
 )
@@ -37,6 +38,16 @@ func (e *testExecutor) Prepare(_ context.Context, _ execution.Route, task execut
 	e.prepared++
 	e.preparedTasks = append(e.preparedTasks, task)
 	return "review-session", nil
+}
+
+// The workflow fixture represents a runtime that has joined its tools before
+// publishing a final result. Reliability failure scenarios use separate fixtures.
+func (e *testExecutor) Status(_ context.Context, _ execution.Route, d execution.Delivery) (execution.Receipt, error) {
+	now := time.Now().UTC()
+	return execution.Receipt{TaskID: d.TaskID, AttemptID: d.AttemptID, Sequence: 1, State: "succeeded", StartedAt: now, HeartbeatAt: now, FinishedAt: now}, nil
+}
+func (e *testExecutor) Stop(ctx context.Context, r execution.Route, d execution.Delivery) (execution.Receipt, error) {
+	return e.Status(ctx, r, d)
 }
 
 func (e *testExecutor) Deliver(_ context.Context, route execution.Route, task execution.Delivery) error {
@@ -114,6 +125,9 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 	}
 	poll := func() {
 		t.Helper()
+		if err := s.reconcileExecutions(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 		if err := s.pollRepo(context.Background(), repo); err != nil {
 			t.Fatal(err)
 		}
