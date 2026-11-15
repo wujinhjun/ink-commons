@@ -3,6 +3,7 @@ package ccconnect
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -93,6 +94,9 @@ func TestReviewThreadFollowsDevelopmentConversation(t *testing.T) {
 				if r.Header.Get("Authorization") != "Bot discord-test" {
 					t.Fatal("wrong Discord identity")
 				}
+				if r.Method == http.MethodGet && r.URL.Path == "/api/v10/channels/77" {
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"77","type":0}`))}, nil
+				}
 				response := tc.response
 				if r.Method == http.MethodPost {
 					if r.URL.Path != "/api/v10/channels/"+tc.parent+"/threads" {
@@ -123,8 +127,12 @@ func TestReviewThreadFollowsDevelopmentConversation(t *testing.T) {
 			if err != nil || session != "discord:99" {
 				t.Fatalf("prepare: %s, %v", session, err)
 			}
-			if len(paths) != 2 {
-				t.Fatalf("expected lookup then one allocation: %v", paths)
+			want := 3
+			if tc.name == "text channel" {
+				want = 2
+			}
+			if len(paths) != want {
+				t.Fatalf("expected source/parent lookup then one allocation: %v", paths)
 			}
 		})
 	}
@@ -175,6 +183,9 @@ func TestInvalidDevelopmentConversationDoesNotAllocateElsewhere(t *testing.T) {
 func TestReviewThreadNamePreservesPRAndUnicode(t *testing.T) {
 	var name string
 	client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v10/channels/77" {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"77","type":0}`))}, nil
+		}
 		response := `{"id":"123","type":11,"parent_id":"77","name":"` + strings.Repeat("同砚", 100) + `"}`
 		if r.Method == http.MethodPost {
 			var body struct{ Name string }
@@ -233,6 +244,28 @@ func TestExplicitParentSurvivesUnavailableSource(t *testing.T) {
 			session, err := executor.Prepare(context.Background(), execution.Route{Provider: Name, Target: "reviewer", Parent: "88"}, execution.Delivery{Repository: "acme/project", Number: 42, Source: &execution.Route{Provider: Name, Session: tc.session}})
 			if err != nil || session != "discord:99" || !created {
 				t.Fatalf("explicit parent failed: %s, %v", session, err)
+			}
+		})
+	}
+}
+
+func TestAutomaticReviewRejectsNonTextParents(t *testing.T) {
+	for _, parentType := range []int{5, 15, 16} {
+		t.Run(fmt.Sprint(parentType), func(t *testing.T) {
+			client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodGet {
+					t.Fatal("allocated a review under a non-text parent")
+				}
+				response := `{"id":"123","type":11,"parent_id":"77","name":"dev"}`
+				if r.URL.Path == "/api/v10/channels/77" {
+					response = fmt.Sprintf(`{"id":"77","type":%d}`, parentType)
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(response))}, nil
+			})}
+			executor, _ := New(client, "", "", "discord-token")
+			_, err := executor.Prepare(context.Background(), execution.Route{Provider: Name, Target: "reviewer"}, execution.Delivery{Source: &execution.Route{Provider: Name, Session: "discord:123"}})
+			if err == nil || !strings.Contains(err.Error(), "text-channel parent") {
+				t.Fatalf("missing parent-type rejection: %v", err)
 			}
 		})
 	}

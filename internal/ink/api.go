@@ -171,6 +171,10 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError{409, "delivery in progress"})
 		return
 	}
+	if action == "assign" && !work.Linked {
+		fail(w, apiError{409, "link the PR first"})
+		return
+	}
 	if action == "assign" && change.Role == "reviewer" && change.Route != nil && change.Route.Session == "" {
 		route := *change.Route
 		if repository, ok := s.repo(repo); ok {

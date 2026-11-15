@@ -19,6 +19,7 @@ type Executor struct {
 }
 
 var _ execution.Executor = (*Executor)(nil)
+var _ execution.PreparationValidator = (*Executor)(nil)
 
 func New(client *http.Client, endpoint, token, discordToken string) (*Executor, error) {
 	if endpoint != "" {
@@ -136,6 +137,18 @@ func (e *Executor) developmentConversation(ctx context.Context, session string) 
 	}
 	if !snowflake(parent) {
 		return "", "", fmt.Errorf("development conversation has no valid parent channel")
+	}
+	if channel.Type == 11 {
+		var parentChannel struct {
+			ID   string `json:"id"`
+			Type int    `json:"type"`
+		}
+		if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+parent, "Bot "+e.discordToken, &parentChannel); err != nil {
+			return "", "", fmt.Errorf("read development parent channel: %w", err)
+		}
+		if parentChannel.ID != parent || parentChannel.Type != 0 {
+			return "", "", fmt.Errorf("automatic review placement requires a text-channel parent; forum, media and announcement parents are unsupported")
+		}
 	}
 	return parent, channel.Name, nil
 }

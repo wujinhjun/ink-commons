@@ -204,6 +204,11 @@ func TestReviewerAssignmentRejectsMissingSourceBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
+	service.Handler().ServeHTTP(response, httptest.NewRequest("POST", "/v1/work/acme/project/3/assign", strings.NewReader(`{"role":"reviewer","github_login":"reviewer","route":{"provider":"cc-connect","target":"reviewer"}}`)))
+	if response.Code != 409 || !strings.Contains(response.Body.String(), "link the PR first") {
+		t.Fatalf("wrong unlinked error precedence: %d %s", response.Code, response.Body)
+	}
+	response = httptest.NewRecorder()
 	service.Handler().ServeHTTP(response, httptest.NewRequest("POST", "/v1/work/acme/project/3/link", strings.NewReader(`{"github_login":"human-dev"}`)))
 	if response.Code != 200 {
 		t.Fatalf("link failed: %s", response.Body)
