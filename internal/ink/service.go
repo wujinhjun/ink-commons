@@ -196,6 +196,9 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 		if err := s.observe(repo, pull, reviews); err != nil {
 			return err
 		}
+		if err := s.notifyApproved(ctx, repo, pull.Number); err != nil {
+			return err
+		}
 		if err := s.postApproval(ctx, repo, pull.Number); err != nil {
 			return err
 		}

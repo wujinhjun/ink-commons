@@ -77,6 +77,20 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 
 触发记录在启动脚本前持久化；失败、超时或 daemon 中断后不自动重放，也没有自动重试接口。这样避免脚本已经产生外部副作用后再次运行，但中断可能导致事件未执行完成，需要人工核查。脚本应使用 `event_id` 去重；如果它要执行 merge 等对当前版本敏感的操作，还需核对 GitHub 最新 head 和批准状态。hook 本身不自动 merge PR。
 
+## 审查通过后通知开发会话
+
+指定 reviewer 对当前 head SHA 正式 Approve 后，同砚在下一轮轮询中向当前 developer 路由发送 `review_approved` 通知，包含 PR、批准的 SHA、reviewer 和正式 review 链接。cc-connect 通过 webhook 将这些信息送入原开发 Agent 上下文，并要求简短告知用户。通知独立于代码修改任务，不授权修改、推送、合并或部署，也不会把 PR 标记为已合并。
+
+按仓库、PR、SHA 去重；同一 SHA 的重复批准、轮询和重启不会重复发送，新 SHA 获得批准后产生新事件。首次升级时，已关联且当前已批准的打开 PR 也会通知。只有当前指定 reviewer 对当前 SHA 的有效正式批准触发；Draft、未关联或已关闭 PR、旧 SHA 和其他作者不触发。人工 developer 不会回退到历史 bot 会话。
+
+工作项 API 的 `notifications` 保存事件、投递时的路由和 `accepted`、`unknown`、`failed`、`unsupported` 或 `manual` 状态。通知发送前持久化 `unknown` 预留；网络失败或中断后不自动重放，避免外部结果不明时重复唤醒。`unknown`、`failed`、`unsupported` 在当前批准版本产生诊断。人工负责人记录为 `manual`；不支持通知的执行端记录为 `unsupported`，不会误投成修改任务。通知不替换现有任务，也不等待旧代码任务的执行确认；接收 Agent 只能确认消息，不能据此开始新的代码或 GitHub 操作。
+
+`accepted` 仅表示执行端接收请求，**不保证 Agent 已消费通知**。现有 cc-connect webhook 在会话忙时可能跳过请求，且没有通知完成回执；遇到这种情况需检查开发会话并人工补充上下文。可靠排队及消费确认仍需 cc-connect 接入执行协议。通用执行端需显式实现 `execution.Notifier` 才会接收通知；此改动不扩展现有 HTTP 协议。
+
+通知与 `postApproval` 脚本相互独立；通知尝试发生在脚本之前，脚本无需配置，也不会因通知已发送而跳过。
+
+升级前备份 SQLite 状态；通知记录保存在现有工作项 JSON 中。旧版程序可能丢弃 `notifications` 字段，导致再次升级后重复通知，回滚前应保留包含通知记录的备份。
+
 ## 代码结构
 
 | 目录 | 职责 |

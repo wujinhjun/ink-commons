@@ -20,6 +20,7 @@ type Executor struct {
 
 var _ execution.Executor = (*Executor)(nil)
 var _ execution.PreparationValidator = (*Executor)(nil)
+var _ execution.Notifier = (*Executor)(nil)
 
 func New(client *http.Client, endpoint, token, discordToken string) (*Executor, error) {
 	if endpoint != "" {
@@ -179,7 +180,25 @@ func (e *Executor) Deliver(ctx context.Context, route execution.Route, task exec
 	if task.Feedback != "" {
 		prompt += "\nPrevious workflow feedback:\n" + task.Feedback
 	}
-	body := map[string]string{"project": route.Target, "session_key": route.Session, "prompt": prompt, "event": "ink-commons:" + task.Role}
+	return e.sendPrompt(ctx, route, "ink-commons:"+task.Role, prompt)
+}
+
+func (e *Executor) Notify(ctx context.Context, route execution.Route, n execution.Notification) error {
+	if n.Event != "review_approved" {
+		return fmt.Errorf("unsupported cc-connect notification event %q", n.Event)
+	}
+	if err := e.ValidateDelivery(); err != nil {
+		return err
+	}
+	if err := e.Validate(route, false); err != nil {
+		return err
+	}
+	prompt := fmt.Sprintf("Ink Commons review_approved notification for PR %s\nEvent: %s\nApproved commit: %s\nReviewer: %s\nReview: %s (ID %d)\nThe assigned reviewer has formally approved this exact commit. Add this result to the development conversation and briefly acknowledge it to the user. This is informational, not a fix task or authorization to modify code, commit, push, merge, or deploy. Approval does not imply that the PR has been merged. If the head has changed, the approval applies only to the indicated commit.\n", n.URL, n.EventID, n.SHA, n.Reviewer, n.ReviewURL, n.ReviewID)
+	return e.sendPrompt(ctx, route, "ink-commons:review_approved", prompt)
+}
+
+func (e *Executor) sendPrompt(ctx context.Context, route execution.Route, event, prompt string) error {
+	body := map[string]string{"project": route.Target, "session_key": route.Session, "prompt": prompt, "event": event}
 	var ack struct {
 		Status string `json:"status"`
 	}

@@ -29,6 +29,11 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 		w.Alerts[i].Active = false
 	}
 	w.Workflow = Workflow{State: w.Phase}
+	for _, n := range w.Notifications {
+		if w.Phase == "approved" && n.SHA == w.Pull.Head.SHA && (n.State == "unknown" || n.State == "failed" || n.State == "unsupported") {
+			w.raiseAlert("approval_notification_unresolved", n.EventID, "审查已通过，但开发会话通知尚未确认接收（"+n.State+"）。"+n.Error, now)
+		}
+	}
 	t := w.Task
 	for _, task := range w.executionTasks() {
 		for _, a := range task.Runs {

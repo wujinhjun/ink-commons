@@ -73,6 +73,27 @@ type Executor interface {
 	Deliver(context.Context, Route, Delivery) error
 }
 
+// Notification is informational context for an existing developer conversation,
+// separate from a task that authorizes code changes or a GitHub operation.
+type Notification struct {
+	EventID    string `json:"event_id"`
+	Event      string `json:"event"`
+	Repository string `json:"repository"`
+	Number     int    `json:"pull_number"`
+	URL        string `json:"pull_url"`
+	SHA        string `json:"sha"`
+	Reviewer   string `json:"reviewer"`
+	ReviewID   int64  `json:"review_id"`
+	ReviewURL  string `json:"review_url"`
+}
+
+// Notifier is optional: runtimes must explicitly opt in rather than interpreting
+// an approval notification as a developer fix task. Success is transport
+// acceptance, not proof that the agent consumed the notification.
+type Notifier interface {
+	Notify(context.Context, Route, Notification) error
+}
+
 func ValidateDestination(providers map[string]Executor, route Route, allocate bool) error {
 	if !route.Valid(allocate) {
 		return fmt.Errorf("incomplete execution destination")
