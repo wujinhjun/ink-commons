@@ -2,6 +2,7 @@ package ink
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 
+	"ink-commons/internal/ink/statedb"
 	_ "modernc.org/sqlite"
 )
 
@@ -26,7 +28,7 @@ type state struct {
 	Work         map[string]*Work `json:"work"`
 }
 
-// stateStore keeps the workflow snapshot API; each read and replacement is a
+// stateStore keeps the workflow snapshot API; each read and incremental save is a
 // transaction. Service.mu and the daemon lock serialize read-modify-write cycles.
 // Work payloads retain routes, reviews and delivery outcomes without re-deriving
 // them on restart (in particular, unknown/accepted tasks must not be replayed).
@@ -171,7 +173,7 @@ func (s *stateStore) initialize(legacy, marker string) error {
 		} else {
 			return err
 		}
-		if err := replaceState(tx, st); err != nil {
+		if err := syncState(tx, st); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -269,68 +271,40 @@ func (s *stateStore) load() (state, error) {
 		return st, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query("SELECT id, payload FROM work_items ORDER BY id")
+	q := statedb.New(tx)
+	ctx := context.Background()
+	workRows, err := q.ListWork(ctx)
 	if err != nil {
 		return st, err
 	}
-	for rows.Next() {
-		var id, payload string
+	for _, row := range workRows {
 		var work Work
-		if err = rows.Scan(&id, &payload); err == nil {
-			err = json.Unmarshal([]byte(payload), &work)
-		}
-		if err != nil {
-			rows.Close()
+		if err := json.Unmarshal([]byte(row.Payload), &work); err != nil {
 			return st, err
 		}
-		st.Work[id] = &work
+		st.Work[row.ID] = &work
 	}
-	err = rows.Err()
-	rows.Close()
+	pushRows, err := q.ListPushes(ctx)
 	if err != nil {
 		return st, err
 	}
-	rows, err = tx.Query("SELECT payload FROM pushes ORDER BY position")
-	if err != nil {
-		return st, err
-	}
-	for rows.Next() {
-		var payload string
+	for _, row := range pushRows {
 		var push Push
-		if err = rows.Scan(&payload); err == nil {
-			err = json.Unmarshal([]byte(payload), &push)
-		}
-		if err != nil {
-			rows.Close()
+		if err := json.Unmarshal([]byte(row.Payload), &push); err != nil {
 			return st, err
 		}
 		st.Pushes = append(st.Pushes, push)
 	}
-	err = rows.Err()
-	rows.Close()
+	repoRows, err := q.ListRepositories(ctx)
 	if err != nil {
 		return st, err
 	}
-	rows, err = tx.Query("SELECT payload FROM repositories ORDER BY name")
-	if err != nil {
-		return st, err
-	}
-	for rows.Next() {
-		var payload string
+	for _, row := range repoRows {
 		var repo Repository
-		if err = rows.Scan(&payload); err == nil {
-			err = json.Unmarshal([]byte(payload), &repo)
-		}
-		if err != nil {
-			rows.Close()
+		if err := json.Unmarshal([]byte(row.Payload), &repo); err != nil {
 			return st, err
 		}
 		st.Repositories = append(st.Repositories, repo)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return st, err
 	}
 	if err := validateState(st); err != nil {
 		return st, err
@@ -338,37 +312,87 @@ func (s *stateStore) load() (state, error) {
 	return st, tx.Commit()
 }
 
-func replaceState(tx *sql.Tx, st state) error {
+// syncState compares persisted payloads in the same transaction, avoiding a
+// mutable in-memory cache and preserving rollback/restart behavior. The snapshot
+// API still requires Service.mu and the daemon lock around read-modify-write.
+func syncState(tx *sql.Tx, st state) error {
 	if err := validateState(st); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM work_items; DELETE FROM pushes; DELETE FROM repositories;"); err != nil {
+	ctx := context.Background()
+	q := statedb.New(tx)
+	workRows, err := q.ListWork(ctx)
+	if err != nil {
 		return err
+	}
+	repoRows, err := q.ListRepositories(ctx)
+	if err != nil {
+		return err
+	}
+	pushRows, err := q.ListPushes(ctx)
+	if err != nil {
+		return err
+	}
+	workPayloads := make(map[string]string, len(workRows))
+	for _, row := range workRows {
+		workPayloads[row.ID] = row.Payload
+	}
+	repoPayloads := make(map[string]string, len(repoRows))
+	for _, row := range repoRows {
+		repoPayloads[row.Name] = row.Payload
+	}
+	pushPayloads := make(map[int64]string, len(pushRows))
+	for _, row := range pushRows {
+		pushPayloads[row.Position] = row.Payload
 	}
 	for _, repo := range st.Repositories {
 		data, err := json.Marshal(repo)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec("INSERT INTO repositories(name, payload) VALUES (?, ?)", repo.Repo, string(data)); err != nil {
-			return err
+		if old, exists := repoPayloads[repo.Repo]; !exists || old != string(data) {
+			if err := q.PutRepository(ctx, statedb.PutRepositoryParams{Name: repo.Repo, Payload: string(data)}); err != nil {
+				return err
+			}
 		}
+		delete(repoPayloads, repo.Repo)
 	}
 	for id, work := range st.Work {
 		data, err := json.Marshal(work)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec("INSERT INTO work_items(id, payload) VALUES (?, ?)", id, string(data)); err != nil {
-			return err
+		if old, exists := workPayloads[id]; !exists || old != string(data) {
+			if err := q.PutWork(ctx, statedb.PutWorkParams{ID: id, Payload: string(data)}); err != nil {
+				return err
+			}
 		}
+		delete(workPayloads, id)
 	}
 	for i, push := range st.Pushes {
 		data, err := json.Marshal(push)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec("INSERT INTO pushes(position, payload) VALUES (?, ?)", i, string(data)); err != nil {
+		if old, exists := pushPayloads[int64(i)]; !exists || old != string(data) {
+			if err := q.PutPush(ctx, statedb.PutPushParams{Position: int64(i), Payload: string(data)}); err != nil {
+				return err
+			}
+		}
+		delete(pushPayloads, int64(i))
+	}
+	for id := range workPayloads {
+		if err := q.DeleteWork(ctx, id); err != nil {
+			return err
+		}
+	}
+	for name := range repoPayloads {
+		if err := q.DeleteRepository(ctx, name); err != nil {
+			return err
+		}
+	}
+	for position := range pushPayloads {
+		if err := q.DeletePush(ctx, position); err != nil {
 			return err
 		}
 	}
@@ -381,7 +405,7 @@ func (s *stateStore) save(st state) error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := replaceState(tx, st); err != nil {
+	if err := syncState(tx, st); err != nil {
 		return err
 	}
 	return tx.Commit()

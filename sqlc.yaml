@@ -1,0 +1,16 @@
+version: "2"
+sql:
+  - engine: sqlite
+    schema: internal/ink/sql/schema.sql
+    queries: internal/ink/sql/queries.sql
+    gen:
+      go:
+        package: statedb
+        out: internal/ink/statedb
+  - engine: sqlite
+    schema: internal/execution/ledger/sql/schema.sql
+    queries: internal/execution/ledger/sql/queries.sql
+    gen:
+      go:
+        package: ledgerdb
+        out: internal/execution/ledger/ledgerdb

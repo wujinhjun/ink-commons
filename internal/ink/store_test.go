@@ -196,13 +196,15 @@ func TestSQLiteSaveRollsBackAndRejectsFutureSchema(t *testing.T) {
 	if err := store.save(initial); err != nil {
 		t.Fatal(err)
 	}
-	// Fail only after replacement has deleted the old rows. The transaction must
-	// restore them all, including previously accepted/unknown delivery records.
+	// Fail after updating work but before deleting stale rows. The transaction
+	// must restore all records, including accepted/unknown delivery records.
 	if _, err := store.db.Exec(`CREATE TRIGGER fail_save BEFORE INSERT ON pushes BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`); err != nil {
 		t.Fatal(err)
 	}
 	replacement := storedFixture()
 	replacement.Work["acme/project#42"].Task.Delivery = "pending"
+	delete(replacement.Work, "acme/project#43")
+	replacement.Pushes = append(replacement.Pushes, replacement.Pushes[0])
 	if err := store.save(replacement); err == nil {
 		t.Fatal("expected failed write")
 	}
@@ -522,4 +524,142 @@ func TestInitializedStateRejectsEmptyDatabasePlaceholders(t *testing.T) {
 			checkState(t, restored, fixture)
 		})
 	}
+}
+
+// Triggers observe actual mutations, including DELETE+INSERT disguised as an
+// update. Unchanged snapshots must leave every persisted row untouched.
+func TestSQLiteIncrementalWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), stateDatabase)
+	store, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	st := storedFixture()
+	st.Repositories = []Repository{{Repo: "acme/project", ReviewerLogin: "reviewer"}}
+	if err := store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TABLE mutations(kind TEXT, key TEXT);`); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []struct{ table, key string }{{"work_items", "id"}, {"repositories", "name"}, {"pushes", "position"}} {
+		for _, op := range []string{"INSERT", "UPDATE", "DELETE"} {
+			source := "NEW."
+			if op == "DELETE" {
+				source = "OLD."
+			}
+			query := fmt.Sprintf("CREATE TRIGGER audit_%s_%s AFTER %s ON %s BEGIN INSERT INTO mutations VALUES ('%s:%s', %s%s); END", entry.table, op, op, entry.table, entry.table, op, source, entry.key)
+			if _, err := store.db.Exec(query); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	assertMutations := func(want []string) {
+		t.Helper()
+		rows, err := store.db.Query("SELECT kind || ':' || key FROM mutations ORDER BY kind, key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, v)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("mutations = %v, want %v", got, want)
+		}
+		if _, err := store.db.Exec("DELETE FROM mutations"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations(nil)
+	st.Work["acme/project#42"].Task.Attempts++
+	if err := store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations([]string{"work_items:UPDATE:acme/project#42"})
+	st.Repositories[0].ReviewerLogin = "other-reviewer"
+	st.Pushes = append(st.Pushes, st.Pushes[0])
+	if err := store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations([]string{"pushes:INSERT:1", "repositories:UPDATE:acme/project"})
+	st.Pushes[0].SHA = strings.Repeat("c", 40)
+	if err := store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations([]string{"pushes:UPDATE:0"})
+	st.Pushes[0], st.Pushes[1] = st.Pushes[1], st.Pushes[0]
+	if err := store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations([]string{"pushes:UPDATE:0", "pushes:UPDATE:1"})
+	checkState(t, store, st)
+	delete(st.Work, "acme/project#43")
+	st.Repositories = nil
+	st.Pushes = nil
+	if err := store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations([]string{"pushes:DELETE:0", "pushes:DELETE:1", "repositories:DELETE:acme/project", "work_items:DELETE:acme/project#43"})
+	checkState(t, store, st)
+	// Compare against persisted rows after reopening, rather than a pointer cache.
+	if err := store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.db.Close()
+	checkState(t, reopened, st)
+	if err := reopened.save(st); err != nil {
+		t.Fatal(err)
+	}
+	var writes int
+	if err := reopened.db.QueryRow("SELECT count(*) FROM mutations").Scan(&writes); err != nil || writes != 0 {
+		t.Fatalf("restart no-op writes = %d, err = %v", writes, err)
+	}
+}
+
+func TestSQLiteIncrementalDeleteRollback(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), stateDatabase))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	initial := storedFixture()
+	if err := store.save(initial); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_delete BEFORE DELETE ON pushes BEGIN SELECT RAISE(ABORT, 'injected deletion failure'); END;`); err != nil {
+		t.Fatal(err)
+	}
+	next := storedFixture()
+	next.Work["acme/project#42"].Task.Attempts++
+	delete(next.Work, "acme/project#43")
+	next.Pushes = nil
+	if err := store.save(next); err == nil {
+		t.Fatal("expected deletion failure")
+	}
+	checkState(t, store, initial)
+	if _, err := store.db.Exec("DROP TRIGGER fail_delete"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.save(next); err != nil {
+		t.Fatal(err)
+	}
+	checkState(t, store, next)
 }

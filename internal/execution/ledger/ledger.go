@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"ink-commons/internal/execution"
+	"ink-commons/internal/execution/ledger/ledgerdb"
 	_ "modernc.org/sqlite"
 )
 
@@ -71,16 +72,16 @@ type record struct {
 }
 
 func read(tx *sql.Tx, id string) (record, error) {
-	var d, r string
 	var v record
-	err := tx.QueryRow("SELECT request,receipt,owner FROM executions WHERE attempt_id=?", id).Scan(&d, &r, &v.owner)
+	row, err := ledgerdb.New(tx).ReadExecution(context.Background(), id)
 	if err != nil {
 		return v, err
 	}
-	if err = json.Unmarshal([]byte(d), &v.request); err != nil {
+	if err = json.Unmarshal([]byte(row.Request), &v.request); err != nil {
 		return v, err
 	}
-	err = json.Unmarshal([]byte(r), &v.receipt)
+	v.owner = row.Owner
+	err = json.Unmarshal([]byte(row.Receipt), &v.receipt)
 	return v, err
 }
 func save(tx *sql.Tx, v record) error {
@@ -88,8 +89,7 @@ func save(tx *sql.Tx, v record) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec("UPDATE executions SET receipt=?,owner=? WHERE attempt_id=?", string(b), v.owner, v.request.AttemptID)
-	return err
+	return ledgerdb.New(tx).SaveExecution(context.Background(), ledgerdb.SaveExecutionParams{Receipt: string(b), Owner: v.owner, AttemptID: v.request.AttemptID})
 }
 func same(a, b execution.Delivery) bool {
 	x, _ := json.Marshal(a)
@@ -108,7 +108,7 @@ func (l *Ledger) transaction(fn func(*sql.Tx) error) error {
 	}
 	defer tx.Rollback()
 	// Acquire SQLite's writer reservation before reading, also across processes.
-	if _, err = tx.Exec("UPDATE executions SET owner=owner WHERE 0"); err != nil {
+	if err = ledgerdb.New(tx).ReserveWriter(context.Background()); err != nil {
 		return err
 	}
 	if err = fn(tx); err != nil {
@@ -123,7 +123,7 @@ func insert(tx *sql.Tx, d execution.Delivery, state string) (record, error) {
 	}
 	b, _ := json.Marshal(d)
 	r, _ := json.Marshal(v.receipt)
-	_, err := tx.Exec("INSERT INTO executions(attempt_id,task_id,number,resource,request,receipt) VALUES(?,?,?,?,?,?)", d.AttemptID, d.TaskID, d.Attempt, d.Repository+fmt.Sprintf("#%d", d.Number), string(b), string(r))
+	err := ledgerdb.New(tx).InsertExecution(context.Background(), ledgerdb.InsertExecutionParams{AttemptID: d.AttemptID, TaskID: d.TaskID, Number: int64(d.Attempt), Resource: d.Repository + fmt.Sprintf("#%d", d.Number), Request: string(b), Receipt: string(r)})
 	return v, err
 }
 
@@ -146,37 +146,26 @@ func (l *Ledger) Accept(d execution.Delivery) (execution.Receipt, error) {
 		if err != sql.ErrNoRows {
 			return err
 		}
-		var highest int
-		if err = tx.QueryRow("SELECT COALESCE(MAX(number),0) FROM executions WHERE task_id=?", d.TaskID).Scan(&highest); err != nil {
-			return err
-		}
-		if d.Attempt <= highest {
-			return ErrConflict
-		}
-		rows, err := tx.Query("SELECT receipt FROM executions WHERE resource=?", d.Repository+fmt.Sprintf("#%d", d.Number))
+		q := ledgerdb.New(tx)
+		highest, err := q.HighestAttempt(context.Background(), d.TaskID)
 		if err != nil {
 			return err
 		}
-		for rows.Next() {
-			var raw string
-			if err = rows.Scan(&raw); err != nil {
-				rows.Close()
-				return err
-			}
+		if int64(d.Attempt) <= highest {
+			return ErrConflict
+		}
+		receipts, err := q.ResourceReceipts(context.Background(), d.Repository+fmt.Sprintf("#%d", d.Number))
+		if err != nil {
+			return err
+		}
+		for _, raw := range receipts {
 			var receipt execution.Receipt
-			if err = json.Unmarshal([]byte(raw), &receipt); err != nil {
-				rows.Close()
+			if err := json.Unmarshal([]byte(raw), &receipt); err != nil {
 				return err
 			}
 			if !execution.Terminal(receipt.State) {
-				rows.Close()
 				return ErrConflict
 			}
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
 		}
 		v, err = insert(tx, d, "accepted")
 		out = v.receipt
@@ -317,7 +306,8 @@ func (l *Ledger) ReserveSession(taskID string) (session string, reserved bool, e
 		return "", false, fmt.Errorf("missing task identity")
 	}
 	err = l.transaction(func(tx *sql.Tx) error {
-		e := tx.QueryRow("SELECT session FROM sessions WHERE task_id=?", taskID).Scan(&session)
+		var e error
+		session, e = ledgerdb.New(tx).ReadSession(context.Background(), taskID)
 		if e == nil {
 			if session == "" {
 				return ErrUnknown
@@ -327,7 +317,7 @@ func (l *Ledger) ReserveSession(taskID string) (session string, reserved bool, e
 		if e != sql.ErrNoRows {
 			return e
 		}
-		_, e = tx.Exec("INSERT INTO sessions(task_id,session) VALUES(?,'')", taskID)
+		e = ledgerdb.New(tx).ReserveSession(context.Background(), taskID)
 		reserved = e == nil
 		return e
 	})
@@ -340,14 +330,13 @@ func (l *Ledger) SetSession(taskID, session string) error {
 		return fmt.Errorf("empty session")
 	}
 	return l.transaction(func(tx *sql.Tx) error {
-		var current string
-		if err := tx.QueryRow("SELECT session FROM sessions WHERE task_id=?", taskID).Scan(&current); err != nil {
+		current, err := ledgerdb.New(tx).ReadSession(context.Background(), taskID)
+		if err != nil {
 			return err
 		}
 		if current != "" && current != session {
 			return ErrConflict
 		}
-		_, err := tx.Exec("UPDATE sessions SET session=? WHERE task_id=?", session, taskID)
-		return err
+		return ledgerdb.New(tx).SetSession(context.Background(), ledgerdb.SetSessionParams{Session: session, TaskID: taskID})
 	})
 }
