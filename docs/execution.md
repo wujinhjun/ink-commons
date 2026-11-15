@@ -136,9 +136,12 @@ current failed/stopped task will enter backoff if attempts remain. An explicit
 `retry` may bypass backoff or retry after exhaustion, but never bypass unresolved
 executions. Successful runs do not advance GitHub state or automatically rerun.
 
-Existing accepted/unknown tasks imported from older versions get synthetic legacy
-run records with stable persisted IDs. Since the executor never received these
-IDs, only operator confirmation can resolve them. cc-connect's current webhook
+Existing tasks with evidence of prior delivery but no run records get synthetic
+legacy runs with stable persisted IDs. This includes accepted/unknown deliveries
+and any task with `attempts > 0`, including `pending` tasks left by the old retry
+API. They migrate to `unknown`; genuinely unattempted pending tasks remain ready
+for first delivery. Legacy attempt numbers are normalized to at least one. Since
+the executor never received these IDs, only operator confirmation can resolve them. cc-connect's current webhook
 has the same conservative behavior; it receives task/attempt IDs in the prompt
 for diagnostics, but does not yet implement durable admission, status, stop or
 conversation reservation. These integrations remain explicitly tracked in TODO.

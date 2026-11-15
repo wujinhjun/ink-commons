@@ -59,11 +59,21 @@ func taskRoute(w *Work, t *Task) *execution.Route {
 // not receive an attempt identity. Only an operator can confirm them stopped.
 func migrateExecution(w *Work) bool {
 	t := w.Task
-	if t == nil || t.ID != "" {
+	if t == nil {
 		return false
 	}
-	t.ID = uuid.NewString()
-	if t.Delivery == "accepted" || t.Delivery == "unknown" {
+	changed := false
+	if t.ID == "" {
+		t.ID = uuid.NewString()
+		changed = true
+	}
+	// The old retry API retained Attempts when resetting Delivery to pending.
+	// Any evidence of a previous attempt without a run must remain unresolved,
+	// even if an earlier migration has already assigned a task ID.
+	if len(t.Runs) == 0 && (t.Attempts > 0 || t.Delivery == "accepted" || t.Delivery == "unknown") {
+		if t.Attempts < 1 {
+			t.Attempts = 1
+		}
 		route := taskRoute(w, t)
 		a := Attempt{ID: uuid.NewString(), Number: t.Attempts, State: "unknown", CreatedAt: time.Now(), Error: "legacy delivery: manual stop confirmation required", Legacy: true}
 		if route != nil {
@@ -71,8 +81,10 @@ func migrateExecution(w *Work) bool {
 		}
 		a.Request = deliveryFor(w, t, a.ID, a.Number)
 		t.Runs = append(t.Runs, a)
+		t.Delivery, t.Error = "unknown", a.Error
+		changed = true
 	}
-	return true
+	return changed
 }
 
 func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Delivery {

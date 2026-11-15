@@ -333,3 +333,134 @@ func TestLegacyDeliveriesStayUnknownAfterRestart(t *testing.T) {
 		t.Fatal("legacy task identity changed on restart")
 	}
 }
+
+// The pre-lifecycle retry API set Delivery back to pending but retained the
+// attempts counter. That does not prove the previous execution ever stopped.
+func TestLegacyPendingRetryBlocksUntilOperatorConfirmation(t *testing.T) {
+	s, e, repo, path := reliabilityService(t, Reliability{MaxAttempts: 2})
+	st, err := s.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := st.Work["acme/project#42"].Task
+	task.ID, task.Delivery, task.Attempts = "", "pending", 2
+	if err = s.store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = NewService(s.config, path, s.providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w := loadReliability(t, s)
+	if len(w.Task.Runs) != 1 || !w.executionBlocked() {
+		t.Fatalf("legacy pending retry has no unresolved run: %+v", w.Task)
+	}
+	first := w.Task.Runs[0]
+	taskID := w.Task.ID
+	if first.Number != 2 || first.Request.Attempt != 2 || !first.Legacy || first.State != "unknown" || w.Task.Delivery != "unknown" {
+		t.Fatalf("invalid legacy pending migration: %+v", w.Task)
+	}
+	reconcile(t, s)
+	dispatch(t, s, repo)
+	if len(e.deliveries) != 0 {
+		t.Fatal("legacy pending retry overlapped old execution")
+	}
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, httptest.NewRequest("POST", "/v1/work/acme/project/42/retry", nil))
+	if response.Code != 409 {
+		t.Fatal("manual retry bypassed legacy execution", response.Code, response.Body)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = NewService(s.config, path, s.providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w = loadReliability(t, s)
+	if w.Task.ID != taskID || len(w.Task.Runs) != 1 || w.Task.Runs[0].ID != first.ID || !w.executionBlocked() {
+		t.Fatal("restart lost legacy ownership", w.Task)
+	}
+	change := workChange{TaskID: taskID, AttemptID: first.ID, Stopped: true, Reason: "operator stopped and fenced legacy runtime"}
+	body, err := json.Marshal(change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, httptest.NewRequest("POST", "/v1/work/acme/project/42/confirm-stopped", strings.NewReader(string(body))))
+	if response.Code != 200 {
+		t.Fatal("confirmation failed", response.Code, response.Body)
+	}
+	response = httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, httptest.NewRequest("POST", "/v1/work/acme/project/42/retry", nil))
+	if response.Code != 200 {
+		t.Fatal("resolved legacy execution cannot retry", response.Code, response.Body)
+	}
+	dispatch(t, s, repo)
+	w = loadReliability(t, s)
+	if len(e.deliveries) != 1 || w.Task.ID != taskID || len(w.Task.Runs) != 2 || w.Task.Runs[1].Number != 3 || w.Task.Runs[1].ID == first.ID || w.Task.Runs[0].ManualReason != change.Reason {
+		t.Fatal("retry lost identity, attempt numbering, or operator audit", w.Task)
+	}
+}
+
+func TestLegacyMigrationUsesAttemptEvidence(t *testing.T) {
+	cases := []struct {
+		name, delivery, id string
+		attempts           int
+		wantRun            bool
+		wantNumber         int
+	}{
+		{name: "retry pending", delivery: "pending", attempts: 2, wantRun: true, wantNumber: 2},
+		{name: "pending with preassigned ID", delivery: "pending", id: "persisted-task", attempts: 2, wantRun: true, wantNumber: 2},
+		{name: "accepted without counter", delivery: "accepted", wantRun: true, wantNumber: 1},
+		{name: "unknown without counter", delivery: "unknown", wantRun: true, wantNumber: 1},
+		{name: "manual with previous attempt", delivery: "manual", attempts: 3, wantRun: true, wantNumber: 3},
+		{name: "unattempted pending", delivery: "pending"},
+		{name: "unattempted manual", delivery: "manual"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &Work{Repo: "acme/project", Task: &Task{ID: tc.id, Role: "reviewer", SHA: strings.Repeat("a", 40), Delivery: tc.delivery, Attempts: tc.attempts}}
+			w.Pull.Number = 42
+			if !migrateExecution(w) {
+				t.Fatal("migration did not persist changes")
+			}
+			if w.Task.ID == "" || (tc.id != "" && w.Task.ID != tc.id) {
+				t.Fatal("task identity lost", w.Task.ID)
+			}
+			if w.executionBlocked() != tc.wantRun {
+				t.Fatal("unexpected execution admission", w.Task)
+			}
+			if tc.wantRun {
+				if len(w.Task.Runs) != 1 {
+					t.Fatal("missing legacy run", w.Task)
+				}
+				a := w.Task.Runs[0]
+				if !a.Legacy || a.State != "unknown" || a.ID == "" || a.Number != tc.wantNumber || a.Request.Attempt != tc.wantNumber || a.Request.TaskID != w.Task.ID || a.Request.AttemptID != a.ID || w.Task.Delivery != "unknown" || w.Task.Attempts != tc.wantNumber {
+					t.Fatal("invalid legacy run", w.Task)
+				}
+			} else if len(w.Task.Runs) != 0 || w.Task.Delivery != tc.delivery || w.Task.Attempts != 0 {
+				t.Fatal("unattempted task changed", w.Task)
+			}
+			before, err := json.Marshal(w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if migrateExecution(w) {
+				t.Fatal("migration is not idempotent")
+			}
+			after, err := json.Marshal(w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatal("repeat migration altered execution records")
+			}
+		})
+	}
+}
