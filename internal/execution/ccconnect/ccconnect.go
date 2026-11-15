@@ -12,6 +12,7 @@ import (
 const Name = "cc-connect"
 
 type Executor struct {
+	managed      bool
 	client       *http.Client
 	endpoint     string
 	token        string
@@ -159,9 +160,20 @@ func (e *Executor) Deliver(ctx context.Context, route execution.Route, task exec
 	}
 	prompt := fmt.Sprintf("Ink Commons %s task for PR %s\nCommit: %s\nTask: %s\nAttempt: %s (%d)\n", task.Role, task.URL, task.SHA, task.TaskID, task.AttemptID, task.Attempt)
 	if task.Role == "reviewer" {
+		prompt += "Expected GitHub review author: " + task.GitHubLogin + ". Verify the authenticated identity before submitting; report a blocker rather than fall back to another identity. "
+		if task.GitHubCommand != "" {
+			prompt += "Use the configured GitHub command: " + task.GitHubCommand + ". "
+		}
 		prompt += "Review this exact commit and submit the official review in GitHub against that commit. Use Approve or Request changes."
 	} else {
-		prompt += "Read the GitHub review at " + task.ReviewURL + " and address its findings. Check that the PR head is still the indicated commit before working."
+		prompt += "Read the GitHub review at " + task.ReviewURL + " and address its findings. Check that the PR head is still the indicated commit before working. Run the relevant checks, commit and push the fixes to the PR source branch so the new head triggers re-review. If blocked, report the blocker explicitly."
+	}
+	if task.Feedback != "" {
+		prompt += "\nPrevious workflow feedback:\n" + task.Feedback
+	}
+	if e.managed {
+		_, err := e.executionCall(ctx, "deliver", route, task, prompt, "", "")
+		return err
 	}
 	body := map[string]string{"project": route.Target, "session_key": route.Session, "prompt": prompt, "event": "ink-commons:" + task.Role}
 	var ack struct {
@@ -185,4 +197,51 @@ func discordChannel(session string) (string, error) {
 		return "", fmt.Errorf("invalid cc-connect Discord session")
 	}
 	return channel, nil
+}
+
+func (e *Executor) EnableMonitoring(enabled bool) { e.managed = enabled }
+func (e *Executor) MonitoringEnabled() bool       { return e.managed }
+func (e *Executor) Status(ctx context.Context, r execution.Route, d execution.Delivery) (execution.Receipt, error) {
+	return e.executionCall(ctx, "status", r, d, "", "", "")
+}
+func (e *Executor) Stop(ctx context.Context, r execution.Route, d execution.Delivery) (execution.Receipt, error) {
+	return e.executionCall(ctx, "stop", r, d, "", "", "")
+}
+func (e *Executor) ConfirmStopped(ctx context.Context, r execution.Route, d execution.Delivery, reason string) error {
+	_, err := e.executionCall(ctx, "resolve", r, d, "", "", reason)
+	return err
+}
+func (e *Executor) Notify(ctx context.Context, r execution.Route, n execution.Notice) error {
+	_, err := e.executionCall(ctx, "notify", r, execution.Delivery{}, n.Message, n.ID, "")
+	return err
+}
+func (e *Executor) executionCall(ctx context.Context, operation string, route execution.Route, task execution.Delivery, prompt, noticeID, reason string) (execution.Receipt, error) {
+	if !e.managed {
+		return execution.Receipt{}, fmt.Errorf("cc-connect execution monitoring is disabled")
+	}
+	body := struct {
+		Version   int                 `json:"version"`
+		Operation string              `json:"operation"`
+		Route     execution.Route     `json:"route"`
+		Task      *execution.Delivery `json:"task,omitempty"`
+		Prompt    string              `json:"prompt,omitempty"`
+		NoticeID  string              `json:"notice_id,omitempty"`
+		Reason    string              `json:"reason,omitempty"`
+	}{Version: 1, Operation: operation, Route: route, Prompt: prompt, NoticeID: noticeID, Reason: reason}
+	if operation != "notify" {
+		body.Task = &task
+	}
+	var response struct {
+		Status  string            `json:"status"`
+		Error   string            `json:"error,omitempty"`
+		Receipt execution.Receipt `json:"receipt"`
+	}
+	err := execution.PostJSON(ctx, e.client, strings.TrimRight(e.endpoint, "/")+"/execution", "Bearer "+e.token, body, &response)
+	if err == nil && response.Status != "accepted" {
+		err = fmt.Errorf("managed executor did not accept request")
+	}
+	if err == nil && operation == "status" && response.Error != "" {
+		err = fmt.Errorf("executor: %s", response.Error)
+	}
+	return response.Receipt, err
 }

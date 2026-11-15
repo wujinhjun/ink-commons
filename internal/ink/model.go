@@ -9,8 +9,9 @@ import (
 )
 
 type Assignee struct {
-	GitHubLogin string           `json:"github_login,omitempty"`
-	Route       *execution.Route `json:"route,omitempty"`
+	GitHubCommand string           `json:"github_command,omitempty"`
+	GitHubLogin   string           `json:"github_login,omitempty"`
+	Route         *execution.Route `json:"route,omitempty"`
 }
 
 type Push struct {
@@ -66,19 +67,39 @@ type Attempt struct {
 }
 
 type Task struct {
-	ID        string    `json:"task_id,omitempty"`
-	Runs      []Attempt `json:"runs,omitempty"`
-	RetryAt   time.Time `json:"retry_at,omitempty"`
-	Role      string    `json:"role"`
-	SHA       string    `json:"sha"`
-	ReviewID  int64     `json:"review_id,omitempty"`
-	ReviewURL string    `json:"review_url,omitempty"`
-	Delivery  string    `json:"delivery"`
-	Error     string    `json:"error,omitempty"`
-	Attempts  int       `json:"attempts"`
+	PreparationReason string    `json:"preparation_reason,omitempty"`
+	CreatedAt         time.Time `json:"created_at,omitempty"`
+	Preparation       string    `json:"preparation,omitempty"`
+	PreparedSession   string    `json:"prepared_session,omitempty"`
+	ID                string    `json:"task_id,omitempty"`
+	Runs              []Attempt `json:"runs,omitempty"`
+	RetryAt           time.Time `json:"retry_at,omitempty"`
+	Role              string    `json:"role"`
+	SHA               string    `json:"sha"`
+	ReviewID          int64     `json:"review_id,omitempty"`
+	ReviewURL         string    `json:"review_url,omitempty"`
+	Delivery          string    `json:"delivery"`
+	Error             string    `json:"error,omitempty"`
+	Attempts          int       `json:"attempts"`
 }
 
+type Alert struct {
+	ID                   string    `json:"id"`
+	Code                 string    `json:"code"`
+	Message              string    `json:"message"`
+	SHA                  string    `json:"sha"`
+	Active               bool      `json:"active"`
+	CreatedAt            time.Time `json:"created_at"`
+	NotificationAccepted bool      `json:"notification_accepted"`
+	Error                string    `json:"error,omitempty"`
+}
+type Workflow struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
 type Work struct {
+	Workflow  Workflow         `json:"workflow"`
+	Alerts    []Alert          `json:"alerts,omitempty"`
 	Repo      string           `json:"repo"`
 	Pull      Pull             `json:"pull_request"`
 	Origin    *execution.Route `json:"origin,omitempty"`
@@ -139,6 +160,7 @@ func (w *Work) setTask(task Task, assignee Assignee) {
 	if assignee.Route != nil {
 		task.Delivery = "pending"
 	}
+	task.CreatedAt = time.Now()
 	task.ID = uuid.NewString()
 	w.replaceTask(&task)
 }

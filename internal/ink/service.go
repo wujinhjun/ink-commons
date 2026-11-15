@@ -40,6 +40,8 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 		if migrateExecution(w) {
 			changed = true
 		}
+		w.refreshWorkflow(time.Now(), config.Reliability.defaults())
+		changed = true
 	}
 	if changed {
 		if err := store.save(st); err != nil {
@@ -102,6 +104,7 @@ func matchOrigin(pushes []Push, pull Pull) *execution.Route {
 func key(repo string, number int) string { return fmt.Sprintf("%s#%d", repo, number) }
 
 func (s *Service) Poll(ctx context.Context) {
+	defer s.deliverAlerts(ctx)
 	if err := s.reconcileExecutions(ctx); err != nil {
 		log.Printf("execution recovery: %v", err)
 	}
@@ -177,7 +180,7 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	id := key(repo.Repo, pull.Number)
 	work := st.Work[id]
 	if work == nil {
-		work = &Work{Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
+		work = &Work{Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
 		if repo.ReviewerRoute != nil {
 			route := *repo.ReviewerRoute
 			work.Reviewer.Route = &route
@@ -194,6 +197,7 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		work.Reviews = mergeReviews(work.Reviews, reviews)
 	}
 	work.derive()
+	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	return s.store.save(st)
 }
 
@@ -236,7 +240,7 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 		return nil, err
 	}
 	work := st.Work[id]
-	if work == nil || work.Task == nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
+	if work == nil || work.Task == nil || (work.Task.Preparation == "reserved" || work.Task.Preparation == "unknown") || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
 		return nil, nil
 	}
 
@@ -278,6 +282,7 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 			continue
 		}
 		t.Runs = work.Task.Runs
+		t.Preparation, t.PreparedSession, t.PreparationReason = work.Task.Preparation, work.Task.PreparedSession, work.Task.PreparationReason
 		if live.Task == t {
 			t.Delivery, t.Error = work.Task.Delivery, work.Task.Error
 			if route := taskRoute(work, work.Task); route != nil {
@@ -290,6 +295,7 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 			}
 		}
 	}
+	live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	return s.store.save(st)
 }
 
@@ -322,6 +328,10 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 	}
 	attempt := &task.Runs[len(task.Runs)-1]
 	delivery := attempt.Request
+	if route.Session == "" && task.PreparedSession != "" {
+		route.Session = task.PreparedSession
+		attempt.Route = *route
+	}
 	if route.Session == "" {
 		*route = allocationRoute(repo, *route)
 		attempt.Route = *route
@@ -336,17 +346,24 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 			task.Error = "invalid preparation context: " + err.Error()
 			return s.saveDelivery(id, work)
 		}
+		task.Preparation = "reserved"
+		if err := s.saveDelivery(id, work); err != nil {
+			return err
+		}
 		session, err := executor.Prepare(ctx, *route, delivery)
 		if err != nil {
+			task.Preparation = "unknown"
 			task.Error = "prepare destination: " + err.Error()
 			return s.saveDelivery(id, work)
 		}
 		prepared := *route
 		prepared.Session = session
 		if err := execution.ValidateDestination(s.providers, prepared, false); err != nil {
+			task.Preparation = "unknown"
 			task.Error = "provider returned an invalid destination"
 			return s.saveDelivery(id, work)
 		}
+		task.Preparation, task.PreparedSession = "ready", session
 		*route = prepared
 		attempt.Route = prepared
 		if err := s.saveDelivery(id, work); err != nil {

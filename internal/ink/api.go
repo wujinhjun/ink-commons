@@ -15,13 +15,14 @@ import (
 )
 
 type workChange struct {
-	TaskID      string           `json:"task_id,omitempty"`
-	AttemptID   string           `json:"attempt_id,omitempty"`
-	Stopped     bool             `json:"stopped,omitempty"`
-	Reason      string           `json:"reason,omitempty"`
-	Role        string           `json:"role,omitempty"`
-	GitHubLogin string           `json:"github_login,omitempty"`
-	Route       *execution.Route `json:"route,omitempty"`
+	GitHubCommand string           `json:"github_command,omitempty"`
+	TaskID        string           `json:"task_id,omitempty"`
+	AttemptID     string           `json:"attempt_id,omitempty"`
+	Stopped       bool             `json:"stopped,omitempty"`
+	Reason        string           `json:"reason,omitempty"`
+	Role          string           `json:"role,omitempty"`
+	GitHubLogin   string           `json:"github_login,omitempty"`
+	Route         *execution.Route `json:"route,omitempty"`
 }
 
 type apiError struct {
@@ -146,6 +147,10 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if action == "confirm-stopped" {
+		s.confirmStopped(w, r, repo, number, change)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.store.load()
@@ -165,7 +170,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	// Return an existing reviewer assignment even during delivery so a
 	// repeated request cannot reset the task or allocate another session.
 	if action == "assign" && change.Role == "reviewer" && work.Linked {
-		requested := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), Route: change.Route}
+		requested := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
 		if requested.GitHubLogin != "" && sameReviewer(work.Reviewer, requested) {
 			reply(w, 200, work)
 			return
@@ -193,6 +198,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	if err := s.store.save(st); err != nil {
 		fail(w, err)
 		return
@@ -201,7 +207,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 }
 
 func applyChange(work *Work, action string, change workChange) error {
-	assignee := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), Route: change.Route}
+	assignee := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
 	switch action {
 	case "link":
 		if assignee.GitHubLogin == "" && assignee.Route == nil {
@@ -228,6 +234,19 @@ func applyChange(work *Work, action string, change workChange) error {
 		if work.Task != nil && work.Task.Role == change.Role {
 			work.replaceTask(nil)
 		}
+	case "confirm-prepared":
+		if work.Task == nil || change.TaskID != work.Task.ID || change.Route == nil || change.Route.Session == "" || strings.TrimSpace(change.Reason) == "" {
+			return apiError{400, "current task_id, existing route session and reconciliation reason are required"}
+		}
+		if work.Task.Preparation != "reserved" && work.Task.Preparation != "unknown" {
+			return apiError{409, "no ambiguous preparation"}
+		}
+		route := taskRoute(work, work.Task)
+		if route == nil || route.Provider != change.Route.Provider || route.Target != change.Route.Target {
+			return apiError{409, "preparation destination mismatch"}
+		}
+		*route = *change.Route
+		work.Task.Preparation, work.Task.PreparedSession, work.Task.PreparationReason = "ready", change.Route.Session, change.Reason
 	case "confirm-stopped":
 		if !change.Stopped || strings.TrimSpace(change.Reason) == "" || change.TaskID == "" || change.AttemptID == "" {
 			return apiError{400, "task_id, attempt_id, stopped=true and reason are required"}
@@ -268,7 +287,7 @@ func applyChange(work *Work, action string, change workChange) error {
 }
 
 func sameReviewer(current, requested Assignee) bool {
-	if !strings.EqualFold(current.GitHubLogin, requested.GitHubLogin) {
+	if current.GitHubCommand != requested.GitHubCommand || !strings.EqualFold(current.GitHubLogin, requested.GitHubLogin) {
 		return false
 	}
 	if current.Route == nil || requested.Route == nil {
@@ -279,4 +298,87 @@ func sameReviewer(current, requested Assignee) bool {
 		want.Session = current.Route.Session
 	}
 	return *current.Route == want
+}
+
+func (s *Service) confirmStopped(out http.ResponseWriter, r *http.Request, repo string, number int, change workChange) {
+	id := key(repo, number)
+	if !change.Stopped || strings.TrimSpace(change.Reason) == "" || change.TaskID == "" || change.AttemptID == "" {
+		fail(out, apiError{400, "task_id, attempt_id, stopped=true and reason are required"})
+		return
+	}
+	s.mu.Lock()
+	st, err := s.store.load()
+	if err != nil {
+		s.mu.Unlock()
+		fail(out, err)
+		return
+	}
+	work := st.Work[id]
+	if work == nil {
+		s.mu.Unlock()
+		fail(out, apiError{404, "PR not observed yet"})
+		return
+	}
+	if s.delivering[id] {
+		s.mu.Unlock()
+		fail(out, apiError{409, "delivery in progress"})
+		return
+	}
+	var attempt *Attempt
+	for _, t := range work.executionTasks() {
+		if t.ID == change.TaskID {
+			for i := range t.Runs {
+				if t.Runs[i].ID == change.AttemptID {
+					copy := t.Runs[i]
+					attempt = &copy
+				}
+			}
+		}
+	}
+	if attempt == nil {
+		s.mu.Unlock()
+		fail(out, apiError{404, "execution attempt not found"})
+		return
+	}
+	if execution.Terminal(attempt.State) {
+		s.mu.Unlock()
+		fail(out, apiError{409, "attempt already ended"})
+		return
+	}
+	s.delivering[id] = true
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); delete(s.delivering, id); s.mu.Unlock() }()
+	provider := s.providers[attempt.Route.Provider]
+	enabled := true
+	if capability, ok := provider.(interface{ MonitoringEnabled() bool }); ok {
+		enabled = capability.MonitoringEnabled()
+	}
+	if resolver, ok := provider.(execution.StopResolver); ok && enabled && !attempt.Legacy {
+		if err := resolver.ConfirmStopped(r.Context(), attempt.Route, attempt.Request, change.Reason); err != nil {
+			fail(out, apiError{409, "executor could not persist stop confirmation: " + err.Error()})
+			return
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err = s.store.load()
+	if err != nil {
+		fail(out, err)
+		return
+	}
+	work = st.Work[id]
+	if work == nil {
+		fail(out, apiError{404, "work item disappeared"})
+		return
+	}
+	if err = applyChange(work, "confirm-stopped", change); err != nil {
+		fail(out, err)
+		return
+	}
+	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	if err = s.store.save(st); err != nil {
+		fail(out, err)
+		return
+	}
+	reply(out, 200, work)
 }

@@ -73,12 +73,12 @@ GitHub 的当前 PR 快照是状态来源。轮询间隔默认 60 秒。hook 路
 GitHub 上开 Draft PR，等同砚发现并关联后，在 Mini 上执行：
 
 ```sh
-ink review --github-login 'yanshi-reviewer[bot]' \
+ink review --github-login 'yanshi-reviewer[bot]' --github-command yanshi-reviewer \
   --target mo-cangli-pi \
   https://github.com/owner/repository/pull/42
 ```
 
-`--target` 是 cc-connect 项目。不传 `--parent` 时，使用工作项所绑定的开发 thread 的父频道；审查 thread 命名为 `Review owner/repository #42 · 开发 thread 标题`。工作项需通过 hook 或 `link` 关联开发会话。省略父频道且缺少有效 Discord 来源时，指派请求会立即报错；来源的远端读取失败会在下一次投递时记录到 `task.error`，不会任意选择其他频道。`--parent` 可显式覆盖创建位置。`--github-login` 是正式提交 review 的 GitHub 身份。用 `--session discord:THREAD_ID` 可以复用已有会话，只传 `--github-login` 则交给真人。开发 agent 可以用同一条命令代办。
+`--github-command` 指定 reviewer 使用的 GitHub CLI / App 入口，随期望的 `github_login` 一起传给 Agent；身份不符的 review 会告警并保留原审查状态。`--target` 是 cc-connect 项目。不传 `--parent` 时，使用工作项所绑定的开发 thread 的父频道；审查 thread 命名为 `Review owner/repository #42 · 开发 thread 标题`。工作项需通过 hook 或 `link` 关联开发会话。省略父频道且缺少有效 Discord 来源时，指派请求会立即报错；来源的远端读取失败会在下一次投递时记录到 `task.error`，不会任意选择其他频道。`--parent` 可显式覆盖创建位置。`--github-login` 是正式提交 review 的 GitHub 身份。用 `--session discord:THREAD_ID` 可以复用已有会话，只传 `--github-login` 则交给真人。开发 agent 可以用同一条命令代办。
 
 设好 reviewer 后，在 GitHub 标记 Ready for review。同砚在下一轮轮询中创建审查会话并派发任务。PR 已经是 Ready 时，指派会直接进入待派发。重复提交相同指派会保留已有会话和投递状态。修改后推送新 commit，同砚会沿用该 reviewer 复审。
 
@@ -101,22 +101,27 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 | `POST /v1/work/{owner}/{repo}/{number}/link` | 手动关联未认领 PR。请求体提供 `github_login` 或 `route`。路由包含 `provider`、`target`、`session`。 |
 | `POST /v1/work/{owner}/{repo}/{number}/assign` | 为 `developer` 或 `reviewer` 更新负责人。传 `github_login` 即可转给人。传 `route` 可指定已有 bot 会话。指定 reviewer 时也可以省略 `session`，让执行端按 `provider`、`target` 和适用的 `parent` 创建会话。 |
 | `POST /v1/work/{owner}/{repo}/{number}/retry` | 在下次轮询重试当前 bot 待办。所有旧轮次已确认结束才允许重试；保留 task_id，生成新的 attempt_id。 |
+| `POST /v1/work/{owner}/{repo}/{number}/confirm-prepared` | 人工关联创建结果不明的审查 thread。提供当前 task_id、包含已有 session 的 route 和 reason。 |
 | `POST /v1/work/{owner}/{repo}/{number}/confirm-stopped` | 人工确认指定轮次已停止且延迟投递已被禁止。必须提供 task_id、attempt_id、stopped: true 和 reason，保留确认记录。 |
 | `POST /v1/pushes` | Git hook 提交候选关联记录。 |
 
-`assign` 修改未来任务的投递。新 SHA、改派、Draft 和 PR 关闭都会保留旧轮次记录；旧执行未确认结束时，不会投递后续 bot 任务。接手之前如果 bot 正在工作，先在原执行端停止它并禁止延迟投递，再接管目录或处理未提交改动。`accepted` 表示执行端接收请求，正式 GitHub review 或新的 PR 版本才表示工作状态推进。cc-connect 忙时可能跳过任务，待办仍可在 API 中查看、重试或转给人。
+`assign` 修改未来任务的投递。新 SHA、改派、Draft 和 PR 关闭都会保留旧轮次记录；旧执行未确认结束时，不会投递后续 bot 任务。接手之前如果 bot 正在工作，先在原执行端停止它并禁止延迟投递，再接管目录或处理未提交改动。`accepted` 表示执行端接收请求，正式 GitHub review 或新的 PR 版本才表示工作状态推进。未启用受管入口的旧 cc-connect webhook 忙时仍可能跳过任务，待办可在 API 中查看并人工处理。受管入口会持久化排队。
 
 开发计划与完成记录统一维护在 [TODO.md](TODO.md)。
 
 ## 执行可靠性
 
-工作项的 `phase` 继续由 GitHub review 和 head SHA 决定；`task.runs` 单独记录投递、开始 ACK、心跳、结束、停止请求和重试计划。`execution_history` 保存已被业务状态替换的任务。执行成功本身不会把 PR 标成审查通过。
+工作项的 `phase` 继续由 GitHub review 和 head SHA 决定；`task.runs` 单独记录投递、开始 ACK、心跳、结束、停止请求和重试计划。`execution_history` 保存已被业务状态替换的任务。`workflow` 表示等待 Agent、等待审查结论、等待新 SHA 或需要处理；`alerts` 保留身份 / SHA 不符、执行不明、缺少结果和重试耗尽的诊断及通知状态。执行成功本身不会把 PR 标成审查通过。
 
 HTTP 执行端可以通过 `http_provider_execution: true` 显式启用 `status` / `stop` 协议。默认关闭，旧 HTTP 服务不会收到额外操作。执行端必须持久化去重和运行归属，并保证终态表示 Agent 及所有工具已停止、延迟投递不能重新启动旧轮次。仓库提供 SQLite 执行端账本及恢复测试，接入约定见 [执行协议](docs/execution.md)。
 
-配置 `execution` 可设置 `ack_seconds`（默认 120）、`heartbeat_seconds`（180）、`execution_seconds`（3600）、`backoff_seconds`（30）、`max_attempts`（3，含首次投递）。零值使用默认值，`max_attempts: 1` 关闭自动重派。超时先查询、再请求停止；只有终止确认后才按指数退避重试，退避上限一小时。耗尽次数或无法确认停止时需要人工处理。每轮 daemon 轮询先恢复执行状态，即使 GitHub 暂时不可用也会核查执行端。
+cc-connect 的配套受管入口启用后，设置 `cc_connect_execution: true`。服务必须支持 `cc_connect_url + "/execution"`，并在自己的 `[webhook]` 中配置私有 `execution_state` 文件和 token。未升级服务会明确报错，不会退回不可靠的旧投递。受管入口在回复成功前保存任务、忙时持久化排队，并返回开始 ACK、心跳和确认终止后的回执。目前支持 Codex 和 Pi RPC；其他 Agent 须实现终止能力接口。接入示例和两个仓库的联合测试见 [执行协议](docs/execution.md#cc-connect-managed-integration)。
 
-cc-connect 当前 webhook 不支持执行级状态查询、停止或持久化去重，仍按保守模式处理：`accepted` 仅表示接收，失联后保留 `unknown`，不自动重派。历史版本投递的任务也需要人工确认。人工停止并禁止旧请求重新启动后，调用 `confirm-stopped`，再用 `retry` 重试；若未耗尽自动重试次数，当前任务的停止确认也会触发退避重派。人工确认只是可信本地操作者的声明，daemon 不会据此停止外部进程。
+配置 `execution` 可设置 `ack_seconds`（默认 120）、`queue_seconds`（3600）、`result_seconds`（120）、`heartbeat_seconds`（180）、`execution_seconds`（3600）、`backoff_seconds`（30）、`max_attempts`（3，含首次投递）。零值使用默认值，`max_attempts: 1` 关闭自动重派。超时先查询、再请求停止；只有终止确认后才按指数退避重试，退避上限一小时。耗尽次数或无法确认停止时需要人工处理。每轮 daemon 轮询先恢复执行状态，即使 GitHub 暂时不可用也会核查执行端。
+
+Agent 结束后，同砚仍持久化等待正式审查结论或新 SHA。缺少正式审查结论超过 `result_seconds` 时，只在上一轮已确认结束后自动跟进 reviewer，受同一 `max_attempts` 和退避约束。开发完成却没有新 SHA 会明确告警。合法 Request changes 会派发到开发会话；新 SHA 会沿用 reviewer 复审。通知通过受管 cc-connect 入口持久化排队，重启后继续发送；API 中也能看到诊断，不依赖发起 Agent 一直在线。
+
+旧 webhook 和升级前的历史投递仍保持保守模式：无法证明旧执行停止时不重派。人工停止并禁止延迟投递后，调用 `confirm-stopped`；受管 cc-connect 会先在执行端记录该确认，再更新同砚。创建 thread 的预留结果不明时，还需通过 `confirm-prepared` 关联已有 thread，确认前不会再次创建。人工声明不会自行停止外部进程。
 
 ## 状态、备份与回滚
 
