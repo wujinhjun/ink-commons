@@ -1,13 +1,18 @@
 package ink
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ink-commons/internal/execution"
@@ -30,20 +35,25 @@ type Repository struct {
 }
 
 type Config struct {
-	Repositories []Repository
-	PollSeconds  int
-	Reliability  Reliability
-	GitHubToken  string
+	Repositories  []Repository
+	PollSeconds   int
+	Reliability   Reliability
+	GitHubToken   string
+	GitHubCommand string
+	PollGate      string
 }
 
 type upstream struct {
-	token  string
-	http   *http.Client
-	github string
+	lastOK  *atomic.Int64
+	command string
+	token   string
+	http    *http.Client
+	github  string
 }
 
 func newUpstream(token string) upstream {
 	return upstream{
+		lastOK: new(atomic.Int64),
 		token:  token,
 		github: "https://api.github.com",
 		http: &http.Client{
@@ -54,6 +64,9 @@ func newUpstream(token string) upstream {
 }
 
 func (u upstream) gitHubGet(ctx context.Context, path string, result any) (http.Header, error) {
+	if u.command != "" {
+		return u.commandGet(ctx, path, result)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.github+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("invalid upstream request")
@@ -73,6 +86,7 @@ func (u upstream) gitHubGet(ctx context.Context, path string, result any) (http.
 	if err := json.NewDecoder(io.LimitReader(res.Body, 32<<20)).Decode(result); err != nil {
 		return nil, fmt.Errorf("invalid upstream response")
 	}
+	u.lastOK.Store(time.Now().Unix())
 	return res.Header, nil
 }
 
@@ -94,4 +108,55 @@ func listPages[T any](ctx context.Context, u upstream, path string) ([]T, error)
 			return all, nil
 		}
 	}
+}
+
+// App CLI 每次请求获取单仓库短期凭据，不把一小时 token 固定在常驻进程中。
+// 不经过 shell，不读取个人 gh 登录；失败时只返回通用错误，避免转发子进程秘密。
+func (u upstream) commandGet(ctx context.Context, path string, result any) (http.Header, error) {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) < 3 || parts[0] != "repos" || !ValidRepository(parts[1]+"/"+parts[2]) {
+		return nil, fmt.Errorf("GitHub command requires a repository API path")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, u.command, "--profile", "inspect", "-R", parts[1]+"/"+parts[2], "api", "--include", "--method", "GET", path)
+	output := &boundedOutput{remaining: 32 << 20}
+	cmd.Stdout = output
+	// Stderr 不继承：broker/CLI 的诊断可能包含本机认证上下文。
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("GitHub App command timed out or cancelled")
+		}
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return nil, fmt.Errorf("GitHub App command exited (status %d)", exit.ExitCode())
+		}
+		return nil, fmt.Errorf("GitHub App command could not run")
+	}
+	response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(output.Bytes())), nil)
+	if err != nil {
+		return nil, fmt.Errorf("invalid GitHub command response")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("upstream HTTP %d", response.StatusCode)
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<20)).Decode(result); err != nil {
+		return nil, fmt.Errorf("invalid upstream response")
+	}
+	u.lastOK.Store(time.Now().Unix())
+	return response.Header, nil
+}
+
+type boundedOutput struct {
+	bytes.Buffer
+	remaining int
+}
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	if len(p) > b.remaining {
+		return 0, fmt.Errorf("GitHub output exceeds limit")
+	}
+	b.remaining -= len(p)
+	return b.Buffer.Write(p)
 }

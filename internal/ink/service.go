@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,7 @@ type Service struct {
 	config     Config
 	up         upstream
 	mu         sync.Mutex
+	lastPoll   atomic.Int64
 	delivering map[string]bool
 	providers  map[string]execution.Executor
 }
@@ -49,7 +51,9 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 			return nil, err
 		}
 	}
-	return &Service{store: store, config: config, up: newUpstream(config.GitHubToken), providers: providers, delivering: make(map[string]bool)}, nil
+	up := newUpstream(config.GitHubToken)
+	up.command = config.GitHubCommand
+	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool)}, nil
 }
 
 func (s *Service) Close() error { return s.store.db.Close() }
@@ -104,6 +108,7 @@ func matchOrigin(pushes []Push, pull Pull) *execution.Route {
 func key(repo string, number int) string { return fmt.Sprintf("%s#%d", repo, number) }
 
 func (s *Service) Poll(ctx context.Context) {
+	defer func() { s.lastPoll.Store(time.Now().Unix()) }()
 	if err := s.reconcileExecutions(ctx); err != nil {
 		log.Printf("execution recovery: %v", err)
 	}

@@ -95,7 +95,8 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 
 | 接口 | 行为 |
 |---|---|
-| `GET /healthz` | 检查本地 API 可达。 |
+| `GET /healthz` | 查看运行 revision、gate、last_poll 和 last_github_ok。 |
+| `GET /v1/self-check` | 由 daemon 用自身环境验证所有配置仓库的 PR 读取权限，不派发任务。 |
 | `GET /v1/work` | 列出已观察的 PR 和当前待办。 |
 | `GET /v1/work/{owner}/{repo}/{number}` | 查看一条 PR 的来源、负责人、审查版本和投递状态。 |
 | `POST /v1/work/{owner}/{repo}/{number}/link` | 手动关联未认领 PR。请求体提供 `github_login` 或 `route`。路由包含 `provider`、`target`、`session`。 |
@@ -144,3 +145,7 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 配置仓库的 `reviewer_command`，或用 `ink review --github-command`，可把正确的 App 命令一并交给 reviewer。任务还会带上当前活动诊断，便于人工重试时了解上次未推进的原因。`execution.result_seconds`（默认 120）仅控制已确认结束但缺少业务结果时的诊断等待时间；不会自动重派成功的执行。
 
 本功能兼容现有 cc-connect webhook，不需要 cc-connect 配套改动，也不调用新的执行或通知接口。诊断通过 API 和日志查看；可靠队列、Discord 自动诊断通知及缺少结论时自动唤醒 reviewer 留待后续接入。现有 webhook 的忙时丢弃与执行无法确认限制仍按前述保守方式处理。
+
+## macOS 服务与版本部署
+
+安装、更新和从登录启动迁移到开机启动，见 [macOS 部署与恢复](deploy/macos/README.md)。部署按指定提交构建，通过 `/healthz` 返回的 `revision` 核对实际运行版本；使用 App CLI 按仓库刷新短期凭据。系统迁移同时处理 cc-connect 登录依赖，不需要 cc-connect 新协议。FileVault 冷启动仍需先解锁磁盘。

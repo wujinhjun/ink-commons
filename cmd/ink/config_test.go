@@ -70,3 +70,21 @@ func TestExecutionConfigRequiresExplicitMonitoring(t *testing.T) {
 		}
 	}
 }
+
+func TestAppCommandConfiguration(t *testing.T) {
+	for _, command := range []string{"/usr/local/bin/yuxingyi", "yuxingyi"} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		body := fmt.Sprintf(`{"github_command":%q,"repositories":[{"repo":"acme/project","reviewer_login":"reviewer"}]}`, command)
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, _, err := loadConfig(path)
+		if filepath.IsAbs(command) {
+			if err != nil || cfg.GitHubCommand != command {
+				t.Fatal(cfg, err)
+			}
+		} else if err == nil {
+			t.Fatal("relative command accepted")
+		}
+	}
+}
