@@ -27,6 +27,7 @@ func ValidRepository(name string) bool {
 var shaPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
 
 type Repository struct {
+	PostApproval    *ApprovalHook    `json:"postApproval,omitempty"`
 	ReviewerCommand string           `json:"reviewer_command,omitempty"`
 	Repo            string           `json:"repo"`
 	HumanDeveloper  string           `json:"human_developer,omitempty"`
@@ -35,12 +36,13 @@ type Repository struct {
 }
 
 type Config struct {
-	Repositories  []Repository
-	PollSeconds   int
-	Reliability   Reliability
-	GitHubToken   string
-	GitHubCommand string
-	PollGate      string
+	RepositoryDefaults Repository
+	Repositories       []Repository
+	PollSeconds        int
+	Reliability        Reliability
+	GitHubToken        string
+	GitHubCommand      string
+	PollGate           string
 }
 
 type upstream struct {

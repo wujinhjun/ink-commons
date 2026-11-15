@@ -18,7 +18,8 @@ import (
 
 func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) {
 	var file struct {
-		Repositories []struct {
+		RepositoryDefaults ink.Repository `json:"repository_defaults,omitempty"`
+		Repositories       []struct {
 			ink.Repository
 			ReviewerProject string `json:"reviewer_project,omitempty"`
 			ReviewChannel   string `json:"review_channel_id,omitempty"`
@@ -61,8 +62,12 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	if cfg.PollSeconds == 0 {
 		cfg.PollSeconds = 60
 	}
-	if len(file.Repositories) == 0 {
-		return cfg, nil, fmt.Errorf("configure at least one repository")
+	cfg.RepositoryDefaults = file.RepositoryDefaults
+	if cfg.RepositoryDefaults.Repo != "" {
+		return cfg, nil, fmt.Errorf("repository_defaults must not set repo")
+	}
+	if err := cfg.RepositoryDefaults.PostApproval.Validate(); err != nil {
+		return cfg, nil, err
 	}
 
 	client := &http.Client{
@@ -91,10 +96,21 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	if file.HTTPExecution && file.HTTPURL == "" {
 		return cfg, nil, fmt.Errorf("http_provider_execution requires http_provider_url")
 	}
+	if route := cfg.RepositoryDefaults.ReviewerRoute; route != nil {
+		if route.Provider == ccconnect.Name && file.CCConnectURL == "" {
+			return cfg, nil, fmt.Errorf("configure cc_connect_url for repository_defaults")
+		}
+		if err := execution.ValidateDestination(providers, *route, true); err != nil {
+			return cfg, nil, err
+		}
+	}
 	seen := make(map[string]bool)
 	for _, entry := range file.Repositories {
 		repo := entry.Repository
 		repo.Repo = strings.ToLower(repo.Repo)
+		if err := repo.PostApproval.Validate(); err != nil {
+			return cfg, nil, err
+		}
 		if !ink.ValidRepository(repo.Repo) || seen[repo.Repo] || repo.ReviewerLogin == "" {
 			return cfg, nil, fmt.Errorf("each repository needs a unique owner/repo and reviewer_login")
 		}

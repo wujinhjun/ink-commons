@@ -4,7 +4,7 @@
 
 ## 开始
 
-需要 Go 1.23+ 和 Git。daemon 跟踪配置中的仓库。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。可以把任务留给人工处理，或配置执行端自动接单。
+需要 Go 1.23+ 和 Git。daemon 跟踪配置及动态注册的仓库。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。可以把任务留给人工处理，或配置执行端自动接单。
 
 ```sh
 go build -o ink ./cmd/ink
@@ -15,6 +15,67 @@ cp config.example.json config.json
 默认状态目录是 `$XDG_STATE_HOME/ink-commons` 或 `~/.local/state/ink-commons`。daemon 与 hook 可以通过同一个 `INK_DATA_DIR` 覆盖。HTTP API 通过仅当前用户可访问的 `ink.sock` 提供。配置文件使用 `config.example.json` 的结构，凭据从环境变量读取。
 
 受管仓库从 `git rev-parse --git-path hooks/pre-push` 确认默认 hook 位置。使用 `core.hooksPath` 的工作区按该设置安装。没有现有 hook 时，把 `scripts/ink-pre-push` 安装为可执行的 `pre-push`。已有 hook 时，从现有 hook 为同砚和原检查分别传入同一份标准输入。让执行 Git 命令的进程能在 PATH 找到 `ink`，或通过 `INK_BIN` 指定绝对路径。
+
+## 全局注册命令
+
+把新版 `ink` 放入 PATH 后，在任意 GitHub checkout 执行：
+
+```sh
+ink register
+```
+
+命令读取 `origin`，自动识别 `owner/repo`，通过本地 Unix socket 向 daemon 注册。可用 `--remote upstream` 选择其他 remote，或在任意目录用 `ink register owner/repo` 指定仓库。daemon 使用自身 GitHub 身份验证 PR 读取权限；不会读取调用者的个人 gh 凭据。注册持久化到 SQLite，下一轮轮询生效，不需要修改配置文件或重启。相同设置重复注册是幂等的；设置冲突返回错误，不覆盖已有设置。配置文件中的仓库优先于动态注册。当前不提供动态改配或注销接口。
+
+为了让 `ink register` 无需重复填写 reviewer，可在 daemon 配置中设置默认值：
+
+```json
+{
+  "repository_defaults": {
+    "reviewer_login": "your-reviewer[bot]",
+    "reviewer_command": "your-reviewer-cli",
+    "reviewer_route": {
+      "provider": "cc-connect",
+      "target": "reviewer-project",
+      "parent": "123456789012345678"
+    }
+  },
+  "repositories": []
+}
+```
+
+沿用现有 `cc_connect_url` 和所需环境变量；上述片段只展示新增配置。`repository_defaults` 仅用于新注册，不回写已有工作项。也可以显式指定参数：
+
+```sh
+ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-cli \
+  --target reviewer-project --parent 123456789012345678 owner/repository
+```
+
+注册管理的是 GitHub 仓库，不安装 Git hook。自动关联开发会话仍需安装前述 pre-push hook，或通过 `link` 登记。只注册仓库不会把未认领 PR 自动指派给某个开发会话。
+
+## 审查通过后的 postApproval
+
+在单个仓库配置或 `repository_defaults` 中设置 `postApproval`，也可用 `ink register --post-approval /absolute/path/to/script` 为新仓库指定脚本：
+
+```json
+{
+  "postApproval": {
+    "command": ["/absolute/path/to/after-approval", "--notify"],
+    "timeout_seconds": 60
+  }
+}
+```
+
+`command` 是 argv 数组，首项必须是绝对路径。不经过 shell 展开，也不执行 PR 中声明的命令。脚本由 daemon 用户运行，默认超时 60 秒，上限 3600 秒；标准输出和标准错误不写入状态或 daemon 日志。脚本需自行记录业务结果。
+
+仅当已关联、非 Draft、未关闭 PR 被指定 reviewer 对当前 head SHA 正式 Approve，工作项进入 `approved` 时触发。其他人或旧 SHA 的 review 不触发。脚本从 stdin 接收一行 JSON：
+
+```json
+{"event_id":"owner/repo#42:HEAD_SHA","event":"postApproval","repository":"owner/repo","pull_number":42,"pull_url":"https://github.com/owner/repo/pull/42","sha":"HEAD_SHA","review_id":123,"review_url":"https://github.com/owner/repo/pull/42#pullrequestreview-123","reviewer":"your-reviewer[bot]"}
+```
+
+以仓库、PR、SHA 去重，同一 SHA 的再次 Approve、重复轮询和重启不会重复触发。新 SHA 审查通过后会产生新事件。首次启用 hook 时，已观察到的有效批准也会触发。`GET /v1/work` 和单条工作项的 `postApproval` 数组记录 `unknown`、`succeeded` 或 `failed`、时间及错误。
+
+触发记录在启动脚本前持久化；失败、超时或 daemon 中断后不自动重放，也没有自动重试接口。这样避免脚本已经产生外部副作用后再次运行，但中断可能导致事件未执行完成，需要人工核查。脚本应使用 `event_id` 去重；如果它要执行 merge 等对当前版本敏感的操作，还需核对 GitHub 最新 head 和批准状态。hook 本身不自动 merge PR。
 
 ## 代码结构
 
@@ -96,6 +157,8 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 | 接口 | 行为 |
 |---|---|
 | `GET /healthz` | 查看运行 revision、gate、last_poll 和 last_github_ok。 |
+| `GET /v1/repositories` | 列出配置及动态注册的仓库。 |
+| `POST /v1/repositories` | 注册仓库，接受 Repository JSON，省略字段继承 `repository_defaults`。 |
 | `GET /v1/self-check` | 由 daemon 用自身环境验证所有配置仓库的 PR 读取权限，不派发任务。 |
 | `GET /v1/work` | 列出已观察的 PR 和当前待办。 |
 | `GET /v1/work/{owner}/{repo}/{number}` | 查看一条 PR 的来源、负责人、审查版本和投递状态。 |
@@ -121,7 +184,7 @@ cc-connect 当前 webhook 不支持执行级状态查询、停止或持久化去
 
 ## 状态、备份与回滚
 
-daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 1。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
+daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 2（自动从 version 1 增加仓库注册表）。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
 
 首次启动时，若存在 `state.json`，daemon 校验数据并生成 `state.json.pre-sqlite.bak`，然后在单个事务中导入并记录 schema 版本。原 JSON 不会被修改。导入失败时不会留下部分记录，修复 JSON 后可以重新启动；备份已存在但内容不同时会拒绝导入，需先另行保存两份文件再处理。数据库初始化完成后只读取 SQLite，不会再次导入遗留 JSON。初始化成功后、接单前持久化 `state.sqlite3.initialized` 标记。已有该标记而数据库缺失、为空或变成无版本空库时，启动会拒绝导入陈旧 JSON；迁移备份存在但数据库缺失时同样拒绝。应恢复 SQLite 备份；若确实要从 JSON 重新迁移，须先归档初始化标记和旧迁移备份。未提交完成的首次迁移（无标记且空库仍在）可正常重试。已知旧格式的 `project` / `session_key` 路由和 `review_thread_id` 会映射到新路由；重复字段冲突时拒绝迁移。其他未知 JSON 字段也会拒绝导入：保留原文件和备份，先确认写入它的版本并用兼容版本转换，或核实字段用途后人工修正，避免直接删除可能承载路由的字段。遇到未知 schema 版本或损坏数据时启动失败，不会重置数据库。
 
@@ -134,7 +197,7 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 
 恢复 SQLite 备份：停止 daemon，将当前 `state.sqlite3` 移到另一个位置留存，再将备份复制为状态目录中的 `state.sqlite3`，确认权限为 `0600`，然后启动 daemon。不要在运行期间直接复制数据库文件。
 
-回滚到旧版程序：停止 daemon，先执行上面的 backup 和 export；将当前数据库、`state.sqlite3.initialized` 标记、旧 `state.json` 及 `state.json.pre-sqlite.bak` 一起移到独立归档目录，再将最新导出的 JSON 复制为状态目录中的 `state.json`（权限 `0600`），最后使用旧版程序启动。以后重新升级时，保持状态目录中没有旧 SQLite 数据库、初始化标记及旧迁移备份，让新版重新导入旧版运行期间更新过的 JSON。直接使用迁移前的备份只会恢复迁移时刻的数据。
+回滚到旧版程序：旧版不支持 schema version 2、新增的注册数据及 `postApproval` 字段，不能直接读取新数据库或 JSON；需先在兼容版本中显式转换并核查新增数据。以下旧版 JSON 恢复流程仅适用于已完成转换的快照。停止 daemon，先执行上面的 backup 和 export；将当前数据库、`state.sqlite3.initialized` 标记、旧 `state.json` 及 `state.json.pre-sqlite.bak` 一起移到独立归档目录，再将最新导出的 JSON 复制为状态目录中的 `state.json`（权限 `0600`），最后使用旧版程序启动。以后重新升级时，保持状态目录中没有旧 SQLite 数据库、初始化标记及旧迁移备份，让新版重新导入旧版运行期间更新过的 JSON。直接使用迁移前的备份只会恢复迁移时刻的数据。
 
 ## 审查等待与回流诊断
 
