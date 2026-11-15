@@ -118,7 +118,7 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 
 daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 1。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
 
-首次启动时，若存在 `state.json`，daemon 校验数据并生成 `state.json.pre-sqlite.bak`，然后在单个事务中导入并记录 schema 版本。原 JSON 不会被修改。导入失败时不会留下部分记录，修复 JSON 后可以重新启动；备份已存在但内容不同时会拒绝导入，需先另行保存两份文件再处理。数据库初始化完成后只读取 SQLite，不会再次导入遗留 JSON。若迁移备份已存在而数据库文件缺失，启动会拒绝创建新库，需恢复 SQLite 备份；若确实要从 JSON 重新迁移，须先归档旧迁移备份。已知旧格式的 `project` / `session_key` 路由和 `review_thread_id` 会映射到新路由；重复字段冲突时拒绝迁移。其他未知 JSON 字段也会拒绝导入：保留原文件和备份，先确认写入它的版本并用兼容版本转换，或核实字段用途后人工修正，避免直接删除可能承载路由的字段。遇到未知 schema 版本或损坏数据时启动失败，不会重置数据库。
+首次启动时，若存在 `state.json`，daemon 校验数据并生成 `state.json.pre-sqlite.bak`，然后在单个事务中导入并记录 schema 版本。原 JSON 不会被修改。导入失败时不会留下部分记录，修复 JSON 后可以重新启动；备份已存在但内容不同时会拒绝导入，需先另行保存两份文件再处理。数据库初始化完成后只读取 SQLite，不会再次导入遗留 JSON。初始化成功后、接单前持久化 `state.sqlite3.initialized` 标记。已有该标记而数据库缺失、为空或变成无版本空库时，启动会拒绝导入陈旧 JSON；迁移备份存在但数据库缺失时同样拒绝。应恢复 SQLite 备份；若确实要从 JSON 重新迁移，须先归档初始化标记和旧迁移备份。未提交完成的首次迁移（无标记且空库仍在）可正常重试。已知旧格式的 `project` / `session_key` 路由和 `review_thread_id` 会映射到新路由；重复字段冲突时拒绝迁移。其他未知 JSON 字段也会拒绝导入：保留原文件和备份，先确认写入它的版本并用兼容版本转换，或核实字段用途后人工修正，避免直接删除可能承载路由的字段。遇到未知 schema 版本或损坏数据时启动失败，不会重置数据库。
 
 以下操作均先停止 daemon，`-data` 可省略以使用默认状态目录。输出文件必须尚不存在。备份通过 SQLite `VACUUM INTO` 生成独立快照；目标文件系统不支持硬链接时，使用独占创建、复制并同步的方式，仍不覆盖已有文件。这种回退在进程异常中断时可能留下不完整的输出文件，恢复前应验证或重新生成；目录同步不受文件系统支持时只能尽力保证目录项持久化。导出包含迁移之后的最新记录，保持旧版 JSON 结构。
 
@@ -129,4 +129,4 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 
 恢复 SQLite 备份：停止 daemon，将当前 `state.sqlite3` 移到另一个位置留存，再将备份复制为状态目录中的 `state.sqlite3`，确认权限为 `0600`，然后启动 daemon。不要在运行期间直接复制数据库文件。
 
-回滚到旧版程序：停止 daemon，先执行上面的 backup 和 export；将当前数据库、旧 `state.json` 及 `state.json.pre-sqlite.bak` 一起移到独立归档目录，再将最新导出的 JSON 复制为状态目录中的 `state.json`（权限 `0600`），最后使用旧版程序启动。以后重新升级时，保持状态目录中没有旧 SQLite 数据库及旧迁移备份，让新版重新导入旧版运行期间更新过的 JSON。直接使用迁移前的备份只会恢复迁移时刻的数据。
+回滚到旧版程序：停止 daemon，先执行上面的 backup 和 export；将当前数据库、`state.sqlite3.initialized` 标记、旧 `state.json` 及 `state.json.pre-sqlite.bak` 一起移到独立归档目录，再将最新导出的 JSON 复制为状态目录中的 `state.json`（权限 `0600`），最后使用旧版程序启动。以后重新升级时，保持状态目录中没有旧 SQLite 数据库、初始化标记及旧迁移备份，让新版重新导入旧版运行期间更新过的 JSON。直接使用迁移前的备份只会恢复迁移时刻的数据。

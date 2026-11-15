@@ -2,6 +2,7 @@ package ink
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -462,5 +463,63 @@ func TestPublishFallbackPreservesBytesPermissionsAndNoOverwrite(t *testing.T) {
 	}
 	if _, err := os.Stat(destination); !os.IsNotExist(err) {
 		t.Fatal("failed copy left a partial output")
+	}
+}
+
+func TestInitializedStateRejectsEmptyDatabasePlaceholders(t *testing.T) {
+	for _, kind := range []string{"zero-byte", "empty-sqlite"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, stateDatabase)
+			fixture := storedFixture()
+			fixture.Work["acme/project#42"].Task.Delivery = "pending"
+			data, _ := json.Marshal(fixture)
+			if err := os.WriteFile(filepath.Join(dir, legacyState), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := openStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.Work["acme/project#42"].Task.Delivery = "accepted"
+			if err := store.save(fixture); err != nil {
+				t.Fatal(err)
+			}
+			store.db.Close()
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker, err := os.Stat(path + ".initialized")
+			if err != nil || marker.Mode().Perm() != 0600 {
+				t.Fatal("initialization marker missing or not private")
+			}
+			if err := os.WriteFile(path, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "empty-sqlite" {
+				empty, err := sql.Open("sqlite", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := empty.Exec("VACUUM"); err != nil {
+					t.Fatal(err)
+				}
+				empty.Close()
+			}
+			if reopened, err := openStore(path); err == nil {
+				reopened.db.Close()
+				t.Fatal("stale pending task re-imported into empty database")
+			}
+			if err := os.WriteFile(path, saved, 0600); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := openStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restored.db.Close()
+			checkState(t, restored, fixture)
+		})
 	}
 }

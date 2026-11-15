@@ -36,14 +36,24 @@ func openStore(path string) (*stateStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A leftover migration backup proves that restoring an absent database must
-	// be deliberate. Do not replay a stale JSON snapshot after a failed restore.
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+	marker := path + ".initialized"
+	markerInfo, markerErr := os.Lstat(marker)
+	if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
+		return nil, markerErr
+	}
+	if markerErr == nil && (!markerInfo.Mode().IsRegular() || markerInfo.Mode().Perm()&0077 != 0) {
+		return nil, errors.New("state initialization marker must be a private regular file")
+	}
+	// Neither a removed database nor a recovery tool's empty placeholder may
+	// resurrect stale tasks after this state directory has been initialized.
+	if info, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) || (err == nil && info.Size() == 0 && markerErr == nil) {
 		backup := filepath.Join(filepath.Dir(path), legacyState+".pre-sqlite.bak")
-		if _, err := os.Lstat(backup); err == nil {
-			return nil, errors.New("state database is missing but a migration backup exists; restore the SQLite backup, or archive the migration backup before intentionally importing JSON")
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
+		_, backupErr := os.Lstat(backup)
+		if markerErr == nil || (backupErr == nil && errors.Is(err, os.ErrNotExist)) {
+			return nil, errors.New("state database is missing or empty after initialization; restore a SQLite backup; to reset state or intentionally import JSON, archive the initialization marker and migration backup first")
+		}
+		if backupErr != nil && !errors.Is(backupErr, os.ErrNotExist) {
+			return nil, backupErr
 		}
 	} else if err != nil {
 		return nil, err
@@ -73,14 +83,20 @@ func openStore(path string) (*stateStore, error) {
 	}
 	db.SetMaxOpenConns(1)
 	s := &stateStore{db: db}
-	if err = s.initialize(filepath.Join(filepath.Dir(path), legacyState)); err != nil {
+	if err = s.initialize(filepath.Join(filepath.Dir(path), legacyState), marker); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if markerErr != nil {
+		if err := writeNewFile(marker, []byte("1\n")); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("persist state initialization marker: %w", err)
+		}
 	}
 	return s, nil
 }
 
-func (s *stateStore) initialize(legacy string) error {
+func (s *stateStore) initialize(legacy, marker string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -103,6 +119,11 @@ func (s *stateStore) initialize(legacy string) error {
 	}
 	if version != 0 {
 		return fmt.Errorf("unsupported state schema version %d (expected %d)", version, schemaVersion)
+	}
+	if _, err := os.Lstat(marker); err == nil {
+		return errors.New("state database is uninitialized but an initialization marker exists; restore the database instead of importing stale JSON")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	// Only initialize an empty database. A foreign/unversioned database must not
 	// be silently adopted or overwritten.
