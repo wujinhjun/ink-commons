@@ -93,19 +93,20 @@ type Workflow struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Work struct {
-	Approvals []ApprovalRun    `json:"postApproval,omitempty"`
-	Workflow  Workflow         `json:"workflow"`
-	Alerts    []Alert          `json:"alerts,omitempty"`
-	Repo      string           `json:"repo"`
-	Pull      Pull             `json:"pull_request"`
-	Origin    *execution.Route `json:"origin,omitempty"`
-	Linked    bool             `json:"linked"`
-	Developer Assignee         `json:"developer"`
-	Reviewer  Assignee         `json:"reviewer"`
-	Phase     string           `json:"phase"`
-	Task      *Task            `json:"task,omitempty"`
-	History   []*Task          `json:"execution_history,omitempty"`
-	Reviews   []Review         `json:"reviews,omitempty"`
+	Notifications []NotificationRun `json:"notifications,omitempty"`
+	Approvals     []ApprovalRun     `json:"postApproval,omitempty"`
+	Workflow      Workflow          `json:"workflow"`
+	Alerts        []Alert           `json:"alerts,omitempty"`
+	Repo          string            `json:"repo"`
+	Pull          Pull              `json:"pull_request"`
+	Origin        *execution.Route  `json:"origin,omitempty"`
+	Linked        bool              `json:"linked"`
+	Developer     Assignee          `json:"developer"`
+	Reviewer      Assignee          `json:"reviewer"`
+	Phase         string            `json:"phase"`
+	Task          *Task             `json:"task,omitempty"`
+	History       []*Task           `json:"execution_history,omitempty"`
+	Reviews       []Review          `json:"reviews,omitempty"`
 }
 
 func (w *Work) derive() {

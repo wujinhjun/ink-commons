@@ -15,6 +15,45 @@ import (
 
 type testTransport func(*http.Request) (*http.Response, error)
 
+func TestApprovalNotificationEntersDeveloperContext(t *testing.T) {
+	for _, response := range []string{`{"status":"accepted"}`, `{"status":"busy"}`} {
+		t.Run(response, func(t *testing.T) {
+			calls := 0
+			client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.Path != "/hook" || r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer hook-test" {
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				var input map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+					t.Fatal(err)
+				}
+				if input["project"] != "developer" || input["session_key"] != "discord:123" || input["event"] != "ink-commons:review_approved" {
+					t.Fatalf("not sent to developer context: %+v", input)
+				}
+				for _, expected := range []string{"https://github.com/acme/project/pull/42", "Approved commit: abc", "Reviewer: reviewer-bot", "#pullrequestreview-9", "Event: approval-event", "briefly acknowledge", "not a fix task", "merge", "head has changed"} {
+					if !strings.Contains(input["prompt"], expected) {
+						t.Fatalf("missing %q: %s", expected, input["prompt"])
+					}
+				}
+				if strings.Contains(input["prompt"], "address its findings") {
+					t.Fatal("approval interpreted as fix task")
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(response))}, nil
+			})}
+			e, err := New(client, "http://127.0.0.1:9111/hook", "hook-test", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := execution.Notification{EventID: "approval-event", Event: "review_approved", Repository: "acme/project", Number: 42, URL: "https://github.com/acme/project/pull/42", SHA: "abc", Reviewer: "reviewer-bot", ReviewID: 9, ReviewURL: "https://github.com/acme/project/pull/42#pullrequestreview-9"}
+			err = e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n)
+			if (err == nil) != strings.Contains(response, "accepted") || calls != 1 {
+				t.Fatalf("unexpected acceptance: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
 func (f testTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
 }
