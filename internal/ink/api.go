@@ -15,13 +15,14 @@ import (
 )
 
 type workChange struct {
-	TaskID      string           `json:"task_id,omitempty"`
-	AttemptID   string           `json:"attempt_id,omitempty"`
-	Stopped     bool             `json:"stopped,omitempty"`
-	Reason      string           `json:"reason,omitempty"`
-	Role        string           `json:"role,omitempty"`
-	GitHubLogin string           `json:"github_login,omitempty"`
-	Route       *execution.Route `json:"route,omitempty"`
+	GitHubCommand string           `json:"github_command,omitempty"`
+	TaskID        string           `json:"task_id,omitempty"`
+	AttemptID     string           `json:"attempt_id,omitempty"`
+	Stopped       bool             `json:"stopped,omitempty"`
+	Reason        string           `json:"reason,omitempty"`
+	Role          string           `json:"role,omitempty"`
+	GitHubLogin   string           `json:"github_login,omitempty"`
+	Route         *execution.Route `json:"route,omitempty"`
 }
 
 type apiError struct {
@@ -165,7 +166,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	// Return an existing reviewer assignment even during delivery so a
 	// repeated request cannot reset the task or allocate another session.
 	if action == "assign" && change.Role == "reviewer" && work.Linked {
-		requested := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), Route: change.Route}
+		requested := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
 		if requested.GitHubLogin != "" && sameReviewer(work.Reviewer, requested) {
 			reply(w, 200, work)
 			return
@@ -193,6 +194,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	if err := s.store.save(st); err != nil {
 		fail(w, err)
 		return
@@ -201,7 +203,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 }
 
 func applyChange(work *Work, action string, change workChange) error {
-	assignee := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), Route: change.Route}
+	assignee := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
 	switch action {
 	case "link":
 		if assignee.GitHubLogin == "" && assignee.Route == nil {
@@ -268,7 +270,7 @@ func applyChange(work *Work, action string, change workChange) error {
 }
 
 func sameReviewer(current, requested Assignee) bool {
-	if !strings.EqualFold(current.GitHubLogin, requested.GitHubLogin) {
+	if current.GitHubCommand != requested.GitHubCommand || !strings.EqualFold(current.GitHubLogin, requested.GitHubLogin) {
 		return false
 	}
 	if current.Route == nil || requested.Route == nil {

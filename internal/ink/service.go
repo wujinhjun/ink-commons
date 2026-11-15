@@ -40,6 +40,8 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 		if migrateExecution(w) {
 			changed = true
 		}
+		w.refreshWorkflow(time.Now(), config.Reliability.defaults())
+		changed = true
 	}
 	if changed {
 		if err := store.save(st); err != nil {
@@ -177,7 +179,7 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	id := key(repo.Repo, pull.Number)
 	work := st.Work[id]
 	if work == nil {
-		work = &Work{Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
+		work = &Work{Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
 		if repo.ReviewerRoute != nil {
 			route := *repo.ReviewerRoute
 			work.Reviewer.Route = &route
@@ -194,6 +196,7 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		work.Reviews = mergeReviews(work.Reviews, reviews)
 	}
 	work.derive()
+	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	return s.store.save(st)
 }
 
@@ -290,6 +293,7 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 			}
 		}
 	}
+	live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	return s.store.save(st)
 }
 

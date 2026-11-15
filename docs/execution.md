@@ -151,3 +151,31 @@ at version 1. Back up before upgrading. Older binaries do not enforce execution
 ownership and may discard the added fields when saving: do not run an older
 daemon against active new-version executions. Stop/fence them first and retain
 a backup containing the execution history before using the documented rollback.
+
+
+## Review waiting and diagnostics
+
+The work API persists `workflow` and `alerts` independently of agent turns.
+Transport acceptance maps to `waiting_start`, not `executing`; execution requires
+a validated running receipt. GitHub observations still determine `phase`.
+Only the assigned reviewer's current-SHA formal review advances the workflow.
+A mismatched identity or a newly submitted stale-SHA result is diagnosed without
+weakening that filter. Old reviews preceding the current task are not stale-result
+alarms. Diagnostics have stable IDs, survive restart, log once on creation and
+remain as inactive history after resolution.
+
+Review deliveries carry `github_login`, optional `github_command` (repository
+`reviewer_command` or CLI `--github-command`) and active diagnostic feedback.
+The reviewer is instructed to verify its identity and report a blocker instead
+of falling back to another account. Developer deliveries explicitly request
+checks and a pushed fix so the existing head-change observer can trigger review.
+
+If the existing HTTP execution protocol confirms a succeeded run but no formal
+review/new SHA follows, `execution.result_seconds` (default 120, zero selects the
+default) controls when a diagnostic appears. This never sets a retry deadline or
+replays the successful attempt. A legacy cc-connect `accepted` response cannot
+prove an execution ended; the existing unknown/stop-confirmation rules still
+apply. The diagnostics feature adds no new executor operations, native queue,
+automatic notifications, process control or automatic missing-result follow-up.
+It runs with the unchanged cc-connect webhook. Reliable wake-up/queue integration
+remains a separate deferred change.

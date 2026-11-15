@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -268,5 +269,42 @@ func TestAutomaticReviewRejectsNonTextParents(t *testing.T) {
 				t.Fatalf("missing parent-type rejection: %v", err)
 			}
 		})
+	}
+}
+
+func TestLegacyWebhookCarriesReviewIdentityWithoutNewOperations(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/hook" {
+			t.Errorf("unexpected new executor operation: %s", r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		if body["operation"] != "" || body["project"] != "reviewer" || body["session_key"] != "discord:123" {
+			t.Error(body)
+		}
+		for _, text := range []string{"reviewer-app[bot]", "reviewer-cli", "Previous workflow feedback", "identity mismatch"} {
+			if !strings.Contains(body["prompt"], text) {
+				t.Errorf("prompt missing %q", text)
+			}
+		}
+		_, _ = w.Write([]byte(`{"status":"accepted"}`))
+	}))
+	defer server.Close()
+	executor, err := New(server.Client(), server.URL+"/hook", "secret", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := any(executor).(execution.Monitor); ok {
+		t.Fatal("legacy provider unexpectedly requires new lifecycle operations")
+	}
+	err = executor.Deliver(context.Background(), execution.Route{Provider: Name, Target: "reviewer", Session: "discord:123"}, execution.Delivery{Role: "reviewer", GitHubLogin: "reviewer-app[bot]", GitHubCommand: "reviewer-cli", Feedback: "identity mismatch"})
+	if err != nil || calls != 1 {
+		t.Fatal(calls, err)
 	}
 }

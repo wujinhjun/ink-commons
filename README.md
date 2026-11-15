@@ -73,12 +73,12 @@ GitHub 的当前 PR 快照是状态来源。轮询间隔默认 60 秒。hook 路
 GitHub 上开 Draft PR，等同砚发现并关联后，在 Mini 上执行：
 
 ```sh
-ink review --github-login 'yanshi-reviewer[bot]' \
+ink review --github-login 'yanshi-reviewer[bot]' --github-command yanshi-reviewer \
   --target mo-cangli-pi \
   https://github.com/owner/repository/pull/42
 ```
 
-`--target` 是 cc-connect 项目。不传 `--parent` 时，使用工作项所绑定的开发 thread 的父频道；审查 thread 命名为 `Review owner/repository #42 · 开发 thread 标题`。工作项需通过 hook 或 `link` 关联开发会话。省略父频道且缺少有效 Discord 来源时，指派请求会立即报错；来源的远端读取失败会在下一次投递时记录到 `task.error`，不会任意选择其他频道。`--parent` 可显式覆盖创建位置。`--github-login` 是正式提交 review 的 GitHub 身份。用 `--session discord:THREAD_ID` 可以复用已有会话，只传 `--github-login` 则交给真人。开发 agent 可以用同一条命令代办。
+`--github-command` 指定 reviewer 使用的 GitHub CLI / App 入口，与期望的 `github_login` 一起传给 Agent。身份不符的正式 review 会保留诊断，不会推进业务状态。`--target` 是 cc-connect 项目。不传 `--parent` 时，使用工作项所绑定的开发 thread 的父频道；审查 thread 命名为 `Review owner/repository #42 · 开发 thread 标题`。工作项需通过 hook 或 `link` 关联开发会话。省略父频道且缺少有效 Discord 来源时，指派请求会立即报错；来源的远端读取失败会在下一次投递时记录到 `task.error`，不会任意选择其他频道。`--parent` 可显式覆盖创建位置。`--github-login` 是正式提交 review 的 GitHub 身份。用 `--session discord:THREAD_ID` 可以复用已有会话，只传 `--github-login` 则交给真人。开发 agent 可以用同一条命令代办。
 
 设好 reviewer 后，在 GitHub 标记 Ready for review。同砚在下一轮轮询中创建审查会话并派发任务。PR 已经是 Ready 时，指派会直接进入待派发。重复提交相同指派会保留已有会话和投递状态。修改后推送新 commit，同砚会沿用该 reviewer 复审。
 
@@ -134,3 +134,13 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 恢复 SQLite 备份：停止 daemon，将当前 `state.sqlite3` 移到另一个位置留存，再将备份复制为状态目录中的 `state.sqlite3`，确认权限为 `0600`，然后启动 daemon。不要在运行期间直接复制数据库文件。
 
 回滚到旧版程序：停止 daemon，先执行上面的 backup 和 export；将当前数据库、`state.sqlite3.initialized` 标记、旧 `state.json` 及 `state.json.pre-sqlite.bak` 一起移到独立归档目录，再将最新导出的 JSON 复制为状态目录中的 `state.json`（权限 `0600`），最后使用旧版程序启动。以后重新升级时，保持状态目录中没有旧 SQLite 数据库、初始化标记及旧迁移备份，让新版重新导入旧版运行期间更新过的 JSON。直接使用迁移前的备份只会恢复迁移时刻的数据。
+
+## 审查等待与回流诊断
+
+`GET /v1/work` 和单条工作项 API 返回持久化的 `workflow` 与 `alerts`。Agent 结束或投递返回 `accepted` 后，工作项仍等待指定 reviewer 对当前 SHA 的正式 review，或等待开发推送新的 SHA；不会因此标记业务完成。`waiting_start` 仅表示投递已接收、尚未确认开始，`executing` 需要已验证的运行回执。
+
+`alerts` 记录身份不符、新提交的旧 SHA review、旧执行结果不明、缺少正式结论或新 SHA、重试耗尽等原因。每个诊断有稳定 ID，重复轮询和重启不会重复创建；条件解除后保留历史并标记为非活动。首次出现也写入 daemon 日志。合法的 Request changes 与新 SHA 继续使用现有派发与复审逻辑，reviewer / SHA 过滤保持不变。
+
+配置仓库的 `reviewer_command`，或用 `ink review --github-command`，可把正确的 App 命令一并交给 reviewer。任务还会带上当前活动诊断，便于人工重试时了解上次未推进的原因。`execution.result_seconds`（默认 120）仅控制已确认结束但缺少业务结果时的诊断等待时间；不会自动重派成功的执行。
+
+本功能兼容现有 cc-connect webhook，不需要 cc-connect 配套改动，也不调用新的执行或通知接口。诊断通过 API 和日志查看；可靠队列、Discord 自动诊断通知及缺少结论时自动唤醒 reviewer 留待后续接入。现有 webhook 的忙时丢弃与执行无法确认限制仍按前述保守方式处理。

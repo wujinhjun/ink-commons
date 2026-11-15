@@ -20,6 +20,7 @@ import (
 
 func review(args []string) error {
 	flags := flag.NewFlagSet("review", flag.ContinueOnError)
+	githubCommand := flags.String("github-command", "", "CLI for the configured GitHub reviewer identity")
 	login := flags.String("github-login", "", "GitHub account that will submit the review")
 	provider := flags.String("provider", "cc-connect", "execution provider")
 	target := flags.String("target", "", "execution target, e.g. a cc-connect project")
@@ -43,10 +44,11 @@ func review(args []string) error {
 		return err
 	}
 	change := struct {
-		Role        string           `json:"role"`
-		GitHubLogin string           `json:"github_login"`
-		Route       *execution.Route `json:"route,omitempty"`
-	}{Role: "reviewer", GitHubLogin: strings.TrimSpace(*login)}
+		GitHubCommand string           `json:"github_command,omitempty"`
+		Role          string           `json:"role"`
+		GitHubLogin   string           `json:"github_login"`
+		Route         *execution.Route `json:"route,omitempty"`
+	}{Role: "reviewer", GitHubLogin: strings.TrimSpace(*login), GitHubCommand: strings.TrimSpace(*githubCommand)}
 	if *target != "" || *parent != "" || *session != "" {
 		if strings.TrimSpace(*target) == "" {
 			return errors.New("--target is required for an execution route")

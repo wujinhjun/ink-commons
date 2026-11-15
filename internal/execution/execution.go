@@ -48,16 +48,19 @@ func (r *Route) UnmarshalJSON(data []byte) error {
 
 // Delivery is the work description shared by execution providers.
 type Delivery struct {
-	TaskID     string `json:"task_id,omitempty"`
-	AttemptID  string `json:"attempt_id,omitempty"`
-	Attempt    int    `json:"attempt,omitempty"`
-	Repository string `json:"repository"`
-	Number     int    `json:"pull_number"`
-	URL        string `json:"pull_url"`
-	Role       string `json:"role"`
-	SHA        string `json:"sha"`
-	ReviewID   int64  `json:"review_id,omitempty"`
-	ReviewURL  string `json:"review_url,omitempty"`
+	GitHubLogin   string `json:"github_login,omitempty"`
+	GitHubCommand string `json:"github_command,omitempty"`
+	Feedback      string `json:"feedback,omitempty"`
+	TaskID        string `json:"task_id,omitempty"`
+	AttemptID     string `json:"attempt_id,omitempty"`
+	Attempt       int    `json:"attempt,omitempty"`
+	Repository    string `json:"repository"`
+	Number        int    `json:"pull_number"`
+	URL           string `json:"pull_url"`
+	Role          string `json:"role"`
+	SHA           string `json:"sha"`
+	ReviewID      int64  `json:"review_id,omitempty"`
+	ReviewURL     string `json:"review_url,omitempty"`
 	// Source is the development conversation associated with this task.
 	Source *Route `json:"source,omitempty"`
 }

@@ -11,6 +11,7 @@ import (
 
 // Reliability values are seconds; zero selects a default, including MaxAttempts.
 type Reliability struct {
+	ResultSeconds    int `json:"result_seconds,omitempty"`
 	ACKSeconds       int `json:"ack_seconds,omitempty"`
 	HeartbeatSeconds int `json:"heartbeat_seconds,omitempty"`
 	ExecutionSeconds int `json:"execution_seconds,omitempty"`
@@ -19,7 +20,7 @@ type Reliability struct {
 }
 
 func (c Reliability) Validate() error {
-	for _, v := range []int{c.ACKSeconds, c.HeartbeatSeconds, c.ExecutionSeconds, c.BackoffSeconds} {
+	for _, v := range []int{c.ResultSeconds, c.ACKSeconds, c.HeartbeatSeconds, c.ExecutionSeconds, c.BackoffSeconds} {
 		if v < 0 || v > 604800 {
 			return fmt.Errorf("execution timeouts/backoff must be between 0 and 604800 seconds")
 		}
@@ -30,6 +31,9 @@ func (c Reliability) Validate() error {
 	return nil
 }
 func (c Reliability) defaults() Reliability {
+	if c.ResultSeconds == 0 {
+		c.ResultSeconds = 120
+	}
 	if c.ACKSeconds == 0 {
 		c.ACKSeconds = 120
 	}
@@ -63,6 +67,10 @@ func migrateExecution(w *Work) bool {
 		return false
 	}
 	changed := false
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = time.Now()
+		changed = true
+	}
 	if t.ID == "" {
 		t.ID = uuid.NewString()
 		changed = true
@@ -89,6 +97,16 @@ func migrateExecution(w *Work) bool {
 
 func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Delivery {
 	d := execution.Delivery{TaskID: t.ID, AttemptID: attemptID, Attempt: number, Repository: w.Repo, Number: w.Pull.Number, URL: w.Pull.URL, Role: t.Role, SHA: t.SHA, ReviewID: t.ReviewID, ReviewURL: t.ReviewURL}
+	assignee := w.Developer
+	if t.Role == "reviewer" {
+		assignee = w.Reviewer
+	}
+	d.GitHubLogin, d.GitHubCommand = assignee.GitHubLogin, assignee.GitHubCommand
+	for _, a := range w.Alerts {
+		if a.Active && a.SHA == t.SHA {
+			d.Feedback += a.Message + "\n"
+		}
+	}
 	if t.Role == "reviewer" {
 		d.Source = reviewSource(w)
 	}
@@ -300,5 +318,6 @@ func (s *Service) saveExecution(id string, w *Work) error {
 			}
 		}
 	}
+	live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	return s.store.save(current)
 }

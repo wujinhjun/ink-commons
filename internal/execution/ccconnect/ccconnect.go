@@ -159,9 +159,16 @@ func (e *Executor) Deliver(ctx context.Context, route execution.Route, task exec
 	}
 	prompt := fmt.Sprintf("Ink Commons %s task for PR %s\nCommit: %s\nTask: %s\nAttempt: %s (%d)\n", task.Role, task.URL, task.SHA, task.TaskID, task.AttemptID, task.Attempt)
 	if task.Role == "reviewer" {
+		prompt += "Expected GitHub review author: " + task.GitHubLogin + ". Verify the authenticated identity before submitting; report a blocker rather than fall back to another identity. "
+		if task.GitHubCommand != "" {
+			prompt += "Use the configured GitHub command: " + task.GitHubCommand + ". "
+		}
 		prompt += "Review this exact commit and submit the official review in GitHub against that commit. Use Approve or Request changes."
 	} else {
-		prompt += "Read the GitHub review at " + task.ReviewURL + " and address its findings. Check that the PR head is still the indicated commit before working."
+		prompt += "Read the GitHub review at " + task.ReviewURL + " and address its findings. Check that the PR head is still the indicated commit before working. Run the relevant checks, commit and push the fixes to the PR source branch so the new head triggers re-review. If blocked, report the blocker explicitly."
+	}
+	if task.Feedback != "" {
+		prompt += "\nPrevious workflow feedback:\n" + task.Feedback
 	}
 	body := map[string]string{"project": route.Target, "session_key": route.Session, "prompt": prompt, "event": "ink-commons:" + task.Role}
 	var ack struct {
