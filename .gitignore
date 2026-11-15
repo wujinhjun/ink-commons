@@ -1,9 +1,2 @@
-/ink
-/config.json
-.env
-*.sock
-/state.json
-/state.json.lock
-
-/state.sqlite3*
-/state.json.pre-sqlite.bak
+__pycache__/
+*.pyc

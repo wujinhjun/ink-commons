@@ -49,7 +49,9 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 			return nil, err
 		}
 	}
-	return &Service{store: store, config: config, up: newUpstream(config.GitHubToken), providers: providers, delivering: make(map[string]bool)}, nil
+	up := newUpstream(config.GitHubToken)
+	up.command = config.GitHubCommand
+	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool)}, nil
 }
 
 func (s *Service) Close() error { return s.store.db.Close() }

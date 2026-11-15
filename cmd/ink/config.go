@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 			ReviewChannel   string `json:"review_channel_id,omitempty"`
 		} `json:"repositories"`
 		Reliability   ink.Reliability `json:"execution"`
+		GitHubCommand string          `json:"github_command,omitempty"`
 		PollSeconds   int             `json:"poll_seconds"`
 		CCConnectURL  string          `json:"cc_connect_url"`
 		HTTPURL       string          `json:"http_provider_url,omitempty"`
@@ -48,7 +50,11 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		return cfg, nil, err
 	}
 	cfg.PollSeconds = file.PollSeconds
+	cfg.GitHubCommand = file.GitHubCommand
 	cfg.GitHubToken = os.Getenv("INK_GITHUB_TOKEN")
+	if cfg.GitHubCommand != "" && !filepath.IsAbs(cfg.GitHubCommand) {
+		return cfg, nil, fmt.Errorf("github_command must be an absolute App CLI path")
+	}
 	if cfg.PollSeconds < 0 || cfg.PollSeconds > 86400 {
 		return cfg, nil, fmt.Errorf("poll_seconds must be between 0 and 86400")
 	}

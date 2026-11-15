@@ -65,7 +65,10 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 		ticker := time.NewTicker(time.Duration(cfg.PollSeconds) * time.Second)
 		defer ticker.Stop()
 		for {
-			service.Poll(pollCtx)
+			// 部署验证期间 API 可用，但尚不触发外部派发。gate 只由可信本地操作者控制。
+			if service.pollReady() {
+				service.Poll(pollCtx)
+			}
 			select {
 			case <-pollCtx.Done():
 				return

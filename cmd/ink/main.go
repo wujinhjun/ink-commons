@@ -73,6 +73,7 @@ func serve(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	configPath := flags.String("config", "config.json", "configuration file")
 	data := flags.String("data", dir, "private state directory")
+	gate := flags.String("poll-gate", "", "delay polling until this deployment gate file exists")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -83,6 +84,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	config.PollGate = *gate
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return ink.Serve(ctx, config, *data, providers)

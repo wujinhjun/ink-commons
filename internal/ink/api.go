@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,14 +33,33 @@ type apiError struct {
 
 func (e apiError) Error() string { return e.message }
 
+// BuildRevision 在部署构建时由 ldflags 注入，用于核对正在运行的提交。
+var BuildRevision = "development"
+
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { reply(w, 200, map[string]string{"status": "ok"}) })
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, 200, map[string]string{"status": "ok", "revision": BuildRevision})
+	})
 	mux.HandleFunc("GET /v1/work", s.listWork)
 	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}", s.work)
 	mux.HandleFunc("POST /v1/work/{owner}/{repo}/{number}/{action}", s.work)
 	mux.HandleFunc("POST /v1/pushes", s.pushes)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && !s.pollReady() {
+			fail(w, apiError{503, "deployment verification in progress"})
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func (s *Service) pollReady() bool {
+	if s.config.PollGate == "" {
+		return true
+	}
+	_, err := os.Stat(s.config.PollGate)
+	return err == nil
 }
 
 func reply(w http.ResponseWriter, status int, result any) {
