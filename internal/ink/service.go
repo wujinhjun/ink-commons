@@ -58,13 +58,43 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 
 func (s *Service) Close() error { return s.store.db.Close() }
 
+// Caller holds s.mu. Static configuration takes precedence over runtime registration.
 func (s *Service) repo(name string) (Repository, bool) {
 	for _, r := range s.config.Repositories {
 		if r.Repo == name {
 			return r, true
 		}
 	}
+	st, err := s.store.load()
+	if err == nil {
+		for _, r := range st.Repositories {
+			if r.Repo == name {
+				return r, true
+			}
+		}
+	}
 	return Repository{}, false
+}
+
+func (s *Service) repositories() []Repository {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	repos := append([]Repository{}, s.config.Repositories...)
+	st, err := s.store.load()
+	if err != nil {
+		log.Printf("load repository registry: %v", err)
+		return repos
+	}
+	seen := map[string]bool{}
+	for _, r := range repos {
+		seen[r.Repo] = true
+	}
+	for _, r := range st.Repositories {
+		if !seen[r.Repo] {
+			repos = append(repos, r)
+		}
+	}
+	return repos
 }
 
 func (s *Service) recordPushes(st *state, pushes []Push, now time.Time) {
@@ -112,7 +142,7 @@ func (s *Service) Poll(ctx context.Context) {
 	if err := s.reconcileExecutions(ctx); err != nil {
 		log.Printf("execution recovery: %v", err)
 	}
-	for _, repo := range s.config.Repositories {
+	for _, repo := range s.repositories() {
 		if ctx.Err() != nil {
 			return
 		}
@@ -164,6 +194,9 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 			}
 		}
 		if err := s.observe(repo, pull, reviews); err != nil {
+			return err
+		}
+		if err := s.postApproval(ctx, repo, pull.Number); err != nil {
 			return err
 		}
 		if err := s.dispatch(ctx, repo, pull.Number); err != nil {

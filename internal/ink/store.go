@@ -18,11 +18,12 @@ import (
 
 const stateDatabase = "state.sqlite3"
 const legacyState = "state.json"
-const schemaVersion = 1
+const schemaVersion = 2
 
 type state struct {
-	Pushes []Push           `json:"pushes"`
-	Work   map[string]*Work `json:"work"`
+	Repositories []Repository     `json:"repositories,omitempty"`
+	Pushes       []Push           `json:"pushes"`
+	Work         map[string]*Work `json:"work"`
 }
 
 // stateStore keeps the workflow snapshot API; each read and replacement is a
@@ -106,9 +107,15 @@ func (s *stateStore) initialize(legacy, marker string) error {
 	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
+	if version == 1 {
+		if _, err := tx.Exec(`CREATE TABLE repositories (name TEXT PRIMARY KEY, payload TEXT NOT NULL); PRAGMA user_version = 2;`); err != nil {
+			return err
+		}
+		version = 2
+	}
 	if version == schemaVersion {
-		// Detect missing tables before serving; never recreate a damaged v1 store.
-		for _, table := range []string{"work_items", "pushes"} {
+		// Detect missing tables before serving; never recreate damaged workflow tables.
+		for _, table := range []string{"work_items", "pushes", "repositories"} {
 			rows, err := tx.Query("SELECT * FROM " + table + " LIMIT 0")
 			if err != nil {
 				return err
@@ -135,7 +142,8 @@ func (s *stateStore) initialize(legacy, marker string) error {
 		return errors.New("unversioned state database is not empty")
 	}
 	if _, err := tx.Exec(`CREATE TABLE work_items (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
- CREATE TABLE pushes (position INTEGER PRIMARY KEY, payload TEXT NOT NULL);`); err != nil {
+ CREATE TABLE pushes (position INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+ CREATE TABLE repositories (name TEXT PRIMARY KEY, payload TEXT NOT NULL);`); err != nil {
 		return err
 	}
 	data, err := os.ReadFile(legacy)
@@ -179,6 +187,16 @@ func validateState(st state) error {
 	if st.Work == nil {
 		return errors.New("state is missing its work index")
 	}
+	seen := map[string]bool{}
+	for _, repo := range st.Repositories {
+		if !ValidRepository(repo.Repo) || seen[repo.Repo] || strings.TrimSpace(repo.ReviewerLogin) == "" {
+			return errors.New("invalid registered repository")
+		}
+		if err := repo.PostApproval.Validate(); err != nil {
+			return err
+		}
+		seen[repo.Repo] = true
+	}
 	for id, w := range st.Work {
 		if w == nil || !ValidRepository(w.Repo) || w.Pull.Number <= 0 || id != key(w.Repo, w.Pull.Number) {
 			return fmt.Errorf("invalid work index entry %q", id)
@@ -189,8 +207,9 @@ func validateState(st state) error {
 
 func decodeState(data []byte) (state, error) {
 	var raw struct {
-		Pushes []Push                     `json:"pushes"`
-		Work   map[string]json.RawMessage `json:"work"`
+		Repositories []Repository               `json:"repositories,omitempty"`
+		Pushes       []Push                     `json:"pushes"`
+		Work         map[string]json.RawMessage `json:"work"`
 	}
 	var st state
 	d := json.NewDecoder(bytes.NewReader(data))
@@ -201,6 +220,7 @@ func decodeState(data []byte) (state, error) {
 	if d.Decode(new(any)) != io.EOF {
 		return st, errors.New("expected one state object")
 	}
+	st.Repositories = raw.Repositories
 	st.Pushes = raw.Pushes
 	if raw.Work != nil {
 		st.Work = make(map[string]*Work, len(raw.Work))
@@ -291,6 +311,27 @@ func (s *stateStore) load() (state, error) {
 	if err != nil {
 		return st, err
 	}
+	rows, err = tx.Query("SELECT payload FROM repositories ORDER BY name")
+	if err != nil {
+		return st, err
+	}
+	for rows.Next() {
+		var payload string
+		var repo Repository
+		if err = rows.Scan(&payload); err == nil {
+			err = json.Unmarshal([]byte(payload), &repo)
+		}
+		if err != nil {
+			rows.Close()
+			return st, err
+		}
+		st.Repositories = append(st.Repositories, repo)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return st, err
+	}
 	if err := validateState(st); err != nil {
 		return st, err
 	}
@@ -301,8 +342,17 @@ func replaceState(tx *sql.Tx, st state) error {
 	if err := validateState(st); err != nil {
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM work_items; DELETE FROM pushes;"); err != nil {
+	if _, err := tx.Exec("DELETE FROM work_items; DELETE FROM pushes; DELETE FROM repositories;"); err != nil {
 		return err
+	}
+	for _, repo := range st.Repositories {
+		data, err := json.Marshal(repo)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec("INSERT INTO repositories(name, payload) VALUES (?, ?)", repo.Repo, string(data)); err != nil {
+			return err
+		}
 	}
 	for id, work := range st.Work {
 		data, err := json.Marshal(work)

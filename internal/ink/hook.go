@@ -9,7 +9,7 @@ import (
 	"ink-commons/internal/execution"
 )
 
-func githubRepo(remote string) string {
+func GitHubRepository(remote string) string {
 	remote = strings.TrimSpace(remote)
 	var path string
 	if strings.HasPrefix(remote, "git@github.com:") {
@@ -26,7 +26,7 @@ func githubRepo(remote string) string {
 
 func ReadPush(remote string, route execution.Route, input io.Reader) ([]Push, error) {
 	var pushes []Push
-	repo := githubRepo(remote)
+	repo := GitHubRepository(remote)
 	if repo == "" || !route.Valid(false) {
 		return nil, nil
 	}

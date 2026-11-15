@@ -39,6 +39,15 @@ func snowflake(value string) bool {
 	return value != "" && strings.Trim(value, "0123456789") == ""
 }
 
+// ValidateDelivery distinguishes configured delivery from historical origins,
+// which remain valid even when the webhook endpoint has been removed.
+func (e *Executor) ValidateDelivery() error {
+	if e.endpoint == "" || e.token == "" {
+		return fmt.Errorf("configure cc_connect_url and INK_CC_CONNECT_TOKEN for reviewer delivery")
+	}
+	return nil
+}
+
 func (e *Executor) Validate(route execution.Route, allocate bool) error {
 	if route.Session == "" {
 		if !allocate || (route.Parent != "" && !snowflake(route.Parent)) || e.discordToken == "" {
