@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"ink-commons/internal/execution"
+	"ink-commons/internal/execution/ccconnect"
 )
 
 type Service struct {
@@ -220,6 +221,11 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		work = &Work{Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
 		if repo.ReviewerRoute != nil {
 			route := *repo.ReviewerRoute
+			// Discord placement belongs to this PR's development conversation.
+			// Legacy repository parents must not silently move new reviews elsewhere.
+			if route.Provider == ccconnect.Name && route.Session == "" {
+				route.Parent = ""
+			}
 			work.Reviewer.Route = &route
 		}
 		st.Work[id] = work
@@ -425,6 +431,11 @@ func reviewSource(work *Work) *execution.Route {
 }
 
 func allocationRoute(repo Repository, route execution.Route) execution.Route {
+	// A cc-connect parent is only an explicit per-work override. In particular,
+	// omitting it on assignment must not restore a legacy repository parent.
+	if route.Provider == ccconnect.Name {
+		return route
+	}
 	if fallback := repo.ReviewerRoute; route.Parent == "" && fallback != nil && fallback.Provider == route.Provider && fallback.Target == route.Target {
 		route.Parent = fallback.Parent
 	}
