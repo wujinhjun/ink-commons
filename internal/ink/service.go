@@ -271,12 +271,17 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 		return s.saveDelivery(id, work)
 	}
 	delivery := execution.Delivery{Repository: work.Repo, Number: work.Pull.Number, URL: work.Pull.URL, Role: task.Role, SHA: task.SHA, ReviewID: task.ReviewID, ReviewURL: task.ReviewURL}
+	if task.Role == "reviewer" {
+		delivery.Source = reviewSource(work)
+	}
 	if route.Session == "" {
-		if fallback := repo.ReviewerRoute; route.Parent == "" && fallback != nil && fallback.Provider == route.Provider && fallback.Target == route.Target {
-			route.Parent = fallback.Parent
-		}
+		*route = allocationRoute(repo, *route)
 		if err := execution.ValidateDestination(s.providers, *route, true); err != nil {
 			task.Error = "invalid unallocated destination: " + err.Error()
+			return s.saveDelivery(id, work)
+		}
+		if err := execution.ValidatePreparation(s.providers, *route, delivery); err != nil {
+			task.Error = "invalid preparation context: " + err.Error()
 			return s.saveDelivery(id, work)
 		}
 		session, err := executor.Prepare(ctx, *route, delivery)
@@ -301,4 +306,18 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 		task.Delivery, task.Error = "accepted", ""
 	}
 	return s.saveDelivery(id, work)
+}
+
+func reviewSource(work *Work) *execution.Route {
+	if work.Developer.Route != nil {
+		return work.Developer.Route
+	}
+	return work.Origin
+}
+
+func allocationRoute(repo Repository, route execution.Route) execution.Route {
+	if fallback := repo.ReviewerRoute; route.Parent == "" && fallback != nil && fallback.Provider == route.Provider && fallback.Target == route.Target {
+		route.Parent = fallback.Parent
+	}
+	return route
 }

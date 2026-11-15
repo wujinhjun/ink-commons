@@ -44,13 +44,13 @@ cp config.example.json config.json
 }
 ```
 
-`target` 是 cc-connect project。用 `parent` 指定 Discord 父频道以便自动建 thread，并注入有权限创建和访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
+`target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。显式 `parent` 可以覆盖创建位置；已有仓库默认路由中的 `parent` 继续生效。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
 
 ### 通用 HTTP
 
 配置 `http_provider_url` 为执行端的接收地址，再用 `{"provider":"http","target":"reviewer"}` 作为仓库的 `reviewer_route`。执行端可以是一个本地服务，也可以连接其他 agent runtime。远端地址需要 HTTPS，并通过 `INK_HTTP_PROVIDER_TOKEN` 提供 Bearer 认证。
 
-同砚向该地址发送 JSON POST，包含 `version: 1`、`operation`、`route` 和 `task`。任务含 `repository`、`pull_number`、`pull_url`、`role`、`sha`，以及适用的 `review_id` 和 `review_url`。执行端按操作返回 HTTP 2xx 和 JSON：
+同砚向该地址发送 JSON POST，包含 `version: 1`、`operation`、`route` 和 `task`。任务含 `repository`、`pull_number`、`pull_url`、`role`、`sha`，以及适用的 `review_id`、`review_url` 和 `source`（开发会话的路由）。执行端按操作返回 HTTP 2xx 和 JSON：
 
 | 操作 | 返回值 |
 |---|---|
@@ -74,11 +74,11 @@ GitHub 上开 Draft PR，等同砚发现并关联后，在 Mini 上执行：
 
 ```sh
 ink review --github-login 'yanshi-reviewer[bot]' \
-  --target que-zhou-hermes --parent DISCORD_CHANNEL_ID \
+  --target mo-cangli-pi \
   https://github.com/owner/repository/pull/42
 ```
 
-`--target` 是 cc-connect 项目，`--parent` 是 reviewer 可访问、同砚可创建 thread 的父频道。`--github-login` 是正式提交 review 的 GitHub 身份。用 `--session discord:THREAD_ID` 可以复用已有会话，只传 `--github-login` 则交给真人。开发 agent 可以用同一条命令代办。
+`--target` 是 cc-connect 项目。不传 `--parent` 时，使用工作项所绑定的开发 thread 的父频道；审查 thread 命名为 `Review owner/repository #42 · 开发 thread 标题`。工作项需通过 hook 或 `link` 关联开发会话。省略父频道且缺少有效 Discord 来源时，指派请求会立即报错；来源的远端读取失败会在下一次投递时记录到 `task.error`，不会任意选择其他频道。`--parent` 可显式覆盖创建位置。`--github-login` 是正式提交 review 的 GitHub 身份。用 `--session discord:THREAD_ID` 可以复用已有会话，只传 `--github-login` 则交给真人。开发 agent 可以用同一条命令代办。
 
 设好 reviewer 后，在 GitHub 标记 Ready for review。同砚在下一轮轮询中创建审查会话并派发任务。PR 已经是 Ready 时，指派会直接进入待派发。重复提交相同指派会保留已有会话和投递状态。修改后推送新 commit，同砚会沿用该 reviewer 复审。
 

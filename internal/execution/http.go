@@ -29,7 +29,15 @@ func PostJSON(ctx context.Context, client *http.Client, endpoint, auth string, p
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	return requestJSON(ctx, client, http.MethodPost, endpoint, auth, bytes.NewReader(data), result)
+}
+
+func GetJSON(ctx context.Context, client *http.Client, endpoint, auth string, result any) error {
+	return requestJSON(ctx, client, http.MethodGet, endpoint, auth, nil, result)
+}
+
+func requestJSON(ctx context.Context, client *http.Client, method, endpoint, auth string, body io.Reader, result any) error {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return fmt.Errorf("invalid upstream request")
 	}

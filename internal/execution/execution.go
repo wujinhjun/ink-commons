@@ -54,6 +54,8 @@ type Delivery struct {
 	SHA        string `json:"sha"`
 	ReviewID   int64  `json:"review_id,omitempty"`
 	ReviewURL  string `json:"review_url,omitempty"`
+	// Source is the development conversation associated with this task.
+	Source *Route `json:"source,omitempty"`
 }
 
 // Executor is the runtime boundary. Successful delivery means the provider
@@ -73,4 +75,17 @@ func ValidateDestination(providers map[string]Executor, route Route, allocate bo
 		return fmt.Errorf("unknown execution provider")
 	}
 	return provider.Validate(route, allocate)
+}
+
+// PreparationValidator is optional so providers can reject missing preparation
+// context at assignment time without adding side effects to route validation.
+type PreparationValidator interface {
+	ValidatePreparation(Route, Delivery) error
+}
+
+func ValidatePreparation(providers map[string]Executor, route Route, task Delivery) error {
+	if provider, ok := providers[route.Provider].(PreparationValidator); ok {
+		return provider.ValidatePreparation(route, task)
+	}
+	return nil
 }
