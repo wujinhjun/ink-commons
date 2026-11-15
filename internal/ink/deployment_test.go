@@ -36,6 +36,11 @@ func TestDeploymentGateBlocksPollingAndWrites(t *testing.T) {
 	if service.pollReady() {
 		t.Fatal("gate is closed")
 	}
+	check := httptest.NewRecorder()
+	service.Handler().ServeHTTP(check, httptest.NewRequest(http.MethodGet, "/v1/self-check", nil))
+	if check.Code != 200 || requests.Load() != 1 || service.up.lastOK.Load() == 0 || service.pollReady() {
+		t.Fatal("self-check must use daemon upstream without opening gate", check.Code)
+	}
 	if err := os.WriteFile(gate, []byte("ready"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +48,7 @@ func TestDeploymentGateBlocksPollingAndWrites(t *testing.T) {
 		t.Fatal("gate did not open")
 	}
 	service.Poll(context.Background())
-	if requests.Load() == 0 {
+	if requests.Load() < 2 || service.lastPoll.Load() == 0 {
 		t.Fatal("poll did not resume")
 	}
 }
@@ -69,7 +74,7 @@ func TestServeDeploymentWaitsForGate(t *testing.T) {
 			var body map[string]string
 			err = json.NewDecoder(response.Body).Decode(&body)
 			response.Body.Close()
-			if err != nil || body["revision"] != BuildRevision {
+			if err != nil || body["revision"] != BuildRevision || body["gate"] != "closed" || body["last_poll"] != "" {
 				t.Fatal(body, err)
 			}
 			break

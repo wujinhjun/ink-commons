@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ink-commons/internal/execution"
@@ -42,6 +44,7 @@ type Config struct {
 }
 
 type upstream struct {
+	lastOK  *atomic.Int64
 	command string
 	token   string
 	http    *http.Client
@@ -50,6 +53,7 @@ type upstream struct {
 
 func newUpstream(token string) upstream {
 	return upstream{
+		lastOK: new(atomic.Int64),
 		token:  token,
 		github: "https://api.github.com",
 		http: &http.Client{
@@ -82,6 +86,7 @@ func (u upstream) gitHubGet(ctx context.Context, path string, result any) (http.
 	if err := json.NewDecoder(io.LimitReader(res.Body, 32<<20)).Decode(result); err != nil {
 		return nil, fmt.Errorf("invalid upstream response")
 	}
+	u.lastOK.Store(time.Now().Unix())
 	return res.Header, nil
 }
 
@@ -119,7 +124,14 @@ func (u upstream) commandGet(ctx context.Context, path string, result any) (http
 	cmd.Stdout = output
 	// Stderr 不继承：broker/CLI 的诊断可能包含本机认证上下文。
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("GitHub App command failed")
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("GitHub App command timed out or cancelled")
+		}
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return nil, fmt.Errorf("GitHub App command exited (status %d)", exit.ExitCode())
+		}
+		return nil, fmt.Errorf("GitHub App command could not run")
 	}
 	response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(output.Bytes())), nil)
 	if err != nil {
@@ -132,6 +144,7 @@ func (u upstream) commandGet(ctx context.Context, path string, result any) (http
 	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<20)).Decode(result); err != nil {
 		return nil, fmt.Errorf("invalid upstream response")
 	}
+	u.lastOK.Store(time.Now().Unix())
 	return response.Header, nil
 }
 

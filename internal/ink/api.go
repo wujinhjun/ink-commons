@@ -1,6 +1,7 @@
 package ink
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,8 +40,14 @@ var BuildRevision = "development"
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, 200, map[string]string{"status": "ok", "revision": BuildRevision})
+		gate := "closed"
+		if s.pollReady() {
+			gate = "open"
+		}
+		reply(w, 200, map[string]string{"status": "ok", "revision": BuildRevision, "gate": gate,
+			"last_poll": timestamp(s.lastPoll.Load()), "last_github_ok": timestamp(s.up.lastOK.Load())})
 	})
+	mux.HandleFunc("GET /v1/self-check", s.selfCheck)
 	mux.HandleFunc("GET /v1/work", s.listWork)
 	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}", s.work)
 	mux.HandleFunc("POST /v1/work/{owner}/{repo}/{number}/{action}", s.work)
@@ -60,6 +67,27 @@ func (s *Service) pollReady() bool {
 	}
 	_, err := os.Stat(s.config.PollGate)
 	return err == nil
+}
+
+func timestamp(unix int64) string {
+	if unix == 0 {
+		return ""
+	}
+	return time.Unix(unix, 0).UTC().Format(time.RFC3339)
+}
+
+// 验证常驻进程自己的凭据、代理环境和 PR 读权限；不触发业务轮询或派发。
+func (s *Service) selfCheck(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	for _, repo := range s.config.Repositories {
+		var pulls []Pull
+		if _, err := s.up.gitHubGet(ctx, "/repos/"+repo.Repo+"/pulls?state=open&per_page=1", &pulls); err != nil {
+			reply(w, 503, map[string]string{"repository": repo.Repo, "error": err.Error()})
+			return
+		}
+	}
+	reply(w, 200, map[string]string{"status": "ok"})
 }
 
 func reply(w http.ResponseWriter, status int, result any) {

@@ -15,9 +15,11 @@ REVISION=<full-commit-sha>
 "$PYTHON" deploy/macos/manage.py status --user "$(id -un)"
 ```
 
-`stage` 从指定提交的 `git archive` 构建，不包含工作区修改；将 SHA 写入二进制。产物保存到 `~/.local/lib/ink-commons/releases/<SHA>/`，已存在时拒绝覆盖。release 内保存生成的非敏感同砚配置和本机路径，不复制 cc-connect token；启动时才从本机 `~/.cc-connect/config.toml` 读取 webhook / Discord token。可用 `--config`、`--cc-config`、`--project`、`--github-command` 覆盖来源，GitHub 默认使用 `~/.local/bin/yuxingyi`。
+`stage` 从指定提交的 `git archive` 构建，不包含工作区修改；将 SHA 写入二进制。产物保存到 `~/.local/lib/ink-commons/releases/<SHA>/`，已存在时拒绝覆盖。release 内保存生成的非敏感同砚配置和本机路径，不复制 cc-connect token；启动时才从本机 `~/.cc-connect/config.toml` 读取 webhook / Discord token。release 还会复制现有 cc-connect 二进制并记录 SHA256，系统服务引用此稳定副本，避免依赖会话构建目录；也可通过 `--cc-connect-binary` 指定来源。可用 `--config`、`--cc-config`、`--project`、`--github-command` 覆盖来源，GitHub 默认使用 `~/.local/bin/yuxingyi`。
 
-生成配置的 `github_command` 是绝对 App CLI 路径。每个 GitHub 请求执行 `yuxingyi --profile inspect -R OWNER/REPO api ...`，由已有 broker 获取单仓库短期 token；不会读取个人 `gh auth token`，也不缓存启动时的一小时 token。多个受管仓库分别认证，失败不回退个人身份。原有 `INK_GITHUB_TOKEN` 仍供其他部署方式使用；配置了 `github_command` 时以 App CLI 为准。
+生成配置的 `github_command` 是绝对 App CLI 路径。每个 GitHub 请求执行 `yuxingyi --profile inspect -R OWNER/REPO api ...`，由已有 broker 获取单仓库短期 token；不会读取个人 `gh auth token`，也不缓存启动时的一小时 token。多个受管仓库分别认证，daemon 的读取失败不回退个人身份。这不改变 reviewer **提交** review 的身份；后者仍需配置仓库的 `reviewer_command`，或使用 `ink review --github-command yanshi-reviewer`。原有 `INK_GITHUB_TOKEN` 仍供其他部署方式使用；配置了 `github_command` 时以 App CLI 为准。
+
+需要代理时，stage 可重复传非敏感环境：`--env HTTPS_PROXY=http://127.0.0.1:7897 --env NODE_OPTIONS=--use-env-proxy`。只允许 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 和上述 Node 开关；代理 URL 不允许凭据、query 或 fragment。环境写入私有部署清单及 plist，不能填入 token。该代理本身也需要能在无 GUI 时运行；不要把临时审查代理写入长期部署。
 
 只升级现有登录服务：
 
@@ -39,7 +41,7 @@ sudo "$PYTHON" deploy/macos/manage.py activate --system \
   --cc-connect-agent "$HOME/Library/LaunchAgents/com.cc-connect.service.plist"
 ```
 
-脚本保留 cc-connect 已安装的二进制和配置，写入 `/Library/LaunchDaemons/`；备份并移除用户目录中的两个旧 plist，避免登录后启动第二份。显式设置 HOME、可执行文件路径、RunAtLoad 和 KeepAlive。之后升级同砚仍用 `--system`，可省略 `--cc-connect-agent`，会复用已安装的 cc-connect 系统 plist。脚本会短暂停止并重启这两个服务；不要在有 Agent 正在执行时切换。
+脚本使用 release 中固定的 cc-connect 二进制和既有配置，写入 `/Library/LaunchDaemons/`；备份并移除用户目录中的两个旧 plist，避免登录后启动第二份。先备份、停用并摘除旧 `com.personal-infra.discord-watchdog` GUI plist，防止它重新拉起旧 cc-connect；随后摘除 GUI 服务入口并停服务。不会安装新的 Discord 连接 watchdog，system 服务只依赖 launchd 进程退出重启，Discord 断线恢复仍需另行验证。显式设置 HOME、可执行文件路径、RunAtLoad 和 KeepAlive。之后升级同砚仍用 `--system`，可省略 `--cc-connect-agent`，会复用已安装的 cc-connect 系统 plist。脚本会短暂停止并重启这两个服务；不要在有 Agent 正在执行时切换。
 
 FileVault 启用时，断电后的冷启动仍须先解锁磁盘。这是磁盘加密边界，LaunchDaemon 不能绕过。本脚本不关闭 FileVault，也不承诺无人解锁的冷启动恢复。
 
@@ -47,18 +49,18 @@ cc-connect 的网络代理、Agent 运行时和模型凭据也必须能在无 GU
 
 ## 激活验证与失败恢复
 
-切换先停止旧服务并确认释放状态锁，再复制私有状态快照（排除 socket、锁和日志）。新版通过 `-poll-gate` 启动：可初始化 / 迁移状态并提供本地 API，但 gate 文件出现之前不轮询 GitHub、不派发任务。脚本核对 `/healthz` 的 SHA、cc-connect 本机监听端口，并用 App 身份读取所有配置仓库；全部通过才写 gate 文件并更新 hook 使用的 `~/.local/lib/ink-commons/ink` 入口。重启后 gate 保留，服务继续正常轮询。
+切换先停止旧服务并确认释放状态锁，再复制私有状态快照（排除 socket、锁和日志）。旧 `~/.local/lib/ink-commons/start` 不再被 launchd 引用，它仍会读取个人 gh token，不要再用它启动服务。新版通过 `-poll-gate` 启动：可初始化 / 迁移状态并提供本地 API，但 gate 文件出现之前不轮询 GitHub、不派发任务。脚本核对 `/healthz` 的 SHA 和关闭的 gate、cc-connect 本机端口唯一监听者与 system 服务 PID 一致，并调用 daemon 自身的只读 `GET /v1/self-check` 验证所有配置仓库的 PR 读取权限。self-check 具有总请求超时，并最多重试三次；失败只返回仓库和脱敏的超时/退出码分类，不转发 CLI stderr 或配置。全部通过才写 gate 文件并更新 hook 使用的 `~/.local/lib/ink-commons/ink` 入口。重启后 gate 保留，服务继续正常轮询。
 
-验证期间失败会先停新版，再恢复状态快照、旧二进制和 plist 并重新加载原服务。若无法停下新版，拒绝覆盖数据库，保留备份等待人工恢复。不会在已开始派发后自动回滚数据库。
+验证期间失败会先停新版，再恢复状态快照、旧二进制和 plist 并重新加载原服务。若无法停下新版，拒绝覆盖数据库，保留备份等待人工恢复，并输出阶段、SHA、备份目录、gate 状态和各部分恢复结果。回滚恢复原 plist 权限/属主、入口符号链接形态与 launchd enabled/disabled 状态；子目录也恢复服务用户属主。不会在已开始派发后自动回滚数据库。
 
-备份位于 `~/.local/lib/ink-commons/backups/<timestamp>/`，包含旧状态、旧二进制及原 plist；系统模式的备份由 root 保护。备份含 PR / thread 关联和原服务环境，不应提交 Git 或上传。可在激活成功后执行：
+停服务前会输出备份位置。备份位于 `~/.local/lib/ink-commons/backups/<timestamp>/`，包含旧状态、旧二进制及原 plist；系统模式的备份由 root 保护。备份含 PR / thread 关联和原服务环境，不应提交 Git 或上传。可在激活成功后执行：
 
 ```sh
 "$PYTHON" deploy/macos/manage.py status --user "$(id -un)"
 curl --unix-socket "$HOME/.local/state/ink-commons/ink.sock" http://ink/healthz
 ```
 
-`status` 分别报告两个服务在 system / GUI domain 中是否加载，以及本地 API 的运行 SHA。健康和端口检查不能证明审查闭环成功；需另用测试 PR 验证派审、正式 review 同步及回流。真实重启测试应在工作空闲时进行。
+`status` 分别报告两个服务及旧 watchdog 在 system / GUI domain 中是否加载、cc-connect 进程 PID 和 9111 监听 PID，以及本地 API 的运行 SHA。状态目录优先从当前 plist 对应的部署清单解析。`/healthz` 同时显示 `gate: open|closed`、`last_poll`（最近完成轮询）及 `last_github_ok`（最近成功读取，包含 self-check），便于发现 gate 被误删或持续上游故障；这些时间是当前进程内的观察值，重启后重新记录。健康和端口检查不能证明审查闭环成功；需另用测试 PR 验证派审、正式 review 同步及回流。真实重启测试应在工作空闲时进行。
 
 激活成功且已开始处理工作之后，如需回滚旧版，先停止服务，用当前版本的 `ink state backup` / `ink state export` 保存**最新**状态，再按根 README 的 SQLite 回滚步骤操作。不能直接用激活前的快照覆盖这期间产生的新任务。恢复旧 plist 后要卸载对应 system 服务、还原原 domain，避免两个进程并存。部署脚本只自动恢复验证失败的切换，不提供运行一段时间之后的一键数据降级。
 
@@ -70,4 +72,4 @@ go vet ./...
 "$PYTHON" -m unittest discover -s tests/macos -v
 ```
 
-Python 测试使用隔离目录和假的 launchctl、App CLI、socket，不重启本机服务、不发送消息。覆盖系统迁移去重、运行版本 gate、App 检查失败后的数据库与 plist 恢复，以及运行时不继承个人 GitHub token。
+Python 测试使用隔离目录和假的 launchctl、daemon self-check、socket，不重启本机服务、不发送消息。覆盖系统迁移去重、运行版本 gate、App 检查失败后的数据库与 plist 恢复，以及运行时不继承个人 GitHub token。

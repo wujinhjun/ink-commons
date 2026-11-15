@@ -3,6 +3,9 @@
 import argparse
 import fcntl
 import io
+import hashlib
+import re
+import stat
 import json
 import os
 from pathlib import Path
@@ -18,7 +21,12 @@ import time
 
 LABEL = 'com.ink-commons.daemon'
 CC_LABEL = 'com.cc-connect.service'
+WATCHDOG = 'com.personal-infra.discord-watchdog'
 SYSTEM_DIR = Path('/Library/LaunchDaemons')
+
+
+class DeploymentError(Exception):
+    """只包含脚本编写的安全诊断，不包含配置原文或子进程输出。"""
 
 
 def run(args, **kwargs):
@@ -43,22 +51,67 @@ def atomic(path, content, mode=0o600):
         Path(name).unlink(missing_ok=True)
 
 
+def parse_env(entries):
+    from urllib.parse import urlsplit
+    allowed = {'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','NODE_OPTIONS'}
+    result = {}
+    for entry in entries:
+        key, separator, value = entry.partition('=')
+        if not separator or key not in allowed or '\n' in value or '\r' in value:
+            raise DeploymentError('only non-secret proxy environment is supported')
+        if key == 'NODE_OPTIONS' and value != '--use-env-proxy':
+            raise DeploymentError('only NODE_OPTIONS=--use-env-proxy is supported')
+        if key.endswith('_PROXY') and key != 'NO_PROXY':
+            parsed = urlsplit(value)
+            if parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.scheme not in ('http','https','socks5','socks5h') or not parsed.hostname:
+                raise DeploymentError('proxy must be a URL without credentials, query or fragment')
+        result[key] = value
+    return result
+
+
+def existing_cc_binary(home):
+    for path in (home / 'Library/LaunchAgents' / (CC_LABEL+'.plist'), SYSTEM_DIR / (CC_LABEL+'.plist')):
+        if path.is_file():
+            return Path(plistlib.loads(path.read_bytes())['ProgramArguments'][0])
+    raise DeploymentError('cc-connect service missing; specify --cc-connect-binary')
+
+
+def disabled(domain,label):
+    result = subprocess.run(['/bin/launchctl','print-disabled',domain],capture_output=True)
+    if result.returncode:
+        return False  # 尚不存在的 GUI domain 没有已加载服务。
+    pattern = r'"' + re.escape(label) + r'"\s*=>\s*true'
+    return re.search(pattern,result.stdout.decode()) is not None
+
+
+def listener_pids(port):
+    result = subprocess.run(['/usr/sbin/lsof','-nP','-t','-iTCP:'+str(port),'-sTCP:LISTEN'],capture_output=True)
+    return sorted({int(value) for value in result.stdout.split() if value.isdigit()})
+
+
+def cc_listener_healthy(domain,port):
+    result = subprocess.run(['/bin/launchctl','print',domain+'/'+CC_LABEL],capture_output=True)
+    match = re.search(r'\bpid = (\d+)',result.stdout.decode())
+    return bool(match) and listener_pids(port) == [int(match.group(1))]
+
+
 def stage(args):
     if os.geteuid() == 0:
-        raise ValueError('stage must run as the service user, without sudo')
-    if sys.version_info < (3, 11):
-        raise ValueError('Python 3.11+ required')
+        raise DeploymentError('stage must run as the service user, without sudo')
+    if sys.version_info < (3, 11, 8):
+        raise DeploymentError('Python 3.11.8+ required')
     repo = Path(__file__).resolve().parents[2]
     revision = output(['git', '-C', repo, 'rev-parse', '--verify', args.revision + '^{commit}'])
     home = Path.home().resolve()
+    extra_env = parse_env(args.env)
     root = home / '.local/lib/ink-commons/releases'
     release = root / revision
     if release.exists():
-        raise ValueError('release already exists; reuse it or explicitly archive it before restaging')
+        raise DeploymentError('release already exists; reuse it or explicitly archive it before restaging')
     config = json.loads(Path(args.config).expanduser().read_text())
     command = Path(args.github_command).expanduser().resolve()
     if not command.is_file() or not os.access(command, os.X_OK):
-        raise ValueError('App CLI is unavailable')
+        raise DeploymentError('App CLI is unavailable')
     config['github_command'] = str(command)
     # 凭据和路径检查先于构建；永远不输出 cc-connect 生成配置。
     cc_config = Path(args.cc_config).expanduser().resolve()
@@ -78,12 +131,15 @@ def stage(args):
         run(['go', 'build', '-trimpath', '-ldflags',
              '-X ink-commons/internal/ink.BuildRevision=' + revision,
              '-o', candidate / 'ink', './cmd/ink'], cwd=source)
+        cc_source = Path(args.cc_connect_binary).expanduser().resolve() if args.cc_connect_binary else existing_cc_binary(home)
+        shutil.copy2(cc_source, candidate / 'cc-connect')
         for name in ('runtime.py', 'manage.py'):
             shutil.copy2(source / 'deploy/macos' / name, candidate / name)
         atomic(candidate / 'config.json', json.dumps(config).encode())
         settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
                     'data': str(home / '.local/state/ink-commons'),
-                    'cc_config': str(cc_config), 'project': args.project}
+                    'cc_config': str(cc_config), 'project': args.project, 'environment': extra_env,
+                    'cc_binary_sha256': hashlib.sha256((candidate / 'cc-connect').read_bytes()).hexdigest()}
         atomic(candidate / 'deployment.json', json.dumps(settings).encode())
         os.rename(candidate, release)
     print('Staged:', release)
@@ -94,6 +150,7 @@ def ink_plist(release, settings, user, system):
     data = Path(settings['data'])
     env = {'HOME': settings['home'],
            'PATH': str(Path(settings['home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'}
+    env.update(parse_env([key + '=' + value for key,value in settings.get('environment', {}).items()]))
     result = {'Label': LABEL, 'ProgramArguments': [settings['python'], str(release / 'runtime.py')],
               'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30,
               'ExitTimeOut': 45, 'EnvironmentVariables': env,
@@ -104,18 +161,26 @@ def ink_plist(release, settings, user, system):
     return result
 
 
-def health(data):
+def local_get(data, path, timeout=25):
     with socket.socket(socket.AF_UNIX) as client:
-        client.settimeout(2)
+        client.settimeout(timeout)
         client.connect(str(Path(data) / 'ink.sock'))
-        client.sendall(b'GET /healthz HTTP/1.0\r\nHost: ink\r\n\r\n')
+        client.sendall(('GET ' + path + ' HTTP/1.0\r\nHost: ink\r\n\r\n').encode())
         chunks = []
         while True:
             part = client.recv(65536)
             if not part:
                 break
             chunks.append(part)
-    return json.loads(b''.join(chunks).split(b'\r\n\r\n', 1)[1])
+    head,body = b''.join(chunks).split(b'\r\n\r\n', 1)
+    report = json.loads(body)
+    if head.split(b' ',2)[1] != b'200':
+        raise DeploymentError('daemon self-check failed: repository=' + report.get('repository','unknown') + '; ' + report.get('error','unavailable'))
+    return report
+
+
+def health(data):
+    return local_get(data, '/healthz', timeout=2)
 
 
 def loaded(domain, label):
@@ -127,51 +192,58 @@ def unload(domain, label):
     if loaded(domain, label):
         run(['/bin/launchctl', 'bootout', domain + '/' + label])
     if loaded(domain, label):
-        raise ValueError('service did not stop: ' + label)
+        raise DeploymentError('service did not stop: ' + label)
 
 
 def validate_state_directory(data, home, uid):
     if data != home / '.local/state/ink-commons' or not data.is_dir() or data.is_symlink():
-        raise ValueError('existing private state directory required')
+        raise DeploymentError('existing private state directory required')
     if data.stat().st_uid != uid or data.stat().st_mode & 0o077:
-        raise ValueError('state directory must be private and owned by service user')
+        raise DeploymentError('state directory must be private and owned by service user')
 
 
 def activate(args):
     account = pwd.getpwnam(args.user)
     if account.pw_uid == 0:
-        raise ValueError('service must run as a non-root user')
+        raise DeploymentError('service must run as a non-root user')
     if args.system != (os.geteuid() == 0):
-        raise ValueError('system activation requires sudo; user activation must run without sudo')
+        raise DeploymentError('system activation requires sudo; user activation must run without sudo')
     if not args.system and os.geteuid() != account.pw_uid:
-        raise ValueError('user activation must run as the service user')
+        raise DeploymentError('user activation must run as the service user')
     home = Path(account.pw_dir).resolve()
     release = Path(args.release).resolve()
     if release.parent != home / '.local/lib/ink-commons/releases':
-        raise ValueError('release must be in the service user release directory')
+        raise DeploymentError('release must be in the service user release directory')
     settings = json.loads((release / 'deployment.json').read_text())
     if settings['home'] != str(home):
-        raise ValueError('release belongs to a different home')
+        raise DeploymentError('release belongs to a different home')
+    if settings.get('revision') != release.name:
+        raise DeploymentError('release name and revision differ')
     data = Path(settings['data'])
     validate_state_directory(data, home, account.pw_uid)
     if not args.system and loaded('system', LABEL):
-        raise ValueError('system service exists; use system activation')
+        raise DeploymentError('system service exists; use system activation')
     if args.system and not args.cc_connect_agent and not (SYSTEM_DIR / (CC_LABEL + '.plist')).exists():
-        raise ValueError('first system migration requires --cc-connect-agent')
+        raise DeploymentError('first system migration requires --cc-connect-agent')
     gui = 'gui/' + str(account.pw_uid)
     domain = 'system' if args.system else gui
     destination = SYSTEM_DIR if args.system else home / 'Library/LaunchAgents'
     jobs = [(LABEL, ink_plist(release, settings, args.user, args.system))]
     if args.system or args.cc_connect_agent:
         if not args.system:
-            raise ValueError('--cc-connect-agent is only supported for system migration')
+            raise DeploymentError('--cc-connect-agent is only supported for system migration')
         cc_path = (Path(args.cc_connect_agent).resolve() if args.cc_connect_agent
                    else SYSTEM_DIR / (CC_LABEL + '.plist'))
         if args.cc_connect_agent and cc_path != home / 'Library/LaunchAgents' / (CC_LABEL + '.plist'):
-            raise ValueError('expected the service user cc-connect LaunchAgent')
+            raise DeploymentError('expected the service user cc-connect LaunchAgent')
         cc = plistlib.loads(cc_path.read_bytes())
         if cc.get('Label') != CC_LABEL or not Path(cc['ProgramArguments'][0]).is_file():
-            raise ValueError('invalid cc-connect agent')
+            raise DeploymentError('invalid cc-connect agent')
+        cc_original_binary = Path(cc['ProgramArguments'][0])
+        bundled = release / 'cc-connect'
+        if not bundled.is_file() or hashlib.sha256(bundled.read_bytes()).hexdigest() != settings.get('cc_binary_sha256'):
+            raise DeploymentError('staged cc-connect binary is unavailable or changed')
+        cc['ProgramArguments'][0] = str(bundled)
         cc['UserName'] = args.user
         cc['RunAtLoad'] = True
         cc['KeepAlive'] = True
@@ -181,28 +253,52 @@ def activate(args):
     # 在停服务前验证全部输入。stage 产生的配置仍可能被人工改坏。
     config = json.loads((release / 'config.json').read_text())
     if not config.get('github_command') or not Path(config['github_command']).is_file():
-        raise ValueError('release has no App CLI')
+        raise DeploymentError('release has no App CLI')
     if not (release / 'ink').is_file() or not Path(settings['python']).is_file():
-        raise ValueError('release runtime unavailable')
+        raise DeploymentError('release runtime unavailable')
     backup = home / '.local/lib/ink-commons/backups' / str(time.time_ns())
     backup.mkdir(parents=True, mode=0o700)
+    print('Backup:', backup, flush=True)
     previous = []
     old_link = home / '.local/lib/ink-commons/ink'
     old_link_exists = old_link.exists() or old_link.is_symlink()
+    old_link_target = os.readlink(old_link) if old_link.is_symlink() else None
     active = []
     snapshot_ready = False
     gate = release / 'enabled'
     gate_was_enabled = gate.exists()
+    phase = 'capture'
     try:
-        for label, _ in jobs:
-            for job_domain, directory in dict([(gui, home / 'Library/LaunchAgents'),
-                                                (domain, destination)]).items():
+        for label in [WATCHDOG] + [label for label,_ in jobs]:
+            domains = [(gui, home / 'Library/LaunchAgents')]
+            if label != WATCHDOG:
+                domains = list(dict(domains + [(domain,destination)]).items())
+            elif not args.system:
+                continue
+            for job_domain, directory in domains:
                 path = directory / (label + '.plist')
                 content = path.read_bytes() if path.exists() else None
-                previous.append((job_domain, path, content, loaded(job_domain, label)))
+                metadata = path.stat() if content is not None else None
+                was_loaded = loaded(job_domain,label)
+                if was_loaded and content is None:
+                    raise DeploymentError('loaded service has no restorable plist: ' + label)
+                previous.append((job_domain,path,content,was_loaded,metadata,disabled(job_domain,label)))
                 if content is not None:
-                    atomic(backup / (job_domain.replace('/', '-') + '-' + path.name), content)
-                unload(job_domain, label)
+                    atomic(backup / (job_domain.replace('/', '-') + '-' + path.name),content)
+        atomic(backup / 'metadata.json',json.dumps([{'domain':d,'path':str(p),'loaded':l,'disabled':x,
+               'mode':stat.S_IMODE(m.st_mode) if m else None,'uid':m.st_uid if m else None,'gid':m.st_gid if m else None}
+               for d,p,c,l,m,x in previous]).encode())
+        if args.system:
+            shutil.copy2(cc_original_binary,backup / 'cc-connect')
+        phase = 'stop_old_services'
+        # 先摘掉所有 GUI 入口并停 watchdog，随后才停 cc-connect，消除被重新拉起的窗口。
+        for job_domain,path,content,was_loaded,metadata,was_disabled in previous:
+            if args.system and job_domain == gui and content is not None:
+                path.unlink()
+            if path.stem == WATCHDOG and args.system:
+                run(['/bin/launchctl','disable',job_domain+'/'+WATCHDOG])
+            unload(job_domain,path.stem)
+        phase = 'snapshot'
         # 旧进程退出并释放锁之后才能复制 SQLite；不复制 socket 和锁文件。
         with open(data / 'state.json.lock', 'a') as lock:
             os.fchmod(lock.fileno(), 0o600)
@@ -215,34 +311,33 @@ def activate(args):
         if old_link_exists:
             shutil.copy2(old_link, backup / 'ink', follow_symlinks=True)
         gate.unlink(missing_ok=True)
+        phase = 'start_candidates'
         for label, job in jobs:
             path = destination / (label + '.plist')
             atomic(path, plistlib.dumps(job), 0o644)
             if args.system:
                 os.chown(path, 0, 0)
-                agent = home / 'Library/LaunchAgents' / path.name
-                if agent.exists():
-                    agent.unlink()  # 备份已记录；避免下次 GUI 登录又启动第二份。
             run(['/bin/launchctl', 'enable', domain + '/' + label])
             active.append((domain, label))
             run(['/bin/launchctl', 'bootstrap', domain, path])
+        phase = 'verify_revision'
         for _ in range(30):
             try:
                 report = health(data)
-                if report.get('revision') == settings['revision']:
+                if report.get('revision') == settings['revision'] and report.get('gate') == 'closed':
                     break
             except (OSError, ValueError, IndexError):
                 pass
             time.sleep(1)
         else:
-            raise ValueError('running revision did not match staged revision')
+            raise DeploymentError('running revision did not match staged revision')
         # 健康检查不代表链路成功：还必须用 App 读取 GitHub，并检查投递端端口。
         if args.system:
             cc_url = config.get('cc_connect_url', '')
             from urllib.parse import urlparse
             url = urlparse(cc_url)
             if url.hostname not in ('127.0.0.1', 'localhost') or not url.port:
-                raise ValueError('system deployment requires a loopback cc-connect endpoint')
+                raise DeploymentError('system deployment requires a loopback cc-connect endpoint')
             for attempt in range(30):
                 try:
                     with socket.create_connection((url.hostname, url.port), timeout=2):
@@ -251,14 +346,17 @@ def activate(args):
                     if attempt == 29:
                         raise
                     time.sleep(1)
-        for entry in config['repositories']:
-            repo = entry['repo']
-            check = [config['github_command'], '--profile', 'inspect', '-R', repo, 'api', 'repos/' + repo]
-            env = ink_plist(release, settings, args.user, args.system)['EnvironmentVariables']
-            if args.system:
-                check = ['/usr/bin/sudo', '-H', '-u', args.user, '--', '/usr/bin/env',
-                         'HOME=' + env['HOME'], 'PATH=' + env['PATH']] + check
-            run(check, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+            if not cc_listener_healthy(domain,url.port):
+                raise DeploymentError('cc-connect listener does not belong to the system service')
+        phase = 'daemon_self_check'
+        for attempt in range(3):
+            try:
+                local_get(data,'/v1/self-check')
+                break
+            except (OSError,DeploymentError) as error:
+                if attempt == 2:
+                    raise
+                time.sleep(1)
         descriptor, temp_name = tempfile.mkstemp(prefix='ink.', dir=old_link.parent)
         os.close(descriptor)
         temp_link = Path(temp_name)
@@ -272,54 +370,81 @@ def activate(args):
             os.lchown(old_link, account.pw_uid, account.pw_gid)
         # 最后一步才允许轮询及外部派发；之后不再进入回滚分支。
         atomic(gate, b'ready\n')
-    except Exception:
-        # 先停新进程，才能恢复迁移前状态；停止失败时绝不覆盖仍在用的数据库。
-        for job_domain, label in reversed(active):
-            unload(job_domain, label)
-        gate.unlink(missing_ok=True)
-        if gate_was_enabled:
-            atomic(gate, b'ready\n')
-        if snapshot_ready:
-            for item in data.iterdir():
-                if item.name not in ('ink.sock', 'state.json.lock') and not item.name.endswith('.log'):
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        item.unlink()
-            shutil.copytree(backup / 'state', data, dirs_exist_ok=True)
-            if args.system:
-                for item in data.rglob('*'):
-                    if item.is_file():
-                        os.chown(item, account.pw_uid, account.pw_gid)
-        if not old_link_exists:
-            old_link.unlink(missing_ok=True)
-        if old_link_exists and (backup / 'ink').exists():
-            old_link.unlink(missing_ok=True)
-            shutil.copy2(backup / 'ink', old_link)
-            if args.system:
-                os.chown(old_link, account.pw_uid, account.pw_gid)
-        for job_domain, path, content, was_loaded in previous:
-            if content is None:
-                path.unlink(missing_ok=True)
-            else:
-                atomic(path, content, 0o644)
-                if job_domain == gui and args.system:
-                    os.chown(path, account.pw_uid, account.pw_gid)
-        for job_domain, path, content, was_loaded in previous:
-            label = path.stem
-            if was_loaded and not loaded(job_domain, label):
-                run(['/bin/launchctl', 'bootstrap', job_domain, path])
-        raise
+    except (Exception,KeyboardInterrupt):
+        restored = {'state':False,'binary':False,'services':False}
+        try:
+            # 先停新进程，才能恢复迁移前状态；停止失败时绝不覆盖仍在用的数据库。
+            gate.unlink(missing_ok=True)
+            for job_domain, label in reversed(active):
+                unload(job_domain, label)
+            if snapshot_ready:
+                with open(data/'state.json.lock','a') as recovery_lock:
+                    fcntl.flock(recovery_lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    for item in data.iterdir():
+                        if item.name not in ('ink.sock', 'state.json.lock') and not item.name.endswith('.log'):
+                            if item.is_dir():
+                                shutil.rmtree(item)
+                            else:
+                                item.unlink()
+                    shutil.copytree(backup / 'state', data, dirs_exist_ok=True)
+                    if args.system:
+                        for item in data.rglob('*'):
+                            os.lchown(item, account.pw_uid, account.pw_gid)
+            restored['state'] = snapshot_ready
+            if not old_link_exists:
+                old_link.unlink(missing_ok=True)
+            if old_link_exists and (backup / 'ink').exists():
+                old_link.unlink(missing_ok=True)
+                if old_link_target is not None:
+                    old_link.symlink_to(old_link_target)
+                else:
+                    shutil.copy2(backup / 'ink', old_link)
+                if args.system:
+                    os.lchown(old_link, account.pw_uid, account.pw_gid)
+            restored['binary'] = True
+            for job_domain, path, content, was_loaded, metadata, was_disabled in previous:
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic(path, content, stat.S_IMODE(metadata.st_mode))
+                    if args.system:
+                        os.chown(path, metadata.st_uid, metadata.st_gid)
+                run(['/bin/launchctl','disable' if was_disabled else 'enable',job_domain+'/'+path.stem])
+            for job_domain, path, content, was_loaded, metadata, was_disabled in sorted(previous,key=lambda item:item[1].stem==WATCHDOG):
+                label = path.stem
+                if was_loaded and not loaded(job_domain, label):
+                    run(['/bin/launchctl', 'bootstrap', job_domain, path])
 
-    print('Activated revision:', settings['revision'])
+            if gate_was_enabled:
+                atomic(gate,b'ready\n')
+            restored['services'] = True
+        except Exception as recovery_error:
+            print(json.dumps({'deployment':'rollback_incomplete','phase':phase,'recovery':'incomplete',
+                  'revision':settings['revision'],'backup':str(backup),
+                  'gate':'open' if gate.exists() else 'closed','restored':restored}),flush=True)
+            raise DeploymentError('recovery incomplete; do not overwrite state while the new process may still run') from recovery_error
+        print(json.dumps({'deployment':'rolled_back','phase':phase,'revision':settings['revision'],
+              'backup':str(backup),'gate':'open' if gate.exists() else 'closed',
+              'restored':restored}),flush=True)
+        raise
+    print('Activated revision:', settings['revision'], 'gate:', 'open' if gate.exists() else 'closed')
     print('Backup:', backup)
 
 
 def status(args):
     account = pwd.getpwnam(args.user)
-    data = Path(account.pw_dir) / '.local/state/ink-commons'
+    home = Path(account.pw_dir).resolve()
+    data = home / '.local/state/ink-commons'
+    for path in (SYSTEM_DIR / (LABEL+'.plist'),home/'Library/LaunchAgents'/(LABEL+'.plist')):
+        if path.is_file():
+            args_list = plistlib.loads(path.read_bytes()).get('ProgramArguments',[])
+            if args_list and args_list[-1].endswith('/runtime.py'):
+                manifest = Path(args_list[-1]).parent/'deployment.json'
+                if manifest.is_file():
+                    data = Path(json.loads(manifest.read_text())['data'])
+                    break
     report = {'user': args.user, 'services': {}}
-    for label in (LABEL, CC_LABEL):
+    for label in (LABEL, CC_LABEL, WATCHDOG):
         report['services'][label] = {
             'system': loaded('system', label),
             'login': loaded('gui/' + str(account.pw_uid), label)}
@@ -327,6 +452,9 @@ def status(args):
         report['runtime'] = health(data)
     except (OSError, ValueError, IndexError):
         report['runtime'] = {'status': 'unavailable'}
+    pids = subprocess.run(['/usr/bin/pgrep','-x','cc-connect'],capture_output=True).stdout.split()
+    report['cc_connect']={'process_pids':[int(p) for p in pids if p.isdigit()],
+                          'listener_9111_pids':listener_pids(9111)}
     print(json.dumps(report, indent=2))
 
 
@@ -335,6 +463,8 @@ def main():
     commands = parser.add_subparsers(dest='action', required=True)
     build = commands.add_parser('stage')
     build.add_argument('--revision', required=True)
+    build.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
+    build.add_argument('--cc-connect-binary')
     build.add_argument('--config', default='~/.config/ink-commons/config.json')
     build.add_argument('--cc-config', default='~/.cc-connect/config.toml')
     build.add_argument('--project', default='yu-xing-yi-codex')
@@ -347,10 +477,15 @@ def main():
     inspect = commands.add_parser('status')
     inspect.add_argument('--user', required=True)
     args = parser.parse_args()
+    if sys.version_info < (3,11,8):
+        parser.error('Python 3.11.8+ required for all commands')
     if sys.platform != 'darwin':
         parser.error('macOS only')
     try:
         {'stage': stage, 'activate': activate, 'status': status}[args.action](args)
+    except DeploymentError as error:
+        print('Deployment failed:', str(error), file=sys.stderr)
+        return 1
     except Exception as error:
         # 不转发 subprocess stdout / stderr 或配置解析原文。
         print('Deployment failed:', type(error).__name__, file=sys.stderr)
