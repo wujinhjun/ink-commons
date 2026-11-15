@@ -1,15 +1,10 @@
 package ink
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
-
-	"ink-commons/internal/execution"
 )
 
 func TestReviewIdentityMismatchIsVisibleAndDoesNotAdvancePhase(t *testing.T) {
@@ -57,8 +52,8 @@ func TestReviewIdentityMismatchIsVisibleAndDoesNotAdvancePhase(t *testing.T) {
 	}
 	dispatch(t, s, repo) // No developer route in this fixture: manual developer work.
 }
-func TestMissingReviewSchedulesBoundedFollowupAfterConfirmedEnd(t *testing.T) {
-	s, e, repo, path := reliabilityService(t, Reliability{ResultSeconds: 1, BackoffSeconds: 1, MaxAttempts: 2})
+func TestMissingReviewRemainsWaitingAcrossRestartWithoutRedispatch(t *testing.T) {
+	s, e, repo, path := reliabilityService(t, Reliability{ResultSeconds: 1})
 	dispatch(t, s, repo)
 	w := loadReliability(t, s)
 	d := w.Task.Runs[0].Request
@@ -70,148 +65,34 @@ func TestMissingReviewSchedulesBoundedFollowupAfterConfirmedEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconcile(t, s)
-	st, _ := s.store.load()
-	t1 := st.Work["acme/project#42"].Task
-	t1.Runs[0].EndedAt = time.Now().Add(-time.Minute)
+	st, err := s.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Work["acme/project#42"].Task.Runs[0].EndedAt = time.Now().Add(-time.Minute)
 	if err = s.store.save(st); err != nil {
 		t.Fatal(err)
 	}
 	reconcile(t, s)
 	w = loadReliability(t, s)
-	if w.Phase != "review_pending" || w.Task.RetryAt.IsZero() || w.Alerts[0].Code != "workflow_result_missing" {
-		t.Fatal("agent completion was treated as workflow completion", w)
+	if w.Phase != "review_pending" || !w.Task.RetryAt.IsZero() || len(w.Alerts) != 1 || w.Alerts[0].Code != "workflow_result_missing" {
+		t.Fatal("missing result was lost or scheduled new work", w)
 	}
-	// Persisted waiting/follow-up state survives a new service, not the agent turn.
+	alertID := w.Alerts[0].ID
+	taskID := w.Task.ID
 	s.Close()
 	s, err = NewService(s.config, path, s.providers)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if loadReliability(t, s).Task.RetryAt.IsZero() {
-		t.Fatal("restart lost follow-up")
+	for i := 0; i < 3; i++ {
+		reconcile(t, s)
+		dispatch(t, s, repo)
 	}
-	st, _ = s.store.load()
-	st.Work["acme/project#42"].Task.RetryAt = time.Now().Add(-time.Second)
-	s.store.save(st)
-	reconcile(t, s)
-	dispatch(t, s, repo)
 	w = loadReliability(t, s)
-	if len(e.deliveries) != 2 || w.Task.ID != d.TaskID || w.Task.Runs[1].ID == d.AttemptID || !strings.Contains(e.deliveries[1].task.Feedback, "正式审查") {
-		t.Fatal("missing outcome did not wake reviewer with feedback", w)
-	}
-	second := w.Task.Runs[1].Request
-	owner, _, err = e.ledger.Start(second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = e.ledger.Finish(second, owner, "succeeded"); err != nil {
-		t.Fatal(err)
-	}
-	reconcile(t, s)
-	st, _ = s.store.load()
-	st.Work["acme/project#42"].Task.Runs[1].EndedAt = time.Now().Add(-time.Minute)
-	s.store.save(st)
-	reconcile(t, s)
-	dispatch(t, s, repo)
-	if w = loadReliability(t, s); len(e.deliveries) != 2 || !strings.Contains(w.Task.Error, "attempts exhausted") {
-		t.Fatal("follow-up loop not bounded", w)
-	}
-}
-func TestQueuedHeartbeatUsesQueueDeadline(t *testing.T) {
-	now := time.Now().UTC()
-	c := Reliability{ACKSeconds: 1, QueueSeconds: 120, HeartbeatSeconds: 30}
-	a := Attempt{CreatedAt: now.Add(-time.Minute), Receipt: execution.Receipt{State: "queued", HeartbeatAt: now}}
-	if c.expired(a, now) {
-		t.Fatal("healthy busy queue expired as missing start ACK")
-	}
-	a.Receipt.HeartbeatAt = now.Add(-time.Minute)
-	if !c.expired(a, now) {
-		t.Fatal("dead queue heartbeat ignored")
-	}
-	a.Receipt.HeartbeatAt = now
-	a.CreatedAt = now.Add(-3 * time.Minute)
-	if !c.expired(a, now) {
-		t.Fatal("queue wait was unbounded")
-	}
-}
-
-type notificationExecutor struct {
-	reliableExecutor
-	notices     []execution.Notice
-	notifyError error
-}
-
-func (e *notificationExecutor) Notify(_ context.Context, _ execution.Route, n execution.Notice) error {
-	e.notices = append(e.notices, n)
-	return e.notifyError
-}
-func TestWorkflowAlertOutboxRetriesAndDeduplicates(t *testing.T) {
-	s, e, _, _ := reliabilityService(t, Reliability{})
-	n := &notificationExecutor{reliableExecutor: *e, notifyError: errors.New("offline")}
-	s.providers["test"] = n
-	st, _ := s.store.load()
-	w := st.Work["acme/project#42"]
-	w.Origin = &execution.Route{Provider: "test", Target: "developer", Session: "thread"}
-	w.raiseAlert("test", "event", "diagnostic", time.Now())
-	s.store.save(st)
-	s.deliverAlerts(context.Background())
-	w = loadReliability(t, s)
-	if w.Alerts[0].NotificationAccepted || w.Alerts[0].Error == "" {
-		t.Fatal("failed alert was lost")
-	}
-	n.notifyError = nil
-	s.deliverAlerts(context.Background())
-	s.deliverAlerts(context.Background())
-	w = loadReliability(t, s)
-	if !w.Alerts[0].NotificationAccepted || len(n.notices) != 2 || n.notices[0].ID != n.notices[1].ID {
-		t.Fatal("notification outbox did not retain stable dedup ID", w.Alerts)
-	}
-}
-
-type ambiguousPreparation struct {
-	reliableExecutor
-	prepares int
-}
-
-func (e *ambiguousPreparation) Prepare(context.Context, execution.Route, execution.Delivery) (string, error) {
-	e.prepares++
-	return "", errors.New("response lost after thread creation")
-}
-func TestAmbiguousThreadPreparationRequiresReconciliation(t *testing.T) {
-	s, e, repo, _ := reliabilityService(t, Reliability{ACKSeconds: 1})
-	a := &ambiguousPreparation{reliableExecutor: *e}
-	s.providers["test"] = a
-	st, _ := s.store.load()
-	st.Work["acme/project#42"].Reviewer.Route.Session = ""
-	s.store.save(st)
-	dispatch(t, s, repo)
-	w := loadReliability(t, s)
-	if w.Task.Preparation != "unknown" || a.prepares != 1 {
-		t.Fatal(w.Task)
-	}
-	// Even if the old non-running attempt has been stopped, a retry cannot create
-	// a second conversation while the first allocation result is ambiguous.
-	st, _ = s.store.load()
-	task := st.Work["acme/project#42"].Task
-	task.Runs[0].State = "stopped"
-	task.Runs[0].EndedAt = time.Now()
-	task.Delivery = "pending"
-	s.store.save(st)
-	dispatch(t, s, repo)
-	if a.prepares != 1 {
-		t.Fatal("ambiguous allocation repeated")
-	}
-	body := `{"task_id":"` + w.Task.ID + `","route":{"provider":"test","target":"reviewer","session":"existing-thread"},"reason":"found the created thread"}`
-	out := httptest.NewRecorder()
-	s.Handler().ServeHTTP(out, httptest.NewRequest("POST", "/v1/work/acme/project/42/confirm-prepared", strings.NewReader(body)))
-	if out.Code != 200 {
-		t.Fatal(out.Code, out.Body)
-	}
-	dispatch(t, s, repo)
-	w = loadReliability(t, s)
-	if a.prepares != 1 || w.Reviewer.Route.Session != "existing-thread" || w.Task.PreparationReason != "found the created thread" || w.Task.Runs[len(w.Task.Runs)-1].Route.Session != "existing-thread" {
-		t.Fatal("reconciled session not reused", w.Task)
+	if len(e.deliveries) != 1 || w.Task.ID != taskID || !w.Task.RetryAt.IsZero() || len(w.Alerts) != 1 || w.Alerts[0].ID != alertID || !w.Alerts[0].Active {
+		t.Fatal("restart replayed successful work or lost waiting diagnosis", w)
 	}
 }
 

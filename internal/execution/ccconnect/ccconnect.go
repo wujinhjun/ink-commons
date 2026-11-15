@@ -12,7 +12,6 @@ import (
 const Name = "cc-connect"
 
 type Executor struct {
-	managed      bool
 	client       *http.Client
 	endpoint     string
 	token        string
@@ -171,10 +170,6 @@ func (e *Executor) Deliver(ctx context.Context, route execution.Route, task exec
 	if task.Feedback != "" {
 		prompt += "\nPrevious workflow feedback:\n" + task.Feedback
 	}
-	if e.managed {
-		_, err := e.executionCall(ctx, "deliver", route, task, prompt, "", "")
-		return err
-	}
 	body := map[string]string{"project": route.Target, "session_key": route.Session, "prompt": prompt, "event": "ink-commons:" + task.Role}
 	var ack struct {
 		Status string `json:"status"`
@@ -197,51 +192,4 @@ func discordChannel(session string) (string, error) {
 		return "", fmt.Errorf("invalid cc-connect Discord session")
 	}
 	return channel, nil
-}
-
-func (e *Executor) EnableMonitoring(enabled bool) { e.managed = enabled }
-func (e *Executor) MonitoringEnabled() bool       { return e.managed }
-func (e *Executor) Status(ctx context.Context, r execution.Route, d execution.Delivery) (execution.Receipt, error) {
-	return e.executionCall(ctx, "status", r, d, "", "", "")
-}
-func (e *Executor) Stop(ctx context.Context, r execution.Route, d execution.Delivery) (execution.Receipt, error) {
-	return e.executionCall(ctx, "stop", r, d, "", "", "")
-}
-func (e *Executor) ConfirmStopped(ctx context.Context, r execution.Route, d execution.Delivery, reason string) error {
-	_, err := e.executionCall(ctx, "resolve", r, d, "", "", reason)
-	return err
-}
-func (e *Executor) Notify(ctx context.Context, r execution.Route, n execution.Notice) error {
-	_, err := e.executionCall(ctx, "notify", r, execution.Delivery{}, n.Message, n.ID, "")
-	return err
-}
-func (e *Executor) executionCall(ctx context.Context, operation string, route execution.Route, task execution.Delivery, prompt, noticeID, reason string) (execution.Receipt, error) {
-	if !e.managed {
-		return execution.Receipt{}, fmt.Errorf("cc-connect execution monitoring is disabled")
-	}
-	body := struct {
-		Version   int                 `json:"version"`
-		Operation string              `json:"operation"`
-		Route     execution.Route     `json:"route"`
-		Task      *execution.Delivery `json:"task,omitempty"`
-		Prompt    string              `json:"prompt,omitempty"`
-		NoticeID  string              `json:"notice_id,omitempty"`
-		Reason    string              `json:"reason,omitempty"`
-	}{Version: 1, Operation: operation, Route: route, Prompt: prompt, NoticeID: noticeID, Reason: reason}
-	if operation != "notify" {
-		body.Task = &task
-	}
-	var response struct {
-		Status  string            `json:"status"`
-		Error   string            `json:"error,omitempty"`
-		Receipt execution.Receipt `json:"receipt"`
-	}
-	err := execution.PostJSON(ctx, e.client, strings.TrimRight(e.endpoint, "/")+"/execution", "Bearer "+e.token, body, &response)
-	if err == nil && response.Status != "accepted" {
-		err = fmt.Errorf("managed executor did not accept request")
-	}
-	if err == nil && operation == "status" && response.Error != "" {
-		err = fmt.Errorf("executor: %s", response.Error)
-	}
-	return response.Receipt, err
 }

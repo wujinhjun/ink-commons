@@ -26,7 +26,6 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		PollSeconds   int             `json:"poll_seconds"`
 		CCConnectURL  string          `json:"cc_connect_url"`
 		HTTPURL       string          `json:"http_provider_url,omitempty"`
-		CCExecution   bool            `json:"cc_connect_execution,omitempty"`
 		HTTPExecution bool            `json:"http_provider_execution,omitempty"`
 	}
 	var cfg ink.Config
@@ -69,10 +68,6 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	cc, err := ccconnect.New(client, file.CCConnectURL, os.Getenv("INK_CC_CONNECT_TOKEN"), os.Getenv("INK_DISCORD_TOKEN"))
 	if err != nil {
 		return cfg, nil, err
-	}
-	cc.EnableMonitoring(file.CCExecution)
-	if file.CCExecution && file.CCConnectURL == "" {
-		return cfg, nil, fmt.Errorf("cc_connect_execution requires cc_connect_url")
 	}
 	providers := map[string]execution.Executor{ccconnect.Name: cc}
 	if file.HTTPURL != "" {

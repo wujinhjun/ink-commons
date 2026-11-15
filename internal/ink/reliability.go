@@ -11,7 +11,6 @@ import (
 
 // Reliability values are seconds; zero selects a default, including MaxAttempts.
 type Reliability struct {
-	QueueSeconds     int `json:"queue_seconds,omitempty"`
 	ResultSeconds    int `json:"result_seconds,omitempty"`
 	ACKSeconds       int `json:"ack_seconds,omitempty"`
 	HeartbeatSeconds int `json:"heartbeat_seconds,omitempty"`
@@ -21,7 +20,7 @@ type Reliability struct {
 }
 
 func (c Reliability) Validate() error {
-	for _, v := range []int{c.QueueSeconds, c.ResultSeconds, c.ACKSeconds, c.HeartbeatSeconds, c.ExecutionSeconds, c.BackoffSeconds} {
+	for _, v := range []int{c.ResultSeconds, c.ACKSeconds, c.HeartbeatSeconds, c.ExecutionSeconds, c.BackoffSeconds} {
 		if v < 0 || v > 604800 {
 			return fmt.Errorf("execution timeouts/backoff must be between 0 and 604800 seconds")
 		}
@@ -32,9 +31,6 @@ func (c Reliability) Validate() error {
 	return nil
 }
 func (c Reliability) defaults() Reliability {
-	if c.QueueSeconds == 0 {
-		c.QueueSeconds = 3600
-	}
 	if c.ResultSeconds == 0 {
 		c.ResultSeconds = 120
 	}
@@ -134,13 +130,6 @@ func validateReceipt(a Attempt, r execution.Receipt, now time.Time) error {
 		return fmt.Errorf("receipt after terminal state")
 	}
 	switch r.State {
-	case "queued":
-		if !r.StartedAt.IsZero() || !r.FinishedAt.IsZero() || r.HeartbeatAt.IsZero() {
-			return fmt.Errorf("invalid queue receipt")
-		}
-		if !a.Receipt.StartedAt.IsZero() {
-			return fmt.Errorf("running execution cannot return to queue")
-		}
 	case "accepted":
 		if !r.StartedAt.IsZero() || !r.HeartbeatAt.IsZero() || !r.FinishedAt.IsZero() {
 			return fmt.Errorf("accepted is not a start ACK")
@@ -177,9 +166,6 @@ func validateReceipt(a Attempt, r execution.Receipt, now time.Time) error {
 }
 
 func (c Reliability) expired(a Attempt, now time.Time) bool {
-	if a.Receipt.State == "queued" {
-		return now.Sub(a.CreatedAt) >= time.Duration(c.QueueSeconds)*time.Second || now.Sub(a.Receipt.HeartbeatAt) >= time.Duration(c.HeartbeatSeconds)*time.Second
-	}
 	if a.Receipt.StartedAt.IsZero() {
 		return now.Sub(a.CreatedAt) >= time.Duration(c.ACKSeconds)*time.Second
 	}

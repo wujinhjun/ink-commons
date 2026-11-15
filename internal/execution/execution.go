@@ -120,18 +120,3 @@ type Monitor interface {
 	Status(context.Context, Route, Delivery) (Receipt, error)
 	Stop(context.Context, Route, Delivery) (Receipt, error)
 }
-
-// Notifier durably accepts a diagnostic for delivery to the user's conversation.
-type Notice struct {
-	ID      string `json:"id"`
-	Message string `json:"message"`
-}
-type Notifier interface {
-	Notify(context.Context, Route, Notice) error
-}
-
-// StopResolver conveys a trusted local operator's explicit termination assertion.
-// It never substitutes a timeout or a missing PID for proof of termination.
-type StopResolver interface {
-	ConfirmStopped(context.Context, Route, Delivery, string) error
-}

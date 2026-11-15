@@ -48,9 +48,7 @@ Both operations return HTTP 2xx with a receipt:
 }
 ```
 
-States: `accepted`, `queued`, `running`, `succeeded`, `failed`, `stopped`. `queued`
-requires a heartbeat and no start/end timestamps; its queue deadline is distinct
-from the start ACK deadline. `running` is the
+States: `accepted`, `running`, `succeeded`, `failed`, `stopped`. `running` is the
 start ACK and requires start/heartbeat timestamps. Success/failure also require
 a start ACK and `finished_at`. A stopped task that never started may omit the
 start/heartbeat timestamps. Every changed snapshot increments `sequence`;
@@ -143,10 +141,10 @@ legacy runs with stable persisted IDs. This includes accepted/unknown deliveries
 and any task with `attempts > 0`, including `pending` tasks left by the old retry
 API. They migrate to `unknown`; genuinely unattempted pending tasks remain ready
 for first delivery. Legacy attempt numbers are normalized to at least one. Since
-the executor never received these IDs, only operator confirmation can resolve
-them. The legacy cc-connect webhook retains conservative behavior. The opt-in managed
-endpoint described below supplies durable admission, queueing and runtime
-termination; it requires the companion cc-connect change.
+the executor never received these IDs, only operator confirmation can resolve them. cc-connect's current webhook
+has the same conservative behavior; it receives task/attempt IDs in the prompt
+for diagnostics, but does not yet implement durable admission, status, stop or
+conversation reservation. These integrations remain explicitly tracked in TODO.
 
 The new fields live in the existing SQLite work JSON, so the storage schema stays
 at version 1. Back up before upgrading. Older binaries do not enforce execution
@@ -155,124 +153,29 @@ daemon against active new-version executions. Stop/fence them first and retain
 a backup containing the execution history before using the documented rollback.
 
 
-## cc-connect managed integration
+## Review waiting and diagnostics
 
-Upgrade both repositories before enabling this mode. Existing unmanaged attempts
-must be stopped and fenced manually; toggling the flag cannot retrofit IDs into
-an old webhook request. Do not point a managed provider at an unmodified server.
+The work API persists `workflow` and `alerts` independently of agent turns.
+Transport acceptance maps to `waiting_start`, not `executing`; execution requires
+a validated running receipt. GitHub observations still determine `phase`.
+Only the assigned reviewer's current-SHA formal review advances the workflow.
+A mismatched identity or a newly submitted stale-SHA result is diagnosed without
+weakening that filter. Old reviews preceding the current task are not stale-result
+alarms. Diagnostics have stable IDs, survive restart, log once on creation and
+remain as inactive history after resolution.
 
-In cc-connect:
+Review deliveries carry `github_login`, optional `github_command` (repository
+`reviewer_command` or CLI `--github-command`) and active diagnostic feedback.
+The reviewer is instructed to verify its identity and report a blocker instead
+of falling back to another account. Developer deliveries explicitly request
+checks and a pushed fix so the existing head-change observer can trigger review.
 
-```toml
-[webhook]
-enabled = true
-port = 9111
-path = "/hook"
-token = "<inject the shared secret securely>"
-execution_state = "/path/to/private/ink-executions.json"
-```
-
-The state directory must have mode 0700; state/lock files use 0600. This inbox is
-opt-in, uses an OS-held exclusive lock plus fsync/rename persistence, and is
-separate from ordinary session history. Locking is supported on Linux, macOS and
-FreeBSD. Legacy `/hook` requests retain their original behavior. Managed requests
-require a Bearer header even if the legacy endpoint accepts other authentication.
-
-In Ink Commons (credentials continue to come from environment):
-
-```json
-{
-  "cc_connect_url": "http://127.0.0.1:9111/hook",
-  "cc_connect_execution": true,
-  "execution": {
-    "queue_seconds": 3600,
-    "result_seconds": 120,
-    "max_attempts": 3
-  },
-  "repositories": [{
-    "repo": "owner/repository",
-    "reviewer_login": "reviewer-app[bot]",
-    "reviewer_command": "reviewer-cli"
-  }]
-}
-```
-
-The adapter sends version-1 `deliver`, `status`, `stop`, `resolve` and `notify`
-operations to `/hook/execution` using the HTTP lifecycle envelope plus `prompt`.
-The entire task and immutable route identify a round. Duplicate requests reuse
-the existing record; changed payloads/targets with the same ID conflict. A stop
-for an unseen round creates a durable tombstone. The same PR cannot acquire a
-new round while an old one is queued, running or unresolved. Different PRs can
-queue on one busy conversation in admission order.
-
-Queue admission is not a start ACK. The executor persists a dispatch intent before
-creating/resuming the runtime, and publishes `running` only after its Send call
-accepts the prompt. It retains the session fence until the runtime's explicit
-termination barrier returns and the terminal receipt is durably committed.
-Ordinary /new, /switch and stale-lock recovery cannot release this ownership.
-A restart during runtime creation/execution leaves an orphaned record and
-quarantines its conversation; it is not silently replayed. The status endpoint
-exposes the reason. An operator must stop/join the original processes and use
-`confirm-stopped`; the daemon first sends `resolve` to the executor, so its
-ownership ledger is reconciled too. This is an explicit operator assertion.
-
-Only adapters implementing confirmed termination can receive managed tasks.
-Codex tracks and terminates its managed process groups; Pi RPC kills/joins its
-RPC process group and makes concurrent closes idempotent. Pi JSON and other
-unadapted runtimes are rejected before admission. Managed tasks must not escape
-the runtime's process groups or leave detached external workloads. Workspace
-isolation across different PRs remains a separate deployment responsibility.
-
-To avoid dropping a user's message in the final-response/termination gap, new
-ordinary turns are refused while a managed round owns the conversation. Status,
-history, stop, permission callbacks and /ps remain available. The durable *work*
-queue continues to accept follow-up tasks while the conversation is busy.
-
-### Workflow results and diagnostics
-
-`workflow` records the waiting/attention state independently of the agent turn;
-`phase` continues to follow only the expected reviewer's current-SHA formal
-reviews and GitHub head changes. `alerts` persist diagnostic IDs, activity,
-creation time, notification acceptance and delivery errors. Unrelated reviewers'
-comments never authorize code changes.
-
-Expected login/CLI and diagnostic feedback travel in every review task. A wrong
-identity or a newly submitted stale-SHA review raises a diagnostic without
-weakening the reviewer filter. Historical reviews from before the new head are
-normal and do not generate stale-result alarms. A succeeded review turn that
-produces no valid result after `result_seconds` schedules another attempt using
-the same stable task ID, a new attempt ID and capped backoff. `max_attempts`
-bounds these follow-ups. Developer completion without a new SHA raises a blocker
-instead of repeatedly editing the same working directory. No automatic merge is
-performed.
-
-Alerts are sent to the development conversation via a durable notification
-outbox. cc-connect retries failed platform sends and deduplicates accepted notice
-IDs. Delivery is at least once: a crash between a platform send and the local
-commit can repeat a diagnostic, but cannot launch another coding task. API/log
-diagnostics remain available if the provider lacks notification support.
-
-Thread creation reserves the current task in SQLite *before* contacting Discord.
-An interrupted or failed allocation remains reserved/unknown and blocks another
-create, even after the old execution attempt is stopped. Find the existing
-thread, then POST `confirm-prepared` with `task_id`, an existing-session `route`
-and a nonempty `reason`. The provider/target must match the reserved destination.
-The operator reason is retained, and retries reuse that session.
-
-### Cross-repository verification
-
-The fixture in cc-connect mocks only the agent process, GitHub and platform I/O;
-it uses the real durable inbox, engine, session locks and authenticated HTTP API.
-Build it from the companion checkout, then run the tagged integration test here:
-
-```sh
-(cd /path/to/cc-connect && go build -o /tmp/ink-cc-fixture ./tests/ink-managed-execution)
-INK_CC_CONNECT_FIXTURE=/tmp/ink-cc-fixture go test -race -tags ccconnect_integration ./internal/ink -run '^TestCCConnectFeedbackLoop$' -count=1
-```
-
-The test submits a wrong-identity review, restarts the daemon while it waits,
-checks automatic reviewer follow-up, wakes a busy developer through the durable
-queue, advances to a new SHA, and verifies current-SHA approval with exactly one
-developer execution. It also verifies that identity/CLI and previous diagnostics
-cross the real transport boundary. On macOS, existing cc-connect fixture tests
-may require a canonical TMPDIR such as `/private/tmp` to avoid symlink aliases.
+If the existing HTTP execution protocol confirms a succeeded run but no formal
+review/new SHA follows, `execution.result_seconds` (default 120, zero selects the
+default) controls when a diagnostic appears. This never sets a retry deadline or
+replays the successful attempt. A legacy cc-connect `accepted` response cannot
+prove an execution ended; the existing unknown/stop-confirmation rules still
+apply. The diagnostics feature adds no new executor operations, native queue,
+automatic notifications, process control or automatic missing-result follow-up.
+It runs with the unchanged cc-connect webhook. Reliable wake-up/queue integration
+remains a separate deferred change.

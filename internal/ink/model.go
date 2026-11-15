@@ -67,31 +67,26 @@ type Attempt struct {
 }
 
 type Task struct {
-	PreparationReason string    `json:"preparation_reason,omitempty"`
-	CreatedAt         time.Time `json:"created_at,omitempty"`
-	Preparation       string    `json:"preparation,omitempty"`
-	PreparedSession   string    `json:"prepared_session,omitempty"`
-	ID                string    `json:"task_id,omitempty"`
-	Runs              []Attempt `json:"runs,omitempty"`
-	RetryAt           time.Time `json:"retry_at,omitempty"`
-	Role              string    `json:"role"`
-	SHA               string    `json:"sha"`
-	ReviewID          int64     `json:"review_id,omitempty"`
-	ReviewURL         string    `json:"review_url,omitempty"`
-	Delivery          string    `json:"delivery"`
-	Error             string    `json:"error,omitempty"`
-	Attempts          int       `json:"attempts"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	ID        string    `json:"task_id,omitempty"`
+	Runs      []Attempt `json:"runs,omitempty"`
+	RetryAt   time.Time `json:"retry_at,omitempty"`
+	Role      string    `json:"role"`
+	SHA       string    `json:"sha"`
+	ReviewID  int64     `json:"review_id,omitempty"`
+	ReviewURL string    `json:"review_url,omitempty"`
+	Delivery  string    `json:"delivery"`
+	Error     string    `json:"error,omitempty"`
+	Attempts  int       `json:"attempts"`
 }
 
 type Alert struct {
-	ID                   string    `json:"id"`
-	Code                 string    `json:"code"`
-	Message              string    `json:"message"`
-	SHA                  string    `json:"sha"`
-	Active               bool      `json:"active"`
-	CreatedAt            time.Time `json:"created_at"`
-	NotificationAccepted bool      `json:"notification_accepted"`
-	Error                string    `json:"error,omitempty"`
+	ID        string    `json:"id"`
+	Code      string    `json:"code"`
+	Message   string    `json:"message"`
+	SHA       string    `json:"sha"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
 }
 type Workflow struct {
 	State  string `json:"state"`
