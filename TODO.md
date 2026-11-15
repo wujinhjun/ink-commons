@@ -1,5 +1,15 @@
 # Ink Commons TODO
 
+## 待办
+
+- [ ] 配置化。
+- [ ] 在 Discord 开发 thread 提供原生 `/review` 命令，校验改派权限，并在同一个 thread 对应多条 PR 时让操作者选择 PR。命令复用同砚指派 API。
 - [ ] 从同砚工作项启动 Discord 开发 thread 时，按需分配独立目录、Git worktree 和分支。启动请求携带仓库和 base，分配成功后登记 thread 与源分支的绑定。现有工作项继续支持关联已有 PR 或分支。
 - [ ] 通过受管执行入口交接本地未提交改动，确认 agent 已停下后再移交工作目录。
-- [ ] 接入 GitHub Webhook 与 cc-connect 可确认开始执行的回执。
+- [ ] 接入 GitHub Webhook。
+- [ ] 接入 cc-connect 可确认开始执行的回执。
+
+## 已完成
+
+- [x] 将 daemon 状态从 `state.json` 迁移到 SQLite，保留现有 PR、会话绑定和投递记录，并提供备份与回滚方式。见 [PR #3](https://github.com/wujinhjun/ink-commons/pull/3) 和 [状态维护说明](README.md#状态备份与回滚)。
+- [x] 审查 thread 与开发 thread 位于同一父频道，名称关联开发 thread 标题和 PR 编号，并支持显式指定审查位置。见 [PR #4](https://github.com/wujinhjun/ink-commons/pull/4)。

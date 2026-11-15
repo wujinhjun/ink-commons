@@ -105,14 +105,7 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 
 `assign` 修改未来任务的投递。接手之前如果 bot 正在工作，先在原执行端停止它，再接管目录或处理未提交改动。`accepted` 表示执行端接收请求，正式 GitHub review 或新的 PR 版本才表示工作状态推进。cc-connect 忙时可能跳过任务，待办仍可在 API 中查看、重试或转给人。
 
-## TODO
-
-- [ ] 在 Discord 开发 thread 提供原生 `/review` 命令，校验改派权限，并在同一个 thread 对应多条 PR 时让操作者选择 PR。命令复用同砚指派 API。
-
-- [x] 将 daemon 状态从 `state.json` 迁移到 SQLite，保留现有 PR、会话绑定和投递记录，并提供备份与回滚方式。见下方状态维护说明。
-
-按需分配 worktree 和分支等事项见 [TODO](TODO.md)。
-
+开发计划与完成记录统一维护在 [TODO.md](TODO.md)。
 
 ## 状态、备份与回滚
 
