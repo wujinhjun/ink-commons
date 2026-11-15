@@ -221,11 +221,22 @@ def loaded(domain, label):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
-def unload(domain, label):
-    if loaded(domain, label):
-        run(['/bin/launchctl', 'bootout', domain + '/' + label])
-    if loaded(domain, label):
-        raise DeploymentError('service did not stop: ' + label)
+def unload(domain, label, timeout=45):
+    if not loaded(domain,label):
+        return
+    try:
+        run(['/bin/launchctl','bootout',domain+'/'+label])
+    except subprocess.CalledProcessError:
+        # 服务也可能在状态读取与 bootout 之间自行退出。
+        if not loaded(domain,label):
+            return
+        raise
+    # bootout 返回时 job 仍可能处于退出阶段；等待移除后才能快照或 bootstrap。
+    deadline=time.monotonic()+timeout
+    while loaded(domain,label):
+        if time.monotonic() >= deadline:
+            raise DeploymentError('service did not stop before deadline: '+label)
+        time.sleep(0.1)
 
 
 def validate_state_directory(data, home, uid):

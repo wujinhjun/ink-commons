@@ -211,6 +211,22 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(env['INK_DISCORD_TOKEN'], 'discord')
 
 class MacOSOutputTest(unittest.TestCase):
+    def test_unload_waits_for_asynchronous_bootout(self):
+        with patch.object(m,'loaded',side_effect=[True,True,True,False]), patch.object(m,'run') as run, patch.object(m.time,'sleep') as sleep:
+            m.unload('gui/501',m.LABEL)
+        run.assert_called_once_with(['/bin/launchctl','bootout','gui/501/'+m.LABEL])
+        self.assertEqual(sleep.call_count,2)
+
+    def test_unload_timeout_refuses_to_continue(self):
+        with patch.object(m,'loaded',return_value=True), patch.object(m,'run'), patch.object(m.time,'monotonic',side_effect=[0,46]):
+            with self.assertRaises(m.DeploymentError):
+                m.unload('gui/501',m.LABEL)
+
+    def test_unload_already_absent_is_idempotent(self):
+        with patch.object(m,'loaded',return_value=False), patch.object(m,'run') as run:
+            m.unload('gui/501',m.LABEL)
+        run.assert_not_called()
+
     def test_disabled_supports_current_macos_and_boolean_formats(self):
         sample=b'''disabled services = {\n"com.apple.ManagedClientAgent.enrollagent" => disabled\n"com.cc-connect.service" => enabled\n"legacy.disabled" => true\n"legacy.enabled" => false\n}'''
         with patch.object(m.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=sample)):

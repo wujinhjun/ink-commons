@@ -49,7 +49,7 @@ cc-connect 的网络代理、Agent 运行时和模型凭据也必须能在无 GU
 
 ## 激活验证与失败恢复
 
-切换先停止旧服务并确认释放状态锁，最多等待状态锁释放五秒，再复制私有状态快照（排除 socket、锁和日志）。旧 `~/.local/lib/ink-commons/start` 不再被 launchd 引用，它仍会读取个人 gh token，不要再用它启动服务。新版通过 `-poll-gate` 启动：可初始化 / 迁移状态并提供本地 API，但 gate 文件出现之前不轮询 GitHub、不派发任务。脚本核对 `/healthz` 的 SHA 和关闭的 gate、cc-connect 本机端口唯一监听者与 system 服务 PID 一致，并调用 daemon 自身的只读 `GET /v1/self-check` 验证所有配置仓库的 PR 读取权限。self-check 具有总请求超时，并最多重试三次；失败只返回仓库和脱敏的超时/退出码分类，不转发 CLI stderr 或配置。全部通过才写 gate 文件并更新 hook 使用的 `~/.local/lib/ink-commons/ink` 入口。重启后 gate 保留，服务继续正常轮询。
+切换先停止旧服务；`bootout` 后最多等待 45 秒确认 job 已移除，再确认释放状态锁，最多等待状态锁释放五秒，再复制私有状态快照（排除 socket、锁和日志）。旧 `~/.local/lib/ink-commons/start` 不再被 launchd 引用，它仍会读取个人 gh token，不要再用它启动服务。新版通过 `-poll-gate` 启动：可初始化 / 迁移状态并提供本地 API，但 gate 文件出现之前不轮询 GitHub、不派发任务。脚本核对 `/healthz` 的 SHA 和关闭的 gate、cc-connect 本机端口唯一监听者与 system 服务 PID 一致，并调用 daemon 自身的只读 `GET /v1/self-check` 验证所有配置仓库的 PR 读取权限。self-check 具有总请求超时，并最多重试三次；失败只返回仓库和脱敏的超时/退出码分类，不转发 CLI stderr 或配置。全部通过才写 gate 文件并更新 hook 使用的 `~/.local/lib/ink-commons/ink` 入口。重启后 gate 保留，服务继续正常轮询。
 
 验证期间失败会先停新版，再恢复状态快照、旧二进制和 plist 并重新加载原服务。若无法停下新版，或等待五秒后仍无法取得状态锁，拒绝覆盖数据库，保留备份等待人工恢复，并输出阶段、SHA、备份目录、gate 状态和各部分恢复结果。回滚恢复原 plist 权限/属主、入口符号链接形态与 launchd enabled/disabled 状态；子目录也恢复服务用户属主。不会在已开始派发后自动回滚数据库。
 
