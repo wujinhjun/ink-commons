@@ -337,7 +337,7 @@ def activate(args):
             os.fchmod(lock.fileno(), 0o600)
             if args.system:
                 os.fchown(lock.fileno(), account.pw_uid, account.pw_gid)
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_state_lock(lock)
             snapshot = backup / 'state'
             shutil.copytree(data, snapshot, ignore=shutil.ignore_patterns('ink.sock', 'state.json.lock', '*.log'))
             snapshot_ready = True

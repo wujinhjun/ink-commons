@@ -192,6 +192,13 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(self.self_checks,3)
         self.assertTrue((self.release/'enabled').exists())
 
+    def test_activation_waits_for_the_old_daemon_state_lock(self):
+        with patch.object(m.fcntl,'flock',side_effect=[BlockingIOError(),None]) as lock:
+            self.activate()
+        self.assertEqual(lock.call_count,2)
+        self.assertTrue((self.release/'enabled').exists())
+        self.assertEqual({label for domain,label in self.jobs if domain=='system'},{m.LABEL,m.CC_LABEL})
+
     def test_runtime_credentials_never_inherit_personal_tokens(self):
         cc = self.home / 'config.toml'
         cc.write_text('[webhook]\ntoken="webhook"\n[[projects]]\nname="review"\n'
