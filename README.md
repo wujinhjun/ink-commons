@@ -90,6 +90,30 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 
 升级前备份 SQLite 状态；通知记录保存在现有工作项 JSON 中。旧版程序可能丢弃 `notifications` 字段，导致再次升级后重复通知，回滚前应保留包含通知记录的备份。
 
+## AP 后自动合入（默认关闭）
+
+在单个仓库配置中设置：
+
+```json
+"auto_merge": {"enabled": true, "method": "merge"}
+```
+
+`method` 可选 `merge`（默认）、`squash` 或 `rebase`。也可在 `repository_defaults.auto_merge` 设置新注册仓库的默认值，或通过 `ink register --auto-merge-after-approval --merge-method squash owner/repository` 注册。显式 `"auto_merge": {"enabled": false}` 或注册参数 `--auto-merge-after-approval=false` 覆盖注册默认值；静态 `repositories` 仍需显式配置，已有动态注册不会被默认值回写。
+
+开启后，同砚仅处理已关联、打开、非 Draft 且由指定 reviewer 正式批准当前 head SHA 的 PR。每次尝试前重新读取 PR、review 和检查结果；需要 GitHub 报告 `mergeable: true`、`mergeable_state: clean`，并要求 head 和可用的 test-merge SHA 上当前已发现的 check runs 全部结束且为 success、neutral 或 skipped。检查未完成、失败、无权限读取、合并冲突或状态未知时保留 `waiting` 和原因，后续轮询重新检查，不让 Agent 用 sleep 等待。**需要保证等待特定 CI 时，应在 GitHub 分支规则中将其设为必需检查**；当前尚未出现的非必需检查不能由同砚保证等待。
+
+实际调用 GitHub merge API 时携带批准的 `sha`，避免 head 变化后误合入新提交；不使用管理员绕过。GitHub 分支保护、必需检查、额外 review 和仓库允许的合并方式仍由服务端执行。批准与 merge 之间无法实现跨 API 的原子校验；对必须严格维持到合并时的审批条件，应使用 GitHub 分支规则约束。没有 CI 的仓库可以在 GitHub 报告 clean 后合入。
+
+读取使用配置的 GitHub App `inspect` profile；仅实际 merge 请求使用同一 CLI 的 `code` profile，并以 JSON stdin 传入 SHA 和方法。App 需要相应仓库的 contents 写权限、PR/checks 读取权限，且 broker 允许 code profile；使用 `INK_GITHUB_TOKEN` 部署时同样需要相应权限。不会回退个人 gh 凭据，不自动扩大 App 权限。
+
+工作项 API 的 `auto_merges` 保存 SHA、reviewer、review ID、方式、状态、merge SHA、更新时间及原因。merge 发出前持久化 `unknown` 预留；同一 PR 的并发轮询和重启不会重复发请求。响应丢失、失败或中断后保留 unknown 并产生诊断，不自动重放；**任何历史 SHA 仍有 unknown 时，都继续告警并阻止该 PR 的新 head 自动合入**，避免后续 push 掩盖未决结果。仍然打开且结果不明的 PR 需人工核查和处理，当前没有自动重放/重置接口。
+
+GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关闭也可完成只读对账：未合并关闭时记为 failed；已合并且最终 head 匹配该记录时记为 merged；已合并但 head 不同时记为 superseded 并保留原因，不声称旧 SHA 已合入，也不把其他 head 的 merge SHA 归给旧请求。
+
+开启会处理已有的有效批准，不只处理开启后新产生的 review。它与批准通知、`postApproval` 脚本独立：通知和脚本先运行，随后检查自动合入；脚本本身不构成合入前置检查。如脚本已合并或改变 PR，自动流程会重新读取后停止当前合入尝试。关闭开关后不再发起新 merge，已经发出的请求无法撤回。合入不等于部署，此配置不会部署服务。
+
+升级前备份 SQLite。`auto_merges` 保存在工作项 JSON 中，旧版可能丢弃这些记录；回滚前保留含最新合入记录的完整备份。
+
 ## 代码结构
 
 | 目录 | 职责 |

@@ -27,6 +27,8 @@ func register(args []string) error {
 	parent := flags.String("parent", "", "legacy parent (ignored for new cc-connect review threads; use ink review --parent per PR)")
 	session := flags.String("session", "", "existing reviewer session")
 	developer := flags.String("developer", "", "human developer login")
+	autoMerge := flags.Bool("auto-merge-after-approval", false, "automatically merge the approved head after checks pass")
+	mergeMethod := flags.String("merge-method", "merge", "merge, squash or rebase (for automatic merge)")
 	hook := flags.String("post-approval", "", "absolute path of postApproval executable; receives event JSON on stdin")
 	reuseThread := flags.Bool("reuse-development-thread", false, "reuse the development thread with an independent reviewer project")
 	threadHistory := flags.Bool("thread-history", false, "allow reviewer access to original development thread messages")
@@ -56,7 +58,13 @@ func register(args []string) error {
 		if f.Name == "reuse-development-thread" || f.Name == "thread-history" {
 			repo.Review = &ink.ReviewFeatures{ReuseDevelopmentThread: *reuseThread, Context: ink.ReviewContextFeatures{ThreadHistory: *threadHistory}}
 		}
+		if f.Name == "auto-merge-after-approval" || f.Name == "merge-method" {
+			repo.AutoMerge = &ink.AutoMergeConfig{Enabled: *autoMerge, Method: *mergeMethod}
+		}
 	})
+	if err := repo.AutoMerge.Validate(); err != nil {
+		return err
+	}
 	if *target != "" || *parent != "" || *session != "" {
 		if *target == "" {
 			return errors.New("--target is required for an execution route")

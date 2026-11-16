@@ -67,6 +67,7 @@ func TestRepositoryDefaultsAndApprovalConfig(t *testing.T) {
 		{`{"repository_defaults":{"postApproval":{"command":["relative"]}}}`, false},
 		{`{"repository_defaults":{"postApproval":{"command":["/bin/true"],"timeout_seconds":-1}}}`, false},
 		{`{"repository_defaults":{"repo":"acme/project"}}`, false},
+		{`{"repository_defaults":{"auto_merge":{"enabled":true,"method":"unsafe"}}}`, false},
 	} {
 		if err := os.WriteFile(path, []byte(test.body), 0600); err != nil {
 			t.Fatal(err)

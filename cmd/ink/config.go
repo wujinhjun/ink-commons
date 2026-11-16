@@ -63,6 +63,9 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		cfg.PollSeconds = 60
 	}
 	cfg.RepositoryDefaults = file.RepositoryDefaults
+	if err := cfg.RepositoryDefaults.AutoMerge.Validate(); err != nil {
+		return cfg, nil, err
+	}
 	if cfg.RepositoryDefaults.Repo != "" {
 		return cfg, nil, fmt.Errorf("repository_defaults must not set repo")
 	}
@@ -110,6 +113,9 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	seen := make(map[string]bool)
 	for _, entry := range file.Repositories {
 		repo := entry.Repository
+		if err := repo.AutoMerge.Validate(); err != nil {
+			return cfg, nil, err
+		}
 		repo.Repo = strings.ToLower(repo.Repo)
 		if err := repo.PostApproval.Validate(); err != nil {
 			return cfg, nil, err
