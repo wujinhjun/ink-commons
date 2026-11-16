@@ -58,6 +58,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tasks/{task}/{action}", s.handoffTask)
 	mux.HandleFunc("POST /v1/pushes", s.pushes)
 	mux.HandleFunc("POST /v1/notifications/ack", s.ackNotification)
+	mux.HandleFunc("GET /v1/notifications/status", s.notificationStatus)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && !s.pollReady() {
 			fail(w, apiError{503, "deployment verification in progress"})

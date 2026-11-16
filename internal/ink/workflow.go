@@ -39,7 +39,11 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 	}
 	for _, n := range w.Notifications {
 		if (w.Phase == "approved" || w.Phase == "merged") && n.SHA == w.Pull.Head.SHA && (n.State == "awaiting_ack" || n.State == "unknown" || n.State == "failed" || n.State == "unsupported") {
-			w.raiseAlert("approval_notification_unresolved", n.EventID, "审查已通过，但开发会话通知尚未确认接收（"+n.State+"）。"+n.Error, now)
+			code, message := "approval_notification_unresolved", "审查已通过"
+			if n.Event == "pr_merged" {
+				code, message = "merge_notification_unresolved", "PR 已合入"
+			}
+			w.raiseAlert(code, n.EventID, message+"，但开发会话通知尚未确认接收（"+n.State+"）。"+n.Error, now)
 		}
 	}
 	t := w.Task

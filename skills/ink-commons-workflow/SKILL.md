@@ -41,3 +41,10 @@ ink task submit --task TASK_ID --handoff --request-id STABLE_ID --outcome blocke
 同一次提交重试必须使用相同 request ID 和证据。交接后不再做本任务的代码、检查、GitHub 写入或延迟工作。可以查询一次 `ink task status --task TASK_ID` 并报告结果，随后**结束当前回合**；verification pending 由同砚继续核验，不等它变为 completed，不因旧 phase 重做代码，不立即领取后继任务串起长回合。
 
 提交响应丢失时原样重试交接，不能重新开发/审查。持续传输失败时报告结果不明并结束回合，不声称交接已成功。等待其他 Agent、GitHub 同步或 CI 的阶段交给调度器；本回合明确要求的本地检查可以正常等待工具退出。
+
+
+## 批准与自动合入通知
+
+`review_approved` 和 `pr_merged` 是信息通知，不是返工任务，不执行 claim、不自行合并或部署。先按通知中的 event ID 执行 `ink notification ack --event EVENT_ID`；只有 `first:true` 才回复，`first:false` 不重复告知。确认失败时报告收件失败。
+
+首次接收后执行一次 `ink notification status --event EVENT_ID`，按当前持久化的 `merge.state` 告知用户：`merged` 报告已合入和可用的 `merge_sha`；`waiting` 报告自动合入等待及原因；`blocked` / `unknown` 报告阻塞或结果未确认；`disabled` 表示自动合入关闭；`superseded` / `not_approved` 表示事件不再代表当前版本或批准状态。`closed` 表示未合并即关闭。发送时的快照可能已过时；查询失败只报告该事件已经确认的事实，并说明当前状态不可读，不能据此声称尚未合入。查询是本地账本观测，可能落后于 GitHub；不循环等待、不推断部署，简短回复后结束回合。

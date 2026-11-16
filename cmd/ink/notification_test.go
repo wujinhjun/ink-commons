@@ -76,3 +76,60 @@ func TestNotificationAckRequiresEvent(t *testing.T) {
 		}
 	}
 }
+
+func TestNotificationStatusUsesReadOnlyEscapedEventQuery(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		code       int
+		valid      bool
+	}{
+		{"merged", `{"event_id":"acme/project#42:abc:review_approved","event":"review_approved","sha":"abc","current_head_sha":"abc","phase":"approved","notification_state":"acknowledged","merge":{"auto_merge_enabled":true,"state":"merged","merge_sha":"def"}}`, 200, true},
+		{"missing", `{}`, 404, false},
+		{"bad JSON", `bad`, 200, false},
+		{"missing observation", `{"event_id":"acme/project#42:abc:review_approved"}`, 200, false},
+		{"wrong event", `{"event_id":"other","merge":{"state":"merged"}}`, 200, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, err := os.MkdirTemp("/private/tmp", "ink-status-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(dir)
+			t.Setenv("INK_DATA_DIR", dir)
+			ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != "GET" || r.URL.Path != "/v1/notifications/status" || r.URL.Query().Get("event_id") != "acme/project#42:abc:review_approved" {
+					t.Error("status request changed method or lost # in event ID")
+				}
+				w.WriteHeader(tc.code)
+				w.Write([]byte(tc.body))
+			})}
+			go server.Serve(ln)
+			defer server.Close()
+			out, err := os.CreateTemp(t.TempDir(), "stdout")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer out.Close()
+			original := os.Stdout
+			os.Stdout = out
+			err = run([]string{"notification", "status", "--event", "acme/project#42:abc:review_approved"})
+			os.Stdout = original
+			if (err == nil) != tc.valid || calls != 1 {
+				t.Fatalf("unexpected status result calls=%d err=%v", calls, err)
+			}
+			body, _ := os.ReadFile(out.Name())
+			if tc.valid && !strings.Contains(string(body), `"merge_sha":"def"`) {
+				t.Fatalf("lost merge observation: %s", body)
+			}
+			if !tc.valid && len(body) != 0 {
+				t.Fatal("failure printed successful status")
+			}
+		})
+	}
+}

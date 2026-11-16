@@ -27,7 +27,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ink init [--check] [--skills-dir DIR] | ink serve [-config FILE] [-data DIR] | ink pre-push REMOTE_URL | ink register [flags] [OWNER/REPO] | ink review [flags] PR_URL | ink context --sha SHA [--before MESSAGE_ID] PR_URL | ink notification ack --event EVENT_ID | ink task claim|status|submit|retry --task TASK_ID [flags] | ink state backup|export [flags]")
+		return errors.New("usage: ink init [--check] [--skills-dir DIR] | ink serve [-config FILE] [-data DIR] | ink pre-push REMOTE_URL | ink register [flags] [OWNER/REPO] | ink review [flags] PR_URL | ink context --sha SHA [--before MESSAGE_ID] PR_URL | ink notification ack|status --event EVENT_ID | ink task claim|status|submit|retry --task TASK_ID [flags] | ink state backup|export [flags]")
 	}
 	switch args[0] {
 	case "init":

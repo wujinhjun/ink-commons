@@ -34,7 +34,7 @@ func TestApprovalNotificationEntersDeveloperContext(t *testing.T) {
 				if input["project"] != "developer" || input["session_key"] != "discord:123" || input["event"] != "ink-commons:review_approved" {
 					t.Fatalf("not sent to developer context: %+v", input)
 				}
-				for _, expected := range []string{"https://github.com/acme/project/pull/42", "Approved commit: abc", "Reviewer: reviewer-bot", "#pullrequestreview-9", "Event: approval-event", "briefly acknowledge", "not a fix task", "merge", "head has changed"} {
+				for _, expected := range []string{"https://github.com/acme/project/pull/42", "Commit: abc", "Reviewer: reviewer-bot", "#pullrequestreview-9", "Event: approval-event", "acknowledge the result", "not a fix task", "merge", "head has changed"} {
 					if !strings.Contains(input["prompt"], expected) {
 						t.Fatalf("missing %q: %s", expected, input["prompt"])
 					}
@@ -383,5 +383,40 @@ func TestCooperativeWakeRequiresClaimBeforeAnyWork(t *testing.T) {
 	}
 	if strings.Contains(prompt, "hook-test") {
 		t.Fatal("wake disclosed runtime credential")
+	}
+}
+
+func TestMergeCompletionNotificationCarriesOutcomeAndReadOnlyStatusCommand(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		var input map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input["event"] != "ink-commons:pr_merged" || input["project"] != "developer" || input["session_key"] != "discord:123" {
+			t.Fatal(input)
+		}
+		for _, required := range []string{`"state":"merged"`, `"auto_merge_enabled":true`, `"merge_sha":"def"`, "ink notification ack --event 'merge-event'", "ink notification status --event 'merge-event'", "Do not perform a merge yourself", "do not poll", "first=false"} {
+			if !strings.Contains(input["prompt"], required) {
+				t.Fatalf("completion missing %q", required)
+			}
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"accepted"}`))}, nil
+	})}
+	e, err := New(client, "http://127.0.0.1:9111/hook", "secret", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := execution.Notification{EventID: "merge-event", Event: "pr_merged", SHA: "abc", Merge: &execution.MergeStatus{Enabled: true, State: "merged", MergeSHA: "def"}}
+	if err := e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatal("completion sent more than once")
+	}
+	n.Event = "unsupported"
+	if err := e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n); err == nil || calls != 1 {
+		t.Fatal("unsupported event was delivered")
 	}
 }

@@ -323,9 +323,9 @@ func TestApprovalNotificationRetriesAndReceiptsSurviveAutoMerge(t *testing.T) {
 	if err := f.s.store.save(st); err != nil {
 		t.Fatal(err)
 	}
-	f.onMerge = func() { f.pull.State, f.pull.Merged = "closed", true }
+	f.onMerge = func() { f.pull.State, f.pull.Merged = "closed", true; f.pull.MergeCommitSHA = strings.Repeat("d", 40) }
 	f.s.Poll(context.Background())
-	if f.writes != 1 || len(e.notices) != 1 {
+	if f.writes != 1 || len(e.notices) != 2 {
 		t.Fatal("first poll did not deliver and merge")
 	}
 	f.s.Poll(context.Background()) // Observe the merge before the retry is due.
@@ -341,14 +341,15 @@ func TestApprovalNotificationRetriesAndReceiptsSurviveAutoMerge(t *testing.T) {
 	expireNotification(t, f.s, f.repo, f.pull)
 	f.s.Poll(context.Background())
 	w := notificationWork(t, f.s, f.repo, f.pull)
-	if len(e.notices) != 2 || w.Notifications[0].Attempts != 2 || f.writes != 1 || e.notices[0].EventID != e.notices[1].EventID {
+	if len(e.notices) != 3 || w.Notifications[0].Attempts != 2 || f.writes != 1 || e.notices[0].EventID != e.notices[2].EventID {
 		t.Fatalf("lost retry after merge/restart: %+v, calls=%d", w.Notifications, len(e.notices))
 	}
 	receiptFirst(t, f.s, e.notices[0].EventID, true)
 	receiptFirst(t, f.s, e.notices[0].EventID, false)
+	receiptFirst(t, f.s, e.notices[1].EventID, true)
 	reads := f.reads
 	f.s.Poll(context.Background())
-	if len(e.notices) != 2 || f.reads != reads {
+	if len(e.notices) != 3 || f.reads != reads {
 		t.Fatal("received merged notification kept polling/replaying")
 	}
 }

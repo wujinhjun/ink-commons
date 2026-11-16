@@ -184,7 +184,7 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 		open[pull.Number] = true
 	}
 	for _, work := range snapshot.Work {
-		if work.Repo != repo.Repo || (work.Pull.State != "open" && !work.pendingMergedNotification()) || open[work.Pull.Number] {
+		if work.Repo != repo.Repo || (work.Pull.State != "open" && !work.pendingMergedNotification() && !hasUnknownAutoMerge(work)) || open[work.Pull.Number] {
 			continue
 		}
 		var pull Pull
@@ -217,6 +217,9 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 			return err
 		}
 		if err := s.autoMerge(ctx, repo, pull.Number); err != nil {
+			return err
+		}
+		if err := s.notifyMerged(ctx, repo, pull.Number); err != nil {
 			return err
 		}
 		if err := s.dispatch(ctx, repo, pull.Number); err != nil {

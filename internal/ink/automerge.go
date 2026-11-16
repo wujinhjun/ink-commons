@@ -172,8 +172,8 @@ func (u upstream) merge(ctx context.Context, repo string, number int, sha, metho
 	return result.SHA, nil
 }
 
-// updateAutoMerge changes only the merge journal. A reserved/terminal attempt
-// fences concurrent polls and survives restart; ambiguous writes are not retried.
+// 合入账本与完成通知一起持久化；预留或终态记录会阻止重复 merge，
+// 结果不明的外部写入不重放。
 func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun, reserve bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -219,6 +219,9 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 	if !found {
 		w.AutoMerges = append(w.AutoMerges, run)
 	}
+	if run.State == "merged" {
+		s.reserveMergedNotification(w, repo, run)
+	}
 	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	return true, s.store.save(st)
 }
@@ -240,7 +243,16 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	// Reconcile ambiguous responses using GitHub observations even if the switch
 	// has subsequently been disabled. Never infer failure from a lost response.
+	mergedBefore := make(map[string]bool)
+	for _, run := range w.AutoMerges {
+		mergedBefore[run.SHA] = run.State == "merged"
+	}
 	if reconcileClosedAutoMerges(w, time.Now()) {
+		for _, run := range w.AutoMerges {
+			if run.State == "merged" && !mergedBefore[run.SHA] {
+				s.reserveMergedNotification(w, repo, run)
+			}
+		}
 		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 		err := s.store.save(st)
 		s.mu.Unlock()
