@@ -312,8 +312,126 @@ func TestAutomaticReviewWithHistoryMissingSourceDoesNotStartAttempt(t *testing.T
 		t.Fatal("correcting source did not resume the first attempt")
 	}
 	for _, a := range w.Alerts {
-		if a.Code == "review_context_source_invalid" && a.Active {
+		if a.Code == "review_preparation_invalid" && a.Active {
 			t.Fatal("resolved source alert remains active")
 		}
+	}
+}
+
+func TestReviewPreparationFailuresDoNotReserveAttempts(t *testing.T) {
+	for _, scenario := range []string{"reuse only missing source", "reuse only same project", "reuse only invalid source", "history with existing session missing source", "history with explicit parent missing source"} {
+		t.Run(scenario, func(t *testing.T) {
+			networkCalls := 0
+			client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+				networkCalls++
+				w := httptest.NewRecorder()
+				switch r.URL.Path {
+				case "/api/v10/channels/123":
+					reply(w, 200, map[string]any{"id": "123", "type": 11, "parent_id": "77"})
+				case "/api/v10/channels/77":
+					reply(w, 200, map[string]any{"id": "77", "type": 0})
+				case "/hook":
+					reply(w, 200, map[string]string{"status": "accepted"})
+				default:
+					t.Fatalf("unexpected preparation I/O: %s", r.URL.Path)
+				}
+				return w.Result(), nil
+			})}
+			e, err := ccconnect.New(client, "http://127.0.0.1:9111/hook", "hook", "discord")
+			if err != nil {
+				t.Fatal(err)
+			}
+			history := strings.HasPrefix(scenario, "history")
+			s, repo, p := reviewContextFixture(t, history, e)
+			st, _ := s.store.load()
+			w := st.Work[key(repo.Repo, p.Number)]
+			switch scenario {
+			case "reuse only same project":
+				w.Developer.Route.Target = "reviewer"
+			case "reuse only invalid source":
+				w.Developer.Route.Session = "invalid"
+			default:
+				w.Developer = Assignee{GitHubLogin: "human"}
+				w.Origin = nil
+			}
+			if strings.Contains(scenario, "existing session") {
+				w.Reviewer.Route.Session = "discord:999"
+			}
+			if strings.Contains(scenario, "explicit parent") {
+				w.Reviewer.Route.Parent = "88"
+			}
+			if err := s.store.save(st); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
+				t.Fatal(err)
+			}
+			w = notificationWork(t, s, repo, p)
+			if networkCalls != 0 || len(w.Task.Runs) != 0 || w.Task.Attempts != 0 || w.Task.Delivery != "pending" || w.Workflow.State != "needs_attention" {
+				t.Fatalf("local preparation failure started an attempt: %+v", w.Task)
+			}
+			st, _ = s.store.load()
+			w = st.Work[key(repo.Repo, p.Number)]
+			w.Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}
+			w.Reviewer.Route = &execution.Route{Provider: ccconnect.Name, Target: "reviewer"}
+			if err := s.store.save(st); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
+				t.Fatal(err)
+			}
+			w = notificationWork(t, s, repo, p)
+			if networkCalls != 3 || w.Task.Attempts != 1 || w.Task.Delivery != "accepted" {
+				t.Fatal("corrected preparation did not start its first attempt")
+			}
+		})
+	}
+}
+
+func TestReuseOnlyExplicitPlacementAllowsMissingDevelopmentSource(t *testing.T) {
+	for _, placement := range []string{"session", "parent"} {
+		t.Run(placement, func(t *testing.T) {
+			calls := 0
+			e, err := ccconnect.New(&http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				w := httptest.NewRecorder()
+				switch r.URL.Path {
+				case "/api/v10/channels/88/threads":
+					reply(w, 200, map[string]string{"id": "999"})
+				case "/hook":
+					reply(w, 200, map[string]string{"status": "accepted"})
+				default:
+					t.Fatalf("unexpected source lookup for explicit placement: %s", r.URL)
+				}
+				return w.Result(), nil
+			})}, "http://127.0.0.1:9111/hook", "hook", "discord")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, repo, p := reviewContextFixture(t, false, e)
+			st, _ := s.store.load()
+			w := st.Work[key(repo.Repo, p.Number)]
+			w.Developer = Assignee{GitHubLogin: "human"}
+			w.Origin = nil
+			if placement == "session" {
+				w.Reviewer.Route.Session = "discord:999"
+			} else {
+				w.Reviewer.Route.Parent = "88"
+			}
+			if err := s.store.save(st); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
+				t.Fatal(err)
+			}
+			w = notificationWork(t, s, repo, p)
+			wantCalls := 1
+			if placement == "parent" {
+				wantCalls = 2
+			}
+			if calls != wantCalls || w.Task.Attempts != 1 || w.Task.Delivery != "accepted" {
+				t.Fatalf("explicit placement was incorrectly blocked: %+v", w.Task)
+			}
+		})
 	}
 }

@@ -29,6 +29,35 @@ func (r Repository) ValidateReviewFeatures() error {
 	return nil
 }
 
+// All checks here are local and must run before reserving an execution. Source
+// history still needs provenance when an explicit reviewer session/parent means
+// that normal session preparation would otherwise skip the source checks.
+func (s *Service) validateReviewPreparation(w *Work) error {
+	if w.Task.Role != "reviewer" || w.Review == nil || (!w.Review.ReuseDevelopmentThread && !w.Review.Context.ThreadHistory) {
+		return nil
+	}
+	if w.Reviewer.Route == nil || w.Reviewer.Route.Provider != ccconnect.Name {
+		return fmt.Errorf("review thread features require a cc-connect reviewer route")
+	}
+	if w.Review.Context.ThreadHistory {
+		source := reviewSource(w)
+		if source == nil || source.Provider != ccconnect.Name {
+			return fmt.Errorf("history requires a Discord development source")
+		}
+		if err := execution.ValidateDestination(s.providers, *source, false); err != nil {
+			return err
+		}
+	}
+	route := *w.Reviewer.Route
+	if repo, ok := s.repo(w.Repo); ok {
+		route = allocationRoute(repo, route)
+	}
+	if err := execution.ValidateDestination(s.providers, route, route.Session == ""); err != nil {
+		return err
+	}
+	return execution.ValidatePreparation(s.providers, route, deliveryFor(w, w.Task, "", 0))
+}
+
 func reviewHistoryBefore(t time.Time) string {
 	// Discord snowflakes at or after the start of this millisecond are excluded.
 	const discordEpoch = int64(1420070400000)
