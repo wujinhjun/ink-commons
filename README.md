@@ -2,6 +2,14 @@
 
 同砚跟踪 GitHub PR 的开发和审查交接。第一版提供 Go daemon、Unix socket HTTP API 和 Git hook。人和 agent 都可以在 GitHub 上开发、送审和提交正式 review。
 
+## 开发与审查流程
+
+下图说明 cooperative 模式下的任务领取、审查、返工交接与可选自动合入；右侧按环节列出配置项及作用范围，配置值均使用占位示例。
+
+![同砚 cooperative 开发与审查流程及配置说明](docs/diagrams/cooperative-workflow.png)
+
+[查看原图](docs/diagrams/cooperative-workflow.png) · [Excalidraw 可编辑源文件](docs/diagrams/cooperative-workflow.excalidraw) · [文档索引](docs/README.md)
+
 ## 开始
 
 需要 Go 1.23+ 和 Git。daemon 跟踪配置及动态注册的仓库。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。可以把任务留给人工处理，或配置执行端自动接单。
