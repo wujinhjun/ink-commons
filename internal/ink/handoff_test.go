@@ -327,7 +327,21 @@ func TestCooperativeWakesRetryWithoutExecutingOrAllocatingAgain(t *testing.T) {
 	if f.executor.prepared != 1 || len(f.executor.wakes) != 1 || len(f.executor.deliveries) != 0 || len(w.Task.Runs) != 0 {
 		t.Fatal("wake became a code delivery")
 	}
+	retryAt := w.Task.Handoff.Wake.RetryAt
+	if delay := time.Until(retryAt); delay <= 0 || delay > time.Minute {
+		t.Fatalf("first wake retry delay: %s", delay)
+	}
 	f.restart(t)
+	w = f.work(t)
+	if w.Task.Handoff.Wake.Attempts != 1 || !w.Task.Handoff.Wake.RetryAt.Equal(retryAt) {
+		t.Fatal("restart reset wake retry schedule")
+	}
+	if err := f.s.dispatch(context.Background(), f.repo, 42); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.executor.wakes) != 1 {
+		t.Fatal("wake retried before its persisted deadline")
+	}
 	st, _ = f.s.store.load()
 	st.Work[key(f.repo.Repo, 42)].Task.Handoff.Wake.RetryAt = time.Time{}
 	if err := f.s.store.save(st); err != nil {

@@ -16,6 +16,8 @@
 
 ```sh
 go build -o ink ./cmd/ink
+./ink init
+./ink init --check
 cp config.example.json config.json
 ./ink serve -config config.json
 ```
@@ -23,6 +25,30 @@ cp config.example.json config.json
 默认状态目录是 `$XDG_STATE_HOME/ink-commons` 或 `~/.local/state/ink-commons`。daemon 与 hook 可以通过同一个 `INK_DATA_DIR` 覆盖。HTTP API 通过仅当前用户可访问的 `ink.sock` 提供。配置文件使用 `config.example.json` 的结构，凭据从环境变量读取。
 
 受管仓库从 `git rev-parse --git-path hooks/pre-push` 确认默认 hook 位置。使用 `core.hooksPath` 的工作区按该设置安装。没有现有 hook 时，把 `scripts/ink-pre-push` 安装为可执行的 `pre-push`。已有 hook 时，从现有 hook 为同砚和原检查分别传入同一份标准输入。让执行 Git 命令的进程能在 PATH 找到 `ink`，或通过 `INK_BIN` 指定绝对路径。
+
+## 初始化 Agent 协作指令
+
+构建或升级 CLI 后，以实际运行 Agent 的用户执行：
+
+```sh
+ink init
+ink init --check
+```
+
+`init` 将随二进制携带的 `ink-commons-workflow` skill 写入 `$XDG_DATA_HOME/ink-commons/skills/<内容哈希>/`（默认 `~/.local/share/ink-commons/skills/`），并在 `~/.agents/skills/ink-commons-workflow` 建立目录链接。Pi 与 Codex 共用这个发现位置；不需要源码 checkout，不调用网络、不启动服务、不注册仓库，也不修改已有任务。旧版只有审查 skill，完整协作 skill 现在包含首次送审、领取 review/返工任务、交接和结束回合的约定。
+
+重复执行会检查资源并更新同砚管理的旧版本链接，缺失资源可重新安装。用户已有的同名文件、目录或其他来源链接会报冲突并保留；同砚资源被手动修改时也会报告，不覆盖修改。保留冲突内容后再处理。旧内容哈希版本会保留，初始化不自动清理，便于回滚；它们占用磁盘空间，清理前需确认没有任何 Agent 发现目录的链接仍在引用。升级 CLI 后重新运行这两条命令；daemon 启动和 `ink register` 不隐式修改用户 skill 目录。
+
+使用自定义发现目录时，初始化与检查必须传入同一位置，例如：
+
+```sh
+ink init --skills-dir /absolute/path/to/agent/skills
+ink init --check --skills-dir /absolute/path/to/agent/skills
+```
+
+`--check` 只读核对当前二进制对应的资源内容和链接；缺失、失效、版本落后或冲突时返回非零。它不能证明 Agent 已加载指令。初始化后启动新的 Agent 会话；已有会话需要显式读取链接内的 `SKILL.md` 再开展协作。Pi 可显式调用 `/skill:ink-commons-workflow`，Codex 可显式使用 `$ink-commons-workflow`。运行时禁用技能或使用其他资源目录时，需按对应运行时配置启用或使用 `--skills-dir`。
+
+安装路径依据：[Codex 用户级技能目录](https://developers.openai.com/api/reference/cli)；Pi 1.4.0 的 `docs/skills.md` 同样支持用户级 `~/.agents/skills/`。安装不保证模型每次自动选择 skill；首次送审应显式使用它，task wake 中也保留领取、交接和结束回合的关键规则。
 
 ## 全局注册命令
 
@@ -217,7 +243,7 @@ ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
 ## 走完一轮
 
 1. 开发 agent 在自己的会话里建分支、推送并开 Draft PR。hook 从当前会话环境读取路由，并登记 Git 准备推送的源仓库、目标分支和 SHA。daemon 轮询 GitHub 找到匹配的 PR 后确认关联。同一版本有两个候选会话时，PR 等待认领。
-2. 在 GitHub 标记 Ready for review。同砚为当前 head SHA 建立待办。配置了审查执行端时，创建或复用对应会话并投递任务。可以将随附的 review skill 提供给对应 agent。
+2. 在 GitHub 标记 Ready for review。同砚为当前 head SHA 建立待办。配置了审查执行端时，创建或复用对应会话并投递任务。先通过 `ink init` 安装完整协作 skill，并确认开发与审查 Agent 已读取。cooperative 模式下，送审登记成功后结束当前回合，由同砚唤醒后续任务；不要循环等待 review。
 3. reviewer 在 GitHub 提交 Approve 或 Request changes。机器人和人在 GitHub 上提交的 review 使用同一同步逻辑。只有指定 reviewer 对当前 SHA 的正式结论才会推进状态。需要修改时把任务投递给开发会话，或留给当前人工负责人。
 4. 新 commit 将进入下一轮，沿用已有审查会话。历史 review 按原 SHA 保留。工作项合并或关闭后结束待办。
 
