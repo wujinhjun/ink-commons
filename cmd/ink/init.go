@@ -50,7 +50,11 @@ func initialize(args []string) error {
 	if err := installWorkflow(root, dest, *check); err != nil {
 		return err
 	}
-	fmt.Printf("Skill installed and linked: %s\n", filepath.Join(dest, skills.Name))
+	if *check {
+		fmt.Printf("Skill check passed: %s\n", filepath.Join(dest, skills.Name))
+	} else {
+		fmt.Printf("Skill installed and linked: %s\n", filepath.Join(dest, skills.Name))
+	}
 	fmt.Println("This checks files only; it does not prove a running agent loaded the skill. Start a new session, or explicitly read SKILL.md in an existing session before further workflow work.")
 	return nil
 }
