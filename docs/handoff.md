@@ -24,6 +24,12 @@ ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PRO
 
 任务 UUID 是该次领取的 generation。主动 blocked 后显式 retry 生成新 UUID；旧 credential 不能完成新任务。此模式不创建执行 `runs`，也不把业务交接伪装成 executor 的 `succeeded/stopped` 回执。
 
+## Agent 初始化与回合边界
+
+在 Agent 所属用户下执行 `ink init` 和 `ink init --check`，安装完整协作 skill；具体位置、自定义目录及冲突处理见 [初始化说明](../README.md#初始化-agent-协作指令)。升级 CLI 后重新初始化。安装和链接不会刷新活跃会话，首次送审应明确要求 Agent 读取 `ink-commons-workflow`。
+
+首次送审尚未领取 task：确认 PR 已关联、reviewer 已配置并标记 Ready 后，报告送审状态并结束回合，不伪造 task handoff。收到后续 wake 再领取；不能在原回合通过循环查询自行返工。任务交接后也应报告并结束回合；结果核验和下一轮唤醒由同砚负责，不用 sleep、后台轮询或马上领取后继任务来维持长回合。单次状态查询用于诊断，不作为等待循环。
+
 ## Agent 操作
 
 每个 task wake 只表示“有任务”，不授权修改或提交正式 review。先领取：

@@ -21,6 +21,19 @@ REVISION=<full-commit-sha>
 
 需要代理时，stage 可重复传非敏感环境：`--env HTTPS_PROXY=http://127.0.0.1:7897 --env NODE_OPTIONS=--use-env-proxy`。只允许 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 和上述 Node 开关；代理 URL 不允许凭据、query 或 fragment；NO_PROXY 仅允许有长度限制、无空白或凭据的逗号分隔 host 列表。环境写入私有部署清单及 plist，不能填入 token。该代理本身也需要能在无 GUI 时运行；不要把临时审查代理写入长期部署。
 
+## 安装 Agent skill
+
+首次安装和每次升级都应在激活前，以实际运行 Agent 的用户执行 staged CLI（不要通过 sudo 安装到 root 的 HOME）：
+
+```sh
+"$HOME/.local/lib/ink-commons/releases/$REVISION/ink" init
+"$HOME/.local/lib/ink-commons/releases/$REVISION/ink" init --check
+```
+
+skill 已嵌入该版本二进制，不依赖构建工作目录。默认链接到 Pi/Codex 共用的 `~/.agents/skills`；自定义资源目录的初始化和检查均传 `--skills-dir DIR`。这一步是用户侧初始化，不会重启 cc-connect 或刷新现有 Agent 上下文，也不进入服务切换的数据库回滚流程。若回滚 CLI，应使用回滚后的 CLI 再次执行 `init`，将链接切回对应 skill 版本。初始化后新建 Agent 会话，或在原会话明确读取 skill；只读检查只能证明安装正确，不能证明当前会话已加载。
+
+## 激活登录服务
+
 只升级现有登录服务：
 
 ```sh
