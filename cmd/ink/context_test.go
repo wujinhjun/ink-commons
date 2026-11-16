@@ -91,11 +91,14 @@ func TestRegisterExplicitFeatureFlags(t *testing.T) {
 	})}
 	go server.Serve(ln)
 	defer server.Close()
-	if err := register([]string{"--reuse-development-thread", "--thread-history", "acme/project"}); err != nil {
+	if err := register([]string{"--reuse-development-thread", "--thread-history", "--auto-merge-after-approval", "--merge-method", "squash", "acme/project"}); err != nil {
 		t.Fatal(err)
 	}
 	v := <-received
 	if v.Review == nil || !v.Review.ReuseDevelopmentThread || !v.Review.Context.ThreadHistory {
 		t.Fatal("registration omitted features")
+	}
+	if v.AutoMerge == nil || !v.AutoMerge.Enabled || v.AutoMerge.Method != "squash" {
+		t.Fatal("registration omitted auto merge policy")
 	}
 }

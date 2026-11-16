@@ -34,6 +34,11 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 	if err := config.Reliability.Validate(); err != nil {
 		return nil, err
 	}
+	for _, repo := range append([]Repository{config.RepositoryDefaults}, config.Repositories...) {
+		if err := repo.AutoMerge.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	store, err := openStore(path)
 	if err != nil {
 		return nil, err
@@ -206,6 +211,9 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 			return err
 		}
 		if err := s.postApproval(ctx, repo, pull.Number); err != nil {
+			return err
+		}
+		if err := s.autoMerge(ctx, repo, pull.Number); err != nil {
 			return err
 		}
 		if err := s.dispatch(ctx, repo, pull.Number); err != nil {

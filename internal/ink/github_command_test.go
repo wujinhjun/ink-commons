@@ -2,11 +2,47 @@ package ink
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestMergeUsesCodeProfileAndGuardedJSONStdin(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "app-cli")
+	argsLog := filepath.Join(dir, "args")
+	bodyLog := filepath.Join(dir, "body")
+	t.Setenv("MERGE_TEST_ARGS", argsLog)
+	t.Setenv("MERGE_TEST_BODY", bodyLog)
+	body := `#!/bin/sh
+printf '%s\n' "$*" > "$MERGE_TEST_ARGS"
+cat > "$MERGE_TEST_BODY"
+printf 'HTTP/2.0 200 OK\r\n\r\n{"merged":true,"sha":"dddddddddddddddddddddddddddddddddddddddd"}'
+`
+	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	u := newUpstream("unused-token")
+	u.command = script
+	sha, err := u.merge(context.Background(), "acme/project", 42, strings.Repeat("a", 40), "squash")
+	if err != nil || sha != strings.Repeat("d", 40) {
+		t.Fatalf("%s %v", sha, err)
+	}
+	args, _ := os.ReadFile(argsLog)
+	if strings.TrimSpace(string(args)) != "--profile code -R acme/project api --include --method PUT /repos/acme/project/pulls/42/merge --input -" {
+		t.Fatal(string(args))
+	}
+	input, _ := os.ReadFile(bodyLog)
+	var payload map[string]string
+	if err := json.Unmarshal(input, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["sha"] != strings.Repeat("a", 40) || payload["merge_method"] != "squash" || strings.Contains(string(args), "unused-token") {
+		t.Fatal("merge was not SHA-bound or leaked credentials")
+	}
+}
 
 func TestGitHubCommandScopesRequestsAndKeepsPagination(t *testing.T) {
 	dir := t.TempDir()

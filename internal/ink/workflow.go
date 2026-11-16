@@ -29,6 +29,17 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 		w.Alerts[i].Active = false
 	}
 	w.Workflow = Workflow{State: w.Phase}
+	for _, run := range w.AutoMerges {
+		if run.SHA != w.Pull.Head.SHA {
+			continue
+		}
+		if run.State == "unknown" {
+			w.raiseAlert("auto_merge_unknown", run.SHA, "自动合入结果未确认："+run.Reason, now)
+		}
+		if w.Phase == "approved" && run.State == "waiting" {
+			w.Workflow = Workflow{State: "waiting_auto_merge", Reason: run.Reason}
+		}
+	}
 	for _, n := range w.Notifications {
 		if w.Phase == "approved" && n.SHA == w.Pull.Head.SHA && (n.State == "unknown" || n.State == "failed" || n.State == "unsupported") {
 			w.raiseAlert("approval_notification_unresolved", n.EventID, "审查已通过，但开发会话通知尚未确认接收（"+n.State+"）。"+n.Error, now)
