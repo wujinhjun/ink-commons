@@ -19,6 +19,7 @@ import (
 
 func register(args []string) error {
 	flags := flag.NewFlagSet("register", flag.ContinueOnError)
+	taskMode := flags.String("task-mode", "", "legacy or cooperative task handoff")
 	remote := flags.String("remote", "origin", "Git remote to detect when OWNER/REPO is omitted")
 	login := flags.String("github-login", "", "reviewer login (default: daemon repository_defaults)")
 	command := flags.String("github-command", "", "reviewer GitHub CLI/App command")
@@ -53,7 +54,7 @@ func register(args []string) error {
 	if !ink.ValidRepository(name) {
 		return errors.New("expected a GitHub remote or OWNER/REPO")
 	}
-	repo := ink.Repository{Repo: name, ReviewerLogin: *login, ReviewerCommand: *command, HumanDeveloper: *developer}
+	repo := ink.Repository{TaskMode: *taskMode, Repo: name, ReviewerLogin: *login, ReviewerCommand: *command, HumanDeveloper: *developer}
 	flags.Visit(func(f *flag.Flag) {
 		if f.Name == "reuse-development-thread" || f.Name == "thread-history" {
 			repo.Review = &ink.ReviewFeatures{ReuseDevelopmentThread: *reuseThread, Context: ink.ReviewContextFeatures{ThreadHistory: *threadHistory}}
@@ -62,6 +63,9 @@ func register(args []string) error {
 			repo.AutoMerge = &ink.AutoMergeConfig{Enabled: *autoMerge, Method: *mergeMethod}
 		}
 	})
+	if *taskMode != "" && *taskMode != "legacy" && *taskMode != "cooperative" {
+		return errors.New("--task-mode must be legacy or cooperative")
+	}
 	if err := repo.AutoMerge.Validate(); err != nil {
 		return err
 	}

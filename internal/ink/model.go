@@ -73,17 +73,18 @@ type Attempt struct {
 }
 
 type Task struct {
-	CreatedAt time.Time `json:"created_at,omitempty"`
-	ID        string    `json:"task_id,omitempty"`
-	Runs      []Attempt `json:"runs,omitempty"`
-	RetryAt   time.Time `json:"retry_at,omitempty"`
-	Role      string    `json:"role"`
-	SHA       string    `json:"sha"`
-	ReviewID  int64     `json:"review_id,omitempty"`
-	ReviewURL string    `json:"review_url,omitempty"`
-	Delivery  string    `json:"delivery"`
-	Error     string    `json:"error,omitempty"`
-	Attempts  int       `json:"attempts"`
+	Handoff   *TaskHandoff `json:"handoff,omitempty"`
+	CreatedAt time.Time    `json:"created_at,omitempty"`
+	ID        string       `json:"task_id,omitempty"`
+	Runs      []Attempt    `json:"runs,omitempty"`
+	RetryAt   time.Time    `json:"retry_at,omitempty"`
+	Role      string       `json:"role"`
+	SHA       string       `json:"sha"`
+	ReviewID  int64        `json:"review_id,omitempty"`
+	ReviewURL string       `json:"review_url,omitempty"`
+	Delivery  string       `json:"delivery"`
+	Error     string       `json:"error,omitempty"`
+	Attempts  int          `json:"attempts"`
 }
 
 type Alert struct {
@@ -99,6 +100,8 @@ type Workflow struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Work struct {
+	TaskMode      string            `json:"task_mode,omitempty"`
+	Version       uint64            `json:"version,omitempty"`
 	Review        *ReviewFeatures   `json:"review,omitempty"`
 	AutoMerges    []AutoMergeRun    `json:"auto_merges,omitempty"`
 	Notifications []NotificationRun `json:"notifications,omitempty"`
@@ -167,11 +170,17 @@ func (w *Work) setTask(task Task, assignee Assignee) {
 	}
 	task.CreatedAt = time.Now()
 	task.ID = uuid.NewString()
+	if w.TaskMode == "cooperative" {
+		task.Handoff = &TaskHandoff{State: "pending", Assignee: assignee}
+	}
 	w.replaceTask(&task)
 }
 
 func (w *Work) replaceTask(task *Task) {
-	if w.Task != nil && len(w.Task.Runs) > 0 {
+	if w.Task != nil && (len(w.Task.Runs) > 0 || w.Task.Handoff != nil) {
+		if h := w.Task.Handoff; h != nil && h.State == "pending" {
+			h.State = "superseded"
+		}
 		w.History = append(w.History, w.Task)
 	}
 	w.Task = task
@@ -187,6 +196,9 @@ func (w *Work) executionTasks() []*Task {
 
 func (w *Work) executionBlocked() bool {
 	for _, t := range w.executionTasks() {
+		if h := t.Handoff; h != nil && (h.State == "claimed" || h.State == "submitted" || h.State == "blocked") {
+			return true
+		}
 		for _, a := range t.Runs {
 			if !execution.Terminal(a.State) {
 				return true

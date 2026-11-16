@@ -27,6 +27,7 @@ func ValidRepository(name string) bool {
 var shaPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
 
 type Repository struct {
+	TaskMode        string           `json:"task_mode,omitempty"`
 	Review          *ReviewFeatures  `json:"review,omitempty"`
 	PostApproval    *ApprovalHook    `json:"postApproval,omitempty"`
 	ReviewerCommand string           `json:"reviewer_command,omitempty"`

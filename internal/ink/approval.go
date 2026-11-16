@@ -63,7 +63,7 @@ func (s *Service) postApproval(ctx context.Context, repo Repository, number int)
 		return err
 	}
 	work := st.Work[key(repo.Repo, number)]
-	if work == nil || work.Phase != "approved" {
+	if work == nil || work.Phase != "approved" || work.handoffMergeBlocked() {
 		s.mu.Unlock()
 		return nil
 	}

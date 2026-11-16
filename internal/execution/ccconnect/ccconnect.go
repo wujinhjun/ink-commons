@@ -255,3 +255,14 @@ func discordChannel(session string) (string, error) {
 	}
 	return channel, nil
 }
+
+func (e *Executor) WakeTask(ctx context.Context, route execution.Route, task execution.Delivery) error {
+	if err := e.ValidateDelivery(); err != nil {
+		return err
+	}
+	if err := e.Validate(route, false); err != nil {
+		return err
+	}
+	prompt := fmt.Sprintf("Ink Commons task wake (not an execution authorization).\nTask: %s\nPR: %s\nFirst run: ink task claim --task %s\nUse the installed Ink Commons executable if ink is not on PATH. The command binds to CC_PROJECT and CC_SESSION_KEY. Do not edit, run checks, submit reviews or push before a successful claim with first=true. On first=false or conflict, do not execute again; report the status if needed. Read the returned delivery for the exact SHA, role, GitHub identity/command, review URL and context cutoff. Reviewer: inspect that exact SHA, verify the configured identity, and submit a formal APPROVED or CHANGES_REQUESTED review. Developer: address the specified review, check and push a new SHA. Read enabled history with ink context before reviewing. After all task tools and writes have finished, explicitly hand off using ink task submit --task %s --handoff --request-id <stable-id> with --new-sha <pushed-sha> for a developer, or --review-id <id> --outcome APPROVED|CHANGES_REQUESTED for a reviewer. If blocked, submit --outcome blocked --reason <reason> --handoff. After handoff, perform no more work for this task. Check ink task status --task %s; if verification is pending, Ink retries it. Retry a lost submit response with the same request ID and evidence; never repeat code work solely because the PR still says changes_requested.\n", task.TaskID, task.URL, task.TaskID, task.TaskID, task.TaskID)
+	return e.sendPrompt(ctx, route, "ink-commons:task-wake", prompt)
+}

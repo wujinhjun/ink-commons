@@ -179,3 +179,8 @@ apply. The diagnostics feature adds no new executor operations, native queue,
 automatic notifications, process control or automatic missing-result follow-up.
 It runs with the unchanged cc-connect webhook. Reliable wake-up/queue integration
 remains a separate deferred change.
+
+
+## Cooperative business handoff
+
+`task_mode: "cooperative"` selects a separate claim/submit workflow for newly created tasks. A task wake does not create a runtime attempt and does not authorize side effects before claim. Explicit business handoff is not a terminal Monitor receipt. Legacy/managed unresolved attempts remain blocking and must be reconciled before migration. See [claim, verification, retries and trust boundaries](handoff.md).

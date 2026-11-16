@@ -20,7 +20,7 @@ import (
 
 const stateDatabase = "state.sqlite3"
 const legacyState = "state.json"
-const schemaVersion = 2
+const schemaVersion = 3
 
 type state struct {
 	Repositories []Repository     `json:"repositories,omitempty"`
@@ -114,6 +114,13 @@ func (s *stateStore) initialize(legacy, marker string) error {
 			return err
 		}
 		version = 2
+	}
+	// Version 3 fences older binaries that would discard cooperative claims.
+	if version == 2 {
+		if _, err := tx.Exec("PRAGMA user_version = 3"); err != nil {
+			return err
+		}
+		version = 3
 	}
 	if version == schemaVersion {
 		// Detect missing tables before serving; never recreate damaged workflow tables.

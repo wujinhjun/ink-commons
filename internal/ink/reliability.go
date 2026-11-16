@@ -63,7 +63,7 @@ func taskRoute(w *Work, t *Task) *execution.Route {
 // not receive an attempt identity. Only an operator can confirm them stopped.
 func migrateExecution(w *Work) bool {
 	t := w.Task
-	if t == nil {
+	if t == nil || t.Handoff != nil {
 		return false
 	}
 	changed := false

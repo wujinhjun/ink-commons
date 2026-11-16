@@ -226,7 +226,7 @@ func TestSQLiteV1RegistrationMigration(t *testing.T) {
 	defer s.db.Close()
 	checkState(t, s, original)
 	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 2 {
+	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
 		t.Fatal(version, err)
 	}
 }

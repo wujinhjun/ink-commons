@@ -27,6 +27,9 @@ func (s *Service) registerRepository(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defaults := s.config.RepositoryDefaults
+	if input.TaskMode == "" {
+		input.TaskMode = defaults.TaskMode
+	}
 	if input.ReviewerLogin == "" {
 		input.ReviewerLogin = defaults.ReviewerLogin
 	}

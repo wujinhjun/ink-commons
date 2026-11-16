@@ -355,3 +355,33 @@ func TestLegacyWebhookCarriesReviewIdentityWithoutNewOperations(t *testing.T) {
 		t.Fatal(calls, err)
 	}
 }
+
+func TestCooperativeWakeRequiresClaimBeforeAnyWork(t *testing.T) {
+	var prompt string
+	client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["event"] != "ink-commons:task-wake" || body["project"] != "developer" || r.Header.Get("Authorization") != "Bearer hook-test" {
+			t.Fatal(body)
+		}
+		prompt = body["prompt"]
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"status":"accepted"}`))}, nil
+	})}
+	e, err := New(client, "http://127.0.0.1:9111/hook", "hook-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.WakeTask(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, execution.Delivery{TaskID: "task-1", URL: "https://github.com/acme/project/pull/42"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"not an execution authorization", "ink task claim --task task-1", "first=true", "first=false", "--handoff", "--request-id", "--new-sha", "--review-id", "After handoff, perform no more work", "never repeat code work"} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("missing %q", required)
+		}
+	}
+	if strings.Contains(prompt, "hook-test") {
+		t.Fatal("wake disclosed runtime credential")
+	}
+}

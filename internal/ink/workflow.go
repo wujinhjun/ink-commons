@@ -108,6 +108,7 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 	if w.executionBlocked() && (t == nil || len(t.Runs) == 0) {
 		w.Workflow.State = "waiting_previous_execution"
 	}
+	w.refreshHandoffWorkflow(now, c)
 	for _, a := range w.Alerts {
 		if a.Active {
 			w.Workflow.State = "needs_attention"

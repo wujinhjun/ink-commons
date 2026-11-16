@@ -150,6 +150,9 @@ func key(repo string, number int) string { return fmt.Sprintf("%s#%d", repo, num
 
 func (s *Service) Poll(ctx context.Context) {
 	defer func() { s.lastPoll.Store(time.Now().Unix()) }()
+	if err := s.reconcileHandoffs(ctx); err != nil {
+		log.Printf("handoff verification: %v", err)
+	}
 	if err := s.reconcileExecutions(ctx); err != nil {
 		log.Printf("execution recovery: %v", err)
 	}
@@ -246,6 +249,8 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		}
 		st.Work[id] = work
 	}
+	work.TaskMode = repo.TaskMode
+	work.Version++
 	work.Pull = pull
 	if pull.State == "open" && !work.Linked {
 		if origin := matchOrigin(st.Pushes, pull); origin != nil {
@@ -308,7 +313,7 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 		return nil, err
 	}
 	work := st.Work[id]
-	if work == nil || work.Task == nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
+	if work == nil || work.Task == nil || work.Task.Handoff != nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
 		return nil, nil
 	}
 	// Missing provenance is a local configuration problem, not an unknown
@@ -376,6 +381,9 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 func (s *Service) dispatch(ctx context.Context, repo Repository, number int) error {
 	if ctx.Err() != nil {
 		return nil
+	}
+	if handled, err := s.dispatchHandoff(ctx, repo, number); handled || err != nil {
+		return err
 	}
 	id := key(repo.Repo, number)
 	work, err := s.beginDelivery(id)
