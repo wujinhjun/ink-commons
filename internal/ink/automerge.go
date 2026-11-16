@@ -44,6 +44,46 @@ type AutoMergeRun struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+func hasUnknownAutoMerge(w *Work) bool {
+	for _, run := range w.AutoMerges {
+		if run.State == "unknown" {
+			return true
+		}
+	}
+	return false
+}
+
+// Closing resolves every outstanding journal entry from the observed PR result.
+// A different final head does not prove that the older approved SHA was merged.
+func reconcileClosedAutoMerges(w *Work, now time.Time) bool {
+	if w.Pull.State != "closed" {
+		return false
+	}
+	changed := false
+	for i := range w.AutoMerges {
+		run := &w.AutoMerges[i]
+		if run.State != "unknown" {
+			continue
+		}
+		changed = true
+		run.UpdatedAt = now
+		run.State = "failed"
+		run.Reason = "observed PR closed without merging"
+		run.MergeSHA = ""
+		if w.Pull.Merged {
+			if w.Pull.Head.SHA == run.SHA {
+				run.State = "merged"
+				run.Reason = ""
+				run.MergeSHA = w.Pull.MergeCommitSHA
+			} else {
+				run.State = "superseded"
+				run.Reason = "observed PR merged with a different head " + w.Pull.Head.SHA + "; the older SHA-bound request is not attributed as the merge"
+			}
+		}
+	}
+	return changed
+}
+
 func approvedReview(reviews []Review, sha, login string) *Review {
 	var latest *Review
 	for i := range reviews {
@@ -145,6 +185,9 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 	if w == nil {
 		return false, nil
 	}
+	if (reserve || run.State == "waiting") && hasUnknownAutoMerge(w) {
+		return false, nil
+	}
 	for _, old := range w.AutoMerges {
 		if old.SHA == run.SHA && ((run.State == "waiting" && (old.State == "unknown" || old.State == "merged" || old.State == "failed")) || (old.State == "merged" && run.State != "merged")) {
 			return false, nil
@@ -194,19 +237,17 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	// Reconcile ambiguous responses using GitHub observations even if the switch
 	// has subsequently been disabled. Never infer failure from a lost response.
-	for _, run := range w.AutoMerges {
-		if run.State == "unknown" && w.Pull.Head.SHA == run.SHA && w.Pull.State == "closed" {
-			run.State = "failed"
-			run.Reason = "PR closed without merging"
-			if w.Pull.Merged {
-				run.State = "merged"
-				run.Reason = ""
-				run.MergeSHA = w.Pull.MergeCommitSHA
-			}
-			s.mu.Unlock()
-			_, err := s.updateAutoMerge(repo, number, run, false)
-			return err
-		}
+	if reconcileClosedAutoMerges(w, time.Now()) {
+		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		err := s.store.save(st)
+		s.mu.Unlock()
+		return err
+	}
+	// Keep historical unknowns visible and fence all subsequent heads until an
+	// operator reconciles the outcome or GitHub reports the PR's closed result.
+	if hasUnknownAutoMerge(w) {
+		s.mu.Unlock()
+		return nil
 	}
 	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled || w.Phase != "approved" {
 		s.mu.Unlock()

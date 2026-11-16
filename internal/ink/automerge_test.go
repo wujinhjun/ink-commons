@@ -327,3 +327,91 @@ func TestAutoMergeWaitEndsWhenChecksPass(t *testing.T) {
 		t.Fatal("did not resume after checks passed")
 	}
 }
+
+func TestHistoricalUnknownStaysVisibleAndBlocksNewApprovedHead(t *testing.T) {
+	f := newAutoMergeFixture(t)
+	f.lostResponse = true
+	if err := f.s.autoMerge(context.Background(), f.repo, 42); err != nil {
+		t.Fatal(err)
+	}
+	f.pull.Head.SHA = strings.Repeat("e", 40)
+	f.reviews[0].ID = 2
+	f.reviews[0].SHA = f.pull.Head.SHA
+	if err := f.s.observe(f.repo, f.pull, f.reviews); err != nil {
+		t.Fatal(err)
+	}
+	w := notificationWork(t, f.s, f.repo, f.pull)
+	active := false
+	for _, a := range w.Alerts {
+		if a.Code == "auto_merge_unknown" && a.Active {
+			active = true
+		}
+	}
+	if !active || w.Workflow.State != "needs_attention" {
+		t.Fatal("old unknown disappeared after head change")
+	}
+	reads := f.reads
+	if err := f.s.autoMerge(context.Background(), f.repo, 42); err != nil {
+		t.Fatal(err)
+	}
+	if f.writes != 1 || f.reads != reads {
+		t.Fatal("new approved head proceeded while an old merge remained unknown")
+	}
+	// Also fence a preflight that started before the older request was reserved.
+	ok, err := f.s.updateAutoMerge(f.repo, 42, AutoMergeRun{SHA: f.pull.Head.SHA, Reviewer: "reviewer", Method: "merge", State: "unknown"}, true)
+	if err != nil || ok {
+		t.Fatal("new SHA acquired a reservation despite historical unknown")
+	}
+}
+
+func TestHistoricalUnknownsAllReconcileWhenPRCloses(t *testing.T) {
+	for _, merged := range []bool{false, true} {
+		f := newAutoMergeFixture(t)
+		oldSHA := strings.Repeat("e", 40)
+		st, err := f.s.store.load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Work[key(f.repo.Repo, 42)].AutoMerges = []AutoMergeRun{
+			{SHA: oldSHA, Reviewer: "reviewer", State: "unknown", Reason: "response lost"},
+			{SHA: f.pull.Head.SHA, Reviewer: "reviewer", State: "unknown", Reason: "response lost"},
+		}
+		if err := f.s.store.save(st); err != nil {
+			t.Fatal(err)
+		}
+		f.pull.State = "closed"
+		f.pull.Merged = merged
+		f.pull.MergeCommitSHA = strings.Repeat("d", 40)
+		if err := f.s.observe(f.repo, f.pull, nil); err != nil {
+			t.Fatal(err)
+		}
+		f.repo.AutoMerge = &AutoMergeConfig{}
+		if err := f.s.autoMerge(context.Background(), f.repo, 42); err != nil {
+			t.Fatal(err)
+		}
+		w := notificationWork(t, f.s, f.repo, f.pull)
+		for _, r := range w.AutoMerges {
+			if !merged {
+				if r.State != "failed" {
+					t.Fatalf("closed PR left unresolved record: %+v", r)
+				}
+				continue
+			}
+			if r.SHA == oldSHA {
+				if r.State != "superseded" || r.Reason == "" || r.MergeSHA != "" {
+					t.Fatalf("different head falsely attributed as merged or left unknown: %+v", r)
+				}
+			} else if r.State != "merged" || r.MergeSHA != f.pull.MergeCommitSHA {
+				t.Fatalf("matching head not reconciled: %+v", r)
+			}
+		}
+		for _, a := range w.Alerts {
+			if a.Code == "auto_merge_unknown" && a.Active {
+				t.Fatal("closed PR retained unresolved merge diagnostic")
+			}
+		}
+		if f.writes != 0 {
+			t.Fatal("read-only reconciliation submitted a merge")
+		}
+	}
+}

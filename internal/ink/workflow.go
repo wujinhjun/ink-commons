@@ -30,13 +30,10 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 	}
 	w.Workflow = Workflow{State: w.Phase}
 	for _, run := range w.AutoMerges {
-		if run.SHA != w.Pull.Head.SHA {
-			continue
-		}
 		if run.State == "unknown" {
-			w.raiseAlert("auto_merge_unknown", run.SHA, "自动合入结果未确认："+run.Reason, now)
+			w.raiseAlert("auto_merge_unknown", run.SHA, "自动合入结果未确认（SHA "+run.SHA+"）："+run.Reason, now)
 		}
-		if w.Phase == "approved" && run.State == "waiting" {
+		if w.Phase == "approved" && run.SHA == w.Pull.Head.SHA && run.State == "waiting" {
 			w.Workflow = Workflow{State: "waiting_auto_merge", Reason: run.Reason}
 		}
 	}
