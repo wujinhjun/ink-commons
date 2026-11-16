@@ -495,3 +495,109 @@ func TestCooperativeSchemaUpgradeProtectsClaimsFromOlderBinaries(t *testing.T) {
 		t.Fatal("migration discarded claim")
 	}
 }
+
+func TestResolvedCooperativeHistoryDoesNotGateLaterLegacyApproval(t *testing.T) {
+	for _, sameSHA := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sameSHA=%v", sameSHA), func(t *testing.T) {
+			f := newHandoffFixture(t)
+			task := f.work(t).Task
+			f.claim(t, task, claimA, 200)
+			f.reviews = []Review{reviewFor(7, f.pull.Head.SHA, "reviewer", "APPROVED")}
+			f.observe(t)
+			f.submit(t, task, claimA, HandoffSubmission{RequestID: "approve-A", Handoff: true, ReviewID: 7, Outcome: "APPROVED"}, 200)
+			f.verify(t)
+			f.repo.TaskMode = "legacy"
+			f.s.config.Repositories[0] = f.repo
+			if !sameSHA {
+				f.pull.Head.SHA = strings.Repeat("b", 40)
+			}
+			f.observe(t)
+			f.reviews = append(f.reviews, reviewFor(8, f.pull.Head.SHA, "reviewer", "APPROVED"))
+			f.observe(t)
+			w := f.work(t)
+			if w.executionBlocked() {
+				t.Fatal("fixture contains unresolved ownership")
+			}
+			if w.handoffMergeBlocked() {
+				t.Fatal("completed cooperative history permanently gates a later legacy approval")
+			}
+		})
+	}
+}
+
+func TestSwitchToLegacyRetainsUnresolvedCooperativeOwnership(t *testing.T) {
+	f := newHandoffFixture(t)
+	task := f.work(t).Task
+	f.claim(t, task, claimA, 200)
+	f.repo.TaskMode = "legacy"
+	f.s.config.Repositories[0] = f.repo
+	f.pull.Head.SHA = strings.Repeat("b", 40)
+	f.reviews = []Review{reviewFor(8, f.pull.Head.SHA, "reviewer", "APPROVED")}
+	f.observe(t)
+	if !f.work(t).handoffMergeBlocked() {
+		t.Fatal("legacy switch bypassed an unresolved cooperative owner")
+	}
+}
+
+func TestReassignmentPreservesCooperativeDeliveryIdentity(t *testing.T) {
+	for _, role := range []string{"reviewer", "developer"} {
+		t.Run(role, func(t *testing.T) {
+			f := newHandoffFixture(t)
+			if role == "developer" {
+				f.reviews = []Review{reviewFor(7, f.pull.Head.SHA, "reviewer", "CHANGES_REQUESTED")}
+				f.observe(t)
+			}
+			task := f.work(t).Task
+			st, _ := f.s.store.load()
+			w := st.Work[key(f.repo.Repo, 42)]
+			w.Task.Handoff.Assignee.GitHubCommand = "/original-command"
+			if role == "reviewer" {
+				w.Reviewer.GitHubCommand = "/original-command"
+			} else {
+				w.Developer.GitHubCommand = "/original-command"
+			}
+			if err := f.s.store.save(st); err != nil {
+				t.Fatal(err)
+			}
+			task = f.work(t).Task
+			f.claim(t, task, claimA, 200)
+			st, _ = f.s.store.load()
+			w = st.Work[key(f.repo.Repo, 42)]
+			if err := applyChange(w, "assign", workChange{Role: role, GitHubLogin: "replacement", GitHubCommand: "/replacement-command", Route: &execution.Route{Provider: "test", Target: "replacement", Session: "replacement-session"}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.s.store.save(st); err != nil {
+				t.Fatal(err)
+			}
+			f.restart(t)
+			replay := f.claim(t, task, claimA, 200)
+			d := replay["delivery"].(map[string]any)
+			if d["github_login"] != task.Handoff.Assignee.GitHubLogin || d["github_command"] != "/original-command" {
+				t.Fatalf("replayed claim changed identity: %v", d)
+			}
+			out := httptest.NewRecorder()
+			f.s.Handler().ServeHTTP(out, httptest.NewRequest("GET", "/v1/tasks/"+task.ID, nil))
+			if out.Code != 200 {
+				t.Fatal(out.Code)
+			}
+			var status struct{ Delivery execution.Delivery }
+			if err := json.Unmarshal(out.Body.Bytes(), &status); err != nil {
+				t.Fatal(err)
+			}
+			if status.Delivery.GitHubLogin != task.Handoff.Assignee.GitHubLogin || status.Delivery.GitHubCommand != "/original-command" {
+				t.Fatal("status changed original identity", status)
+			}
+			if role == "reviewer" {
+				replacementTask := f.work(t).Task.ID
+				f.reviews = []Review{reviewFor(9, task.SHA, task.Handoff.Assignee.GitHubLogin, "APPROVED")}
+				f.submit(t, task, claimA, HandoffSubmission{RequestID: "original-review", Handoff: true, ReviewID: 9, Outcome: "APPROVED"}, 200)
+				f.verify(t)
+				w := f.work(t)
+				_, old := findTask(state{Work: map[string]*Work{"w": w}}, task.ID)
+				if old.Handoff.State != "completed" || w.Task.ID != replacementTask || w.executionBlocked() {
+					t.Fatal("original owner could not finish without changing the replacement task")
+				}
+			}
+		})
+	}
+}

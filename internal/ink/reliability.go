@@ -101,6 +101,11 @@ func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Deliv
 	if t.Role == "reviewer" {
 		assignee = w.Reviewer
 	}
+	// A cooperative owner keeps the identity it claimed, even after the
+	// work is reassigned and this task moves into history.
+	if t.Handoff != nil {
+		assignee = t.Handoff.Assignee
+	}
 	d.GitHubLogin, d.GitHubCommand = assignee.GitHubLogin, assignee.GitHubCommand
 	for _, a := range w.Alerts {
 		if a.Active && a.SHA == t.SHA {

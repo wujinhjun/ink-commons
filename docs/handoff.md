@@ -12,7 +12,7 @@ ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PRO
 
 也可设 `repository_defaults.task_mode` 为新注册仓库的默认值；静态仓库必须显式配置，已注册仓库不被默认值回写。显式 `legacy` 覆盖注册默认值。配置文件修改后需要重启 daemon。
 
-开关只控制之后生成的任务；已有任务的模式及负责人快照不被改写。旧任务和历史 `unknown` 仍按原执行确认规则处理，不能通过打开开关或普通 `retry` 绕过。首次启用应在工作空闲、旧任务已完成核验/恢复后进行。关闭开关也不会撤销已经领取的 cooperative 任务，仍需交接。
+开关只控制之后生成的任务；已有任务的模式及负责人快照不被改写。旧任务和历史 `unknown` 仍按原执行确认规则处理，不能通过打开开关或普通 `retry` 绕过。首次启用应在工作空闲、旧任务已完成核验/恢复后进行。关闭开关也不会撤销已经领取的 cooperative 任务，仍需交接。旧交接完成后，新一轮 legacy 审批恢复 legacy 行为，不会被已完成的 cooperative 历史永久阻塞。
 
 当前只有 cc-connect 实现 `execution.TaskWaker`。其他 provider 不会退回直接执行，会在 API 中显示不支持唤醒；也可通过本机 CLI 人工领取。Agent 必须能访问同一个私有 Unix socket。
 
@@ -36,7 +36,7 @@ cc-connect 使用进程环境中的 `CC_PROJECT` / `CC_SESSION_KEY`，通用路�
 
 CLI 在发送请求前，先生成私有随机 credential，保存到状态目录 `claims/TASK_UUID.json`（文件 `0600`，目录 `0700`）；daemon 只保存其哈希。可用 `--claim-file /private/path/credential.json` 指定另一个私有文件。不要把这些文件提交到 Git、打印或放入唤醒消息；更换状态目录时应保留仍有未决任务的 credential。
 
-响应包含任务、`delivery`、`first` 和 `eligible`。**只有领取成功且 `first:true` 才开始执行。** `first:false` 表示这个 credential 已领取过，或任务已交接：不要因重复唤醒再次执行。其他 credential 争抢返回 409。首次领取响应丢失时，相同文件重试会返回 `first:false`；先核对当前 owner/工作记录，由原领取者恢复，不能将其视作一份新授权。
+响应包含任务、`delivery`、`first` 和 `eligible`。cooperative 任务的 GitHub 登录名/命令始终来自领取任务时保存的负责人快照，改派不会改写旧领取者的指令。**只有领取成功且 `first:true` 才开始执行。** `first:false` 表示这个 credential 已领取过，或任务已交接：不要因重复唤醒再次执行。其他 credential 争抢返回 409。首次领取响应丢失时，相同文件重试会返回 `first:false`；先核对当前 owner/工作记录，由原领取者恢复，不能将其视作一份新授权。
 
 领取后读取 `delivery` 中的精确 SHA、角色、review URL、指定 GitHub 身份和命令。reviewer 若启用了 thread history，还需使用返回的 SHA / context cutoff 调用 `ink context` 读取原开发会话。
 

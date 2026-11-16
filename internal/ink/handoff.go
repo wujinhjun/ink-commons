@@ -67,17 +67,26 @@ func claimHash(token string) string {
 
 func (w *Work) handoffMergeBlocked() bool {
 	cooperative := w.TaskMode == "cooperative"
+	approval := approvedReview(w.Reviews, w.Pull.Head.SHA, w.Reviewer.GitHubLogin)
 	for _, t := range w.executionTasks() {
-		cooperative = cooperative || t.Handoff != nil
+		h := t.Handoff
+		if h == nil {
+			continue
+		}
+		// Switching modes must not release existing cooperative ownership.
+		if h.State == "claimed" || h.State == "submitted" || h.State == "blocked" {
+			return true
+		}
+		// A completed old round does not turn all future legacy approvals into
+		// cooperative approvals. Retain the handoff policy only for this review.
+		if approval != nil && t.Role == "reviewer" && t.SHA == w.Pull.Head.SHA && h.Submission != nil && h.Submission.ReviewID == approval.ID {
+			cooperative = true
+		}
 	}
 	if !cooperative {
 		return false
 	}
-	if w.executionBlocked() {
-		return true
-	}
-	approval := approvedReview(w.Reviews, w.Pull.Head.SHA, w.Reviewer.GitHubLogin)
-	if approval == nil {
+	if w.executionBlocked() || approval == nil {
 		return true
 	}
 	for _, t := range w.executionTasks() {
