@@ -194,3 +194,9 @@ type Monitor interface {
 	Status(context.Context, Route, Delivery) (Receipt, error)
 	Stop(context.Context, Route, Delivery) (Receipt, error)
 }
+
+// NotificationACKProvider opts into retries until the recipient explicitly
+// acknowledges the event. Notify must carry instructions for that protocol.
+type NotificationACKProvider interface {
+	NotificationACKRequired() bool
+}

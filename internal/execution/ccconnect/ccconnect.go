@@ -212,6 +212,8 @@ func (e *Executor) Deliver(ctx context.Context, route execution.Route, task exec
 	return e.sendPrompt(ctx, route, "ink-commons:"+task.Role, prompt)
 }
 
+func (e *Executor) NotificationACKRequired() bool { return true }
+
 func (e *Executor) Notify(ctx context.Context, route execution.Route, n execution.Notification) error {
 	if n.Event != "review_approved" {
 		return fmt.Errorf("unsupported cc-connect notification event %q", n.Event)
@@ -223,6 +225,9 @@ func (e *Executor) Notify(ctx context.Context, route execution.Route, n executio
 		return err
 	}
 	prompt := fmt.Sprintf("Ink Commons review_approved notification for PR %s\nEvent: %s\nApproved commit: %s\nReviewer: %s\nReview: %s (ID %d)\nThe assigned reviewer has formally approved this exact commit. Add this result to the development conversation and briefly acknowledge it to the user. This is informational, not a fix task or authorization to modify code, commit, push, merge, or deploy. Approval does not imply that the PR has been merged. If the head has changed, the approval applies only to the indicated commit.\n", n.URL, n.EventID, n.SHA, n.Reviewer, n.ReviewURL, n.ReviewID)
+	// Shell quoting keeps the event identifier a single literal argument.
+	command := "ink notification ack --event " + "'" + strings.ReplaceAll(n.EventID, "'", "'\"'\"'") + "'"
+	prompt += "\nBefore replying to the user, run: " + command + ". If ink is not on PATH, use the installed Ink Commons executable (on this Mac: \"$HOME/.local/lib/ink-commons/ink\"). The command returns JSON. Only if first=true, briefly acknowledge this approval to the user. If first=false, this event was already received or superseded: do not repeat the acknowledgement. If the command fails, report the receipt failure; do not claim successful receipt. This receipt confirms delivery only, not completion of any work.\n"
 	return e.sendPrompt(ctx, route, "ink-commons:review_approved", prompt)
 }
 

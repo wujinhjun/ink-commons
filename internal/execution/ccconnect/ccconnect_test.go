@@ -16,6 +16,9 @@ import (
 type testTransport func(*http.Request) (*http.Response, error)
 
 func TestApprovalNotificationEntersDeveloperContext(t *testing.T) {
+	if !(&Executor{}).NotificationACKRequired() {
+		t.Fatal("cc-connect must require an agent receipt")
+	}
 	for _, response := range []string{`{"status":"accepted"}`, `{"status":"busy"}`} {
 		t.Run(response, func(t *testing.T) {
 			calls := 0
@@ -34,6 +37,11 @@ func TestApprovalNotificationEntersDeveloperContext(t *testing.T) {
 				for _, expected := range []string{"https://github.com/acme/project/pull/42", "Approved commit: abc", "Reviewer: reviewer-bot", "#pullrequestreview-9", "Event: approval-event", "briefly acknowledge", "not a fix task", "merge", "head has changed"} {
 					if !strings.Contains(input["prompt"], expected) {
 						t.Fatalf("missing %q: %s", expected, input["prompt"])
+					}
+				}
+				for _, required := range []string{"ink notification ack --event 'approval-event'", "first=true", "first=false", "If the command fails"} {
+					if !strings.Contains(input["prompt"], required) {
+						t.Fatalf("missing receipt instruction %q", required)
 					}
 				}
 				if strings.Contains(input["prompt"], "address its findings") {
