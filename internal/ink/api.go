@@ -52,6 +52,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/repositories", s.registerRepository)
 	mux.HandleFunc("GET /v1/work", s.listWork)
 	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}", s.work)
+	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}/context", s.reviewContext)
 	mux.HandleFunc("POST /v1/work/{owner}/{repo}/{number}/{action}", s.work)
 	mux.HandleFunc("POST /v1/pushes", s.pushes)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -230,12 +231,29 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError{409, "link the PR first"})
 		return
 	}
+	if action == "assign" && change.Role == "reviewer" && change.Route != nil {
+		if repository, ok := s.repo(repo); ok {
+			repository.ReviewerRoute = change.Route
+			if err := repository.ValidateReviewFeatures(); err != nil {
+				fail(w, apiError{400, err.Error()})
+				return
+			}
+			if repository.Review != nil && repository.Review.Context.ThreadHistory && (reviewSource(work) == nil || reviewSource(work).Provider != "cc-connect") {
+				fail(w, apiError{400, "thread history requires a Discord development source"})
+				return
+			}
+		}
+	}
 	if action == "assign" && change.Role == "reviewer" && change.Route != nil && change.Route.Session == "" {
 		route := *change.Route
 		if repository, ok := s.repo(repo); ok {
 			route = allocationRoute(repository, route)
 		}
-		if err := execution.ValidatePreparation(s.providers, route, execution.Delivery{Role: "reviewer", Source: reviewSource(work)}); err != nil {
+		preparation := execution.Delivery{Role: "reviewer", Source: reviewSource(work)}
+		if repository, ok := s.repo(repo); ok && repository.Review != nil {
+			preparation.ReuseDevelopmentThread = repository.Review.ReuseDevelopmentThread
+		}
+		if err := execution.ValidatePreparation(s.providers, route, preparation); err != nil {
 			fail(w, apiError{400, err.Error()})
 			return
 		}

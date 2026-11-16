@@ -1,5 +1,11 @@
 {
   "poll_seconds": 60,
+  "repository_defaults": {
+    "review": {
+      "reuse_development_thread": false,
+      "context": {"thread_history": false}
+    }
+  },
   "repositories": [
     {
       "repo": "owner/repository",

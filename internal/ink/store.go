@@ -197,6 +197,9 @@ func validateState(st state) error {
 		if err := repo.PostApproval.Validate(); err != nil {
 			return err
 		}
+		if err := repo.ValidateReviewFeatures(); err != nil {
+			return err
+		}
 		seen[repo.Repo] = true
 	}
 	for id, w := range st.Work {

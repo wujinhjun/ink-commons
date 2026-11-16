@@ -26,6 +26,11 @@ type Service struct {
 }
 
 func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
+	for _, repo := range append([]Repository{config.RepositoryDefaults}, config.Repositories...) {
+		if err := repo.ValidateReviewFeatures(); err != nil {
+			return nil, err
+		}
+	}
 	if err := config.Reliability.Validate(); err != nil {
 		return nil, err
 	}
@@ -243,6 +248,15 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		work.Reviews = mergeReviews(work.Reviews, reviews)
 	}
 	work.derive()
+	// Refresh features only before a new task has made an external attempt.
+	// Existing reviewer sessions retain their saved placement.
+	if work.Task == nil || len(work.Task.Runs) == 0 {
+		work.Review = nil
+		if repo.Review != nil {
+			features := *repo.Review
+			work.Review = &features
+		}
+	}
 	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	return s.store.save(st)
 }

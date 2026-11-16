@@ -28,6 +28,8 @@ func register(args []string) error {
 	session := flags.String("session", "", "existing reviewer session")
 	developer := flags.String("developer", "", "human developer login")
 	hook := flags.String("post-approval", "", "absolute path of postApproval executable; receives event JSON on stdin")
+	reuseThread := flags.Bool("reuse-development-thread", false, "reuse the development thread with an independent reviewer project")
+	threadHistory := flags.Bool("thread-history", false, "allow reviewer access to original development thread messages")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -50,6 +52,11 @@ func register(args []string) error {
 		return errors.New("expected a GitHub remote or OWNER/REPO")
 	}
 	repo := ink.Repository{Repo: name, ReviewerLogin: *login, ReviewerCommand: *command, HumanDeveloper: *developer}
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "reuse-development-thread" || f.Name == "thread-history" {
+			repo.Review = &ink.ReviewFeatures{ReuseDevelopmentThread: *reuseThread, Context: ink.ReviewContextFeatures{ThreadHistory: *threadHistory}}
+		}
+	})
 	if *target != "" || *parent != "" || *session != "" {
 		if *target == "" {
 			return errors.New("--target is required for an execution route")

@@ -48,21 +48,74 @@ func (r *Route) UnmarshalJSON(data []byte) error {
 
 // Delivery is the work description shared by execution providers.
 type Delivery struct {
-	GitHubLogin   string `json:"github_login,omitempty"`
-	GitHubCommand string `json:"github_command,omitempty"`
-	Feedback      string `json:"feedback,omitempty"`
-	TaskID        string `json:"task_id,omitempty"`
-	AttemptID     string `json:"attempt_id,omitempty"`
-	Attempt       int    `json:"attempt,omitempty"`
-	Repository    string `json:"repository"`
-	Number        int    `json:"pull_number"`
-	URL           string `json:"pull_url"`
-	Role          string `json:"role"`
-	SHA           string `json:"sha"`
-	ReviewID      int64  `json:"review_id,omitempty"`
-	ReviewURL     string `json:"review_url,omitempty"`
+	ReuseDevelopmentThread bool   `json:"reuse_development_thread,omitempty"`
+	ContextBefore          string `json:"context_before,omitempty"`
+	GitHubLogin            string `json:"github_login,omitempty"`
+	GitHubCommand          string `json:"github_command,omitempty"`
+	Feedback               string `json:"feedback,omitempty"`
+	TaskID                 string `json:"task_id,omitempty"`
+	AttemptID              string `json:"attempt_id,omitempty"`
+	Attempt                int    `json:"attempt,omitempty"`
+	Repository             string `json:"repository"`
+	Number                 int    `json:"pull_number"`
+	URL                    string `json:"pull_url"`
+	Role                   string `json:"role"`
+	SHA                    string `json:"sha"`
+	ReviewID               int64  `json:"review_id,omitempty"`
+	ReviewURL              string `json:"review_url,omitempty"`
 	// Source is the development conversation associated with this task.
 	Source *Route `json:"source,omitempty"`
+}
+
+// ConversationReader reads only the provided source conversation. Pages are
+// bounded and returned chronologically; NextBefore reads an older page.
+type ConversationReader interface {
+	ReadConversation(context.Context, Route, string) (ConversationPage, error)
+}
+
+type ConversationPage struct {
+	TaskID       string                `json:"task_id,omitempty"`
+	SHA          string                `json:"sha,omitempty"`
+	ReviewBefore string                `json:"review_before,omitempty"`
+	Warnings     []string              `json:"warnings,omitempty"`
+	Session      string                `json:"session"`
+	Before       string                `json:"before"`
+	NextBefore   string                `json:"next_before,omitempty"`
+	Truncated    bool                  `json:"truncated"`
+	Messages     []ConversationMessage `json:"messages"`
+}
+
+type ConversationMessage struct {
+	ID              string                   `json:"id"`
+	Author          ConversationAuthor       `json:"author"`
+	Timestamp       string                   `json:"timestamp"`
+	EditedTimestamp *string                  `json:"edited_timestamp,omitempty"`
+	Content         string                   `json:"content"`
+	Attachments     []ConversationAttachment `json:"attachments,omitempty"`
+	Embeds          []ConversationEmbed      `json:"embeds,omitempty"`
+}
+
+type ConversationEmbed struct {
+	Title       string                   `json:"title,omitempty"`
+	Description string                   `json:"description,omitempty"`
+	URL         string                   `json:"url,omitempty"`
+	Fields      []ConversationEmbedField `json:"fields,omitempty"`
+}
+
+type ConversationEmbedField struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type ConversationAuthor struct {
+	ID   string `json:"id"`
+	Name string `json:"username"`
+	Bot  bool   `json:"bot"`
+}
+
+type ConversationAttachment struct {
+	Name string `json:"filename"`
+	URL  string `json:"url"`
 }
 
 // Executor is the runtime boundary. Successful delivery means the provider
