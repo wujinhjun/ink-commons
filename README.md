@@ -80,11 +80,22 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 
 指定 reviewer 对当前 head SHA 正式 Approve 后，同砚在下一轮轮询中向当前 developer 路由发送 `review_approved` 通知，包含 PR、批准的 SHA、reviewer 和正式 review 链接。cc-connect 通过 webhook 将这些信息送入原开发 Agent 上下文，并要求简短告知用户。通知独立于代码修改任务，不授权修改、推送、合并或部署，也不会把 PR 标记为已合并。
 
-按仓库、PR、SHA 去重；同一 SHA 的重复批准、轮询和重启不会重复发送，新 SHA 获得批准后产生新事件。首次升级时，已关联且当前已批准的打开 PR 也会通知。只有当前指定 reviewer 对当前 SHA 的有效正式批准触发；Draft、未关联或已关闭 PR、旧 SHA 和其他作者不触发。人工 developer 不会回退到历史 bot 会话。
+按仓库、PR、SHA 生成稳定事件 ID；新 SHA 获得批准后产生新事件。只有当前指定 reviewer 对当前 SHA 的有效正式批准触发；Draft、未关联或已关闭 PR、旧 SHA 和其他作者不触发。人工 developer 不会回退到历史 bot 会话。
 
-工作项 API 的 `notifications` 保存事件、投递时的路由和 `accepted`、`unknown`、`failed`、`unsupported` 或 `manual` 状态。通知发送前持久化 `unknown` 预留；网络失败或中断后不自动重放，避免外部结果不明时重复唤醒。`unknown`、`failed`、`unsupported` 在当前批准版本产生诊断。人工负责人记录为 `manual`；不支持通知的执行端记录为 `unsupported`，不会误投成修改任务。通知不替换现有任务，也不等待旧代码任务的执行确认；接收 Agent 只能确认消息，不能据此开始新的代码或 GitHub 操作。
+cc-connect 的 Webhook `accepted` 仅表示 HTTP 请求被接受，忙碌会话仍可能丢弃通知。因此新通知启用 Agent 收件确认：发送前持久化 `unknown`、尝试次数和下次重试时间；HTTP 成功后记作 `awaiting_ack`，收到 Agent 确认后才记作 `acknowledged`。未确认或网络结果不明时，在后续成功轮询中退避重试（2、4、8…分钟，上限一小时），重启保留进度；不设自动放弃次数。等待确认时，当前批准版本显示 `approval_notification_unresolved` 诊断。此机制无需修改 cc-connect；投递至少一次，可能重复进入 Agent 上下文。
 
-`accepted` 仅表示执行端接收请求，**不保证 Agent 已消费通知**。现有 cc-connect webhook 在会话忙时可能跳过请求，且没有通知完成回执；遇到这种情况需检查开发会话并人工补充上下文。可靠排队及消费确认仍需 cc-connect 接入执行协议。通用执行端需显式实现 `execution.Notifier` 才会接收通知；此改动不扩展现有 HTTP 协议。
+通知要求 Agent 在回应用户前运行：
+
+```sh
+ink notification ack --event '通知中的事件 ID'
+# ink 不在 PATH 时可使用 "$HOME/.local/lib/ink-commons/ink"
+```
+
+命令调用本机私有 Unix socket 的 `POST /v1/notifications/ack`（JSON：`{"event_id":"..."}`）。原子持久化收件确认并返回 `{"status":"acknowledged","first":true}`；重复确认返回 `first:false`，Agent 应跳过重复回应。PR head、批准状态或 developer 路由已变化时，确认返回 `superseded`、`first:false`。重试保留原投递路由，路由变更后停止向旧会话重发。收件确认只证明 Agent 已读到通知，不证明用户可见回复已成功发送；确认后 Agent 崩溃可能遗漏回复。Agent 必须能访问同一个 daemon，并遵循确认指令；未确认时会继续重试并保留诊断。
+
+工作项 API 的 `notifications` 保存 `require_ack`、`attempts`、`retry_at` 及状态。人工负责人记录为 `manual`，不支持通知的执行端为 `unsupported`，无效路由为 `failed`。通用执行端需显式实现 `execution.Notifier`；只有额外声明 `NotificationACKProvider` 的执行端启用收件确认和重试，其余保留原有 `accepted`/`unknown` 一次投递语义，不扩展现有 HTTP provider 协议。通知不替换代码任务，也不授权修改、推送、合并或部署。
+
+升级前已记录的通知保留原有语义，不自动重放，以免重复通知已处理的历史审批。此前被 cc-connect 丢弃的旧通知仍需人工补充上下文；新建的 cc-connect 通知自动使用确认协议。
 
 通知与 `postApproval` 脚本相互独立；通知尝试发生在脚本之前，脚本无需配置，也不会因通知已发送而跳过。
 

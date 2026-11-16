@@ -16,11 +16,14 @@ import (
 
 type notificationExecutor struct {
 	testExecutor
-	notices  []execution.Notification
-	routes   []execution.Route
-	onNotify func()
-	err      error
+	notices    []execution.Notification
+	routes     []execution.Route
+	onNotify   func()
+	err        error
+	requireACK bool
 }
+
+func (e *notificationExecutor) NotificationACKRequired() bool { return e.requireACK }
 
 func (e *notificationExecutor) Notify(_ context.Context, r execution.Route, n execution.Notification) error {
 	if e.onNotify != nil {
