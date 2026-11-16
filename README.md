@@ -146,7 +146,9 @@ ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
 
 `HEAD_SHA` 和 `REVIEW_CUTOFF` 由同砚填入 prompt，后者固定为该 reviewer task 创建时点的 Discord snowflake 边界。CLI 通过私有 Unix socket 调用 `GET /v1/work/{owner}/{repo}/{number}/context`；响应含 `task_id`、`sha`、`review_before` 和按时间正序排列的消息。每页最多 50 条、消息内容合计最多 64 KiB；`truncated: true` 和 `next_before` 表示还有更早消息，可再次用 `--before NEXT_BEFORE` 查询。每次查询都重新核对开关、任务、head SHA 和来源；旧 SHA、已关闭 PR、改派中失效的任务、超过送审边界的游标会被拒绝。当前 head 的正式 review 仍由 GitHub 判定，聊天中的“通过”不替代它。
 
-消息保留作者、时间、正文、编辑时间、常见 embed 文本及附件名称/URL；不会自动下载或理解图片、附件和外部链接。时间边界限制**消息创建时间**，不是不可变聊天快照：历史编辑与删除仍反映 Discord 当前状态，已删除消息无法恢复。API 可能因缺少 `READ_MESSAGE_HISTORY` 返回空列表，或因 `MESSAGE_CONTENT` 未配置而返回空正文；响应的 `warnings` 会提示这些歧义，reviewer 不应据此宣称已经读取全部背景。
+消息保留作者、时间、正文、编辑时间、常见 embed 文本及附件名称/URL；不会自动下载或理解图片、附件和外部链接。时间边界限制**消息创建时间**，不是不可变聊天快照：历史编辑与删除仍反映 Discord 当前状态，已删除消息无法恢复。API 可能因缺少 `READ_MESSAGE_HISTORY` 返回空列表，或因 `MESSAGE_CONTENT` 未配置而返回空正文；响应的 `warnings` 会提示这些歧义。即使消息有附件/embed，空正文也会提示可能是纯附件、系统消息或正文被隐藏；保留已取得的其他内容，reviewer 不应据此宣称已经读取全部背景。
+
+自动派生的 reviewer 任务若开启历史读取却没有有效的 cc-connect 开发来源，会在创建执行轮次/会话之前保留为 pending，并记录 `review_context_source_invalid` 诊断。补齐开发来源后可进行首次真实投递，不会仅因缺少来源而制造需要人工停止确认的 unknown 执行。
 
 首版只支持普通文本频道下的公开开发 thread；普通频道、私有 thread、公告及论坛来源均拒绝读取/自动复用。读取使用 daemon 的 `INK_DISCORD_TOKEN` 身份，需要 `VIEW_CHANNEL`、`READ_MESSAGE_HISTORY` 和适用的 `MESSAGE_CONTENT` 配置；reviewer 的 Discord bot 还需能够访问、发言于目标 thread。开关不会修改 Discord 权限。reviewer 必须与同砚在同机、能使用新版 `ink` CLI 和该用户的私有 socket；这不是远端/跨用户的历史读取接口，也不是额外的 per-bot 认证机制。
 

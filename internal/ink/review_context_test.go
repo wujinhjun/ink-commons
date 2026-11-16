@@ -273,3 +273,47 @@ func TestRegistrationReviewDefaultCanBeExplicitlyDisabled(t *testing.T) {
 		}
 	}
 }
+
+func TestAutomaticReviewWithHistoryMissingSourceDoesNotStartAttempt(t *testing.T) {
+	e := &historyExecutor{}
+	s, repo, p := reviewContextFixture(t, true, e)
+	st, err := s.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := st.Work[key(repo.Repo, p.Number)]
+	w.Developer = Assignee{GitHubLogin: "human"}
+	w.Origin = nil
+	if err := s.store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
+		t.Fatal(err)
+	}
+	w = notificationWork(t, s, repo, p)
+	if len(w.Task.Runs) != 0 || w.Task.Attempts != 0 || w.Task.Delivery != "pending" || w.Task.Error == "" || w.Workflow.State != "needs_attention" || e.prepared != 0 || len(e.deliveries) != 0 {
+		t.Fatalf("missing history source started an execution: %+v", w.Task)
+	}
+	// Once the operator supplies the proper source, the first real attempt can
+	// proceed without a fake unknown run or manual stop confirmation.
+	st, err = s.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Work[key(repo.Repo, p.Number)].Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}
+	if err := s.store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
+		t.Fatal(err)
+	}
+	w = notificationWork(t, s, repo, p)
+	if w.Task.Attempts != 1 || w.Task.Delivery != "accepted" || w.Task.Error != "" || len(e.deliveries) != 1 {
+		t.Fatal("correcting source did not resume the first attempt")
+	}
+	for _, a := range w.Alerts {
+		if a.Code == "review_context_source_invalid" && a.Active {
+			t.Fatal("resolved source alert remains active")
+		}
+	}
+}

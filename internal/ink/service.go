@@ -303,6 +303,22 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 	if work == nil || work.Task == nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
 		return nil, nil
 	}
+	// Missing provenance is a local configuration problem, not an unknown
+	// external execution. Reject it before reserving an attempt or session.
+	if work.Task.Role == "reviewer" && work.Review != nil && work.Review.Context.ThreadHistory {
+		source := reviewSource(work)
+		var sourceErr error
+		if source == nil || source.Provider != ccconnect.Name {
+			sourceErr = fmt.Errorf("requires a Discord development source")
+		} else {
+			sourceErr = execution.ValidateDestination(s.providers, *source, false)
+		}
+		if sourceErr != nil {
+			work.Task.Error = "review context source: " + sourceErr.Error()
+			work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+			return nil, s.store.save(st)
+		}
+	}
 
 	// Persist the attempt before making external requests. If the daemon restarts
 	// during delivery, the operator can inspect the unknown outcome before retrying.

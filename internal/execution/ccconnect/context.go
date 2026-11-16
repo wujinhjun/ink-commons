@@ -78,8 +78,8 @@ func (e *Executor) ReadConversation(ctx context.Context, source execution.Route,
 		previous = value
 	}
 	for _, m := range messages {
-		if m.Content == "" && len(m.Attachments) == 0 && len(m.Embeds) == 0 {
-			page.Warnings = append(page.Warnings, "Some messages expose no text, attachments or embeds. They may be system messages or content withheld by Discord; check MESSAGE_CONTENT configuration before claiming the history is complete.")
+		if m.Content == "" {
+			page.Warnings = append(page.Warnings, "Some messages expose no text. They may be attachment/embed-only or system messages, or content withheld by Discord; check MESSAGE_CONTENT configuration before claiming the history is complete.")
 			break
 		}
 	}

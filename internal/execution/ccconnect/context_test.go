@@ -212,3 +212,22 @@ func TestHistoryPermissionFailureIsReportedWithoutContent(t *testing.T) {
 		t.Fatal("empty history silently claimed completeness")
 	}
 }
+
+func TestEmptyTextWithAttachmentsOrEmbedsStillWarns(t *testing.T) {
+	for _, m := range []execution.ConversationMessage{
+		{ID: "900", Attachments: []execution.ConversationAttachment{{Name: "requirements.png", URL: "https://cdn.discordapp.com/requirements.png"}}},
+		{ID: "900", Embeds: []execution.ConversationEmbed{{Description: "visible card"}}},
+	} {
+		e := contextExecutor(t, 11, []execution.ConversationMessage{m}, nil)
+		page, err := e.ReadConversation(context.Background(), execution.Route{Provider: Name, Session: "discord:123"}, "1000")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Warnings) == 0 || !strings.Contains(page.Warnings[0], "MESSAGE_CONTENT") {
+			t.Fatal("empty text with other visible payload silently claimed completeness")
+		}
+		if len(page.Messages) != 1 || (len(page.Messages[0].Attachments) == 0 && len(page.Messages[0].Embeds) == 0) {
+			t.Fatal("warning discarded available content")
+		}
+	}
+}

@@ -43,6 +43,9 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 		}
 	}
 	if t != nil {
+		if len(t.Runs) == 0 && strings.HasPrefix(t.Error, "review context source:") {
+			w.raiseAlert("review_context_source_invalid", t.ID, "审查历史上下文缺少有效开发来源，任务未启动："+t.Error, now)
+		}
 		w.Workflow.State = "waiting_agent"
 		if t.Delivery == "manual" {
 			w.Workflow.State = "waiting_human"
