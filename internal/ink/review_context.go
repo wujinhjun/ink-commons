@@ -23,6 +23,9 @@ type ReviewContextFeatures struct {
 }
 
 func (r Repository) ValidateReviewFeatures() error {
+	if r.TaskMode != "" && r.TaskMode != "legacy" && r.TaskMode != "cooperative" {
+		return fmt.Errorf("task_mode must be legacy or cooperative")
+	}
 	if r.Review != nil && (r.Review.ReuseDevelopmentThread || r.Review.Context.ThreadHistory) && r.ReviewerRoute != nil && r.ReviewerRoute.Provider != ccconnect.Name {
 		return fmt.Errorf("review thread features require a cc-connect reviewer route")
 	}

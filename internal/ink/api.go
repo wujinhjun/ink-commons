@@ -54,6 +54,8 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}", s.work)
 	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}/context", s.reviewContext)
 	mux.HandleFunc("POST /v1/work/{owner}/{repo}/{number}/{action}", s.work)
+	mux.HandleFunc("GET /v1/tasks/{task}", s.handoffTask)
+	mux.HandleFunc("POST /v1/tasks/{task}/{action}", s.handoffTask)
 	mux.HandleFunc("POST /v1/pushes", s.pushes)
 	mux.HandleFunc("POST /v1/notifications/ack", s.ackNotification)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +326,9 @@ func applyChange(work *Work, action string, change workChange) error {
 			return apiError{404, "execution attempt not found"}
 		}
 	case "retry":
+		if work.Task != nil && work.Task.Handoff != nil {
+			return apiError{409, "use task submit/status; reassign a blocked task only after handoff"}
+		}
 		if work.executionBlocked() {
 			return apiError{409, "confirm all previous executions stopped before retry"}
 		}
@@ -334,6 +339,7 @@ func applyChange(work *Work, action string, change workChange) error {
 	default:
 		return apiError{404, fmt.Sprintf("unknown action %q", action)}
 	}
+	work.Version++
 	work.derive()
 	return nil
 }

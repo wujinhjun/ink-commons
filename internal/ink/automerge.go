@@ -194,6 +194,9 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 		}
 	}
 	if reserve {
+		if w.handoffMergeBlocked() {
+			return false, nil
+		}
 		current, ok := s.repo(repo.Repo)
 		if !ok || current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method || w.Phase != "approved" || w.Pull.Head.SHA != run.SHA || !strings.EqualFold(w.Reviewer.GitHubLogin, run.Reviewer) {
 			return false, nil
@@ -249,7 +252,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		s.mu.Unlock()
 		return nil
 	}
-	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled || w.Phase != "approved" {
+	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled || w.Phase != "approved" || w.handoffMergeBlocked() {
 		s.mu.Unlock()
 		return nil
 	}

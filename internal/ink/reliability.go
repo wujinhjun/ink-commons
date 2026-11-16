@@ -63,7 +63,7 @@ func taskRoute(w *Work, t *Task) *execution.Route {
 // not receive an attempt identity. Only an operator can confirm them stopped.
 func migrateExecution(w *Work) bool {
 	t := w.Task
-	if t == nil {
+	if t == nil || t.Handoff != nil {
 		return false
 	}
 	changed := false
@@ -100,6 +100,11 @@ func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Deliv
 	assignee := w.Developer
 	if t.Role == "reviewer" {
 		assignee = w.Reviewer
+	}
+	// A cooperative owner keeps the identity it claimed, even after the
+	// work is reassigned and this task moves into history.
+	if t.Handoff != nil {
+		assignee = t.Handoff.Assignee
 	}
 	d.GitHubLogin, d.GitHubCommand = assignee.GitHubLogin, assignee.GitHubCommand
 	for _, a := range w.Alerts {

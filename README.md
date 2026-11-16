@@ -229,6 +229,10 @@ ink review --github-login 'yanshi-reviewer[bot]' --github-command yanshi-reviewe
 
 设好 reviewer 后，在 GitHub 标记 Ready for review。同砚在下一轮轮询中创建审查会话并派发任务。PR 已经是 Ready 时，指派会直接进入待派发。重复提交相同指派会保留已有会话和投递状态。修改后推送新 commit，同砚会沿用该 reviewer 复审。
 
+## 主动领取与业务交接（可选）
+
+仓库配置 `"task_mode": "cooperative"` 后，新任务由 ink 管理领取、幂等交接和 GitHub 结果核验。cc-connect 只发送可重试的领取唤醒，无需修改 cc-connect 或切换 Codex 后端。Agent 先 `ink task claim`，完成后 `ink task submit --handoff`；后继任务和自动合入等待已验证的交接。旧执行 `unknown` 不自动清除。启用、凭据、异常恢复和信任边界见 [主动领取与交接](docs/handoff.md)。
+
 ## 本地 API
 
 ```sh
@@ -271,9 +275,9 @@ cc-connect 当前 webhook 不支持执行级状态查询、停止或持久化去
 
 ## 状态、备份与回滚
 
-daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 2（自动从 version 1 增加仓库注册表）。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
+daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 3（自动从 version 1 增加仓库注册表，并从 version 2 升级以保护任务交接记录）。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
 
-状态读写与执行账本的日常查询由 sqlc 生成类型化 Go 方法。状态保存仍使用完整快照接口，在同一事务中比较已有记录，仅插入新增记录、更新 payload 有变化的记录，并按主键删除已移除记录；未变化的记录不写入。push 保留原有 position 顺序，删除或重排会更新受影响的位置。读取和比较仍为全量，仍依赖进程内串行修改与 daemon 文件锁，不提供多 writer 并发合并。JSON payload 和 schema version 2 保持兼容，无需迁移已有数据库。
+状态读写与执行账本的日常查询由 sqlc 生成类型化 Go 方法。状态保存仍使用完整快照接口，在同一事务中比较已有记录，仅插入新增记录、更新 payload 有变化的记录，并按主键删除已移除记录；未变化的记录不写入。push 保留原有 position 顺序，删除或重排会更新受影响的位置。读取和比较仍为全量，仍依赖进程内串行修改与 daemon 文件锁，不提供多 writer 并发合并。任务和交接仍保存在 JSON payload 内；schema version 3 阻止旧二进制丢弃新领取记录，升级不增加 SQL 表。
 
 修改查询时编辑 `internal/ink/sql/` 或 `internal/execution/ledger/sql/`，运行 `./scripts/generate-sqlc.sh`（固定 sqlc v1.30.0），提交生成的 Go 文件，并运行 `go test -race ./...` 和 `go vet ./...`。`schema.sql` 仅供代码生成使用；运行时建表和版本迁移仍由存储层显式管理，变更表结构时须同步更新两处。普通构建不需要 sqlc。
 
@@ -288,7 +292,7 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 
 恢复 SQLite 备份：停止 daemon，将当前 `state.sqlite3` 移到另一个位置留存，再将备份复制为状态目录中的 `state.sqlite3`，确认权限为 `0600`，然后启动 daemon。不要在运行期间直接复制数据库文件。
 
-回滚到旧版程序：旧版不支持 schema version 2、新增的注册数据及 `postApproval` 字段，不能直接读取新数据库或 JSON；需先在兼容版本中显式转换并核查新增数据。以下旧版 JSON 恢复流程仅适用于已完成转换的快照。停止 daemon，先执行上面的 backup 和 export；将当前数据库、`state.sqlite3.initialized` 标记、旧 `state.json` 及 `state.json.pre-sqlite.bak` 一起移到独立归档目录，再将最新导出的 JSON 复制为状态目录中的 `state.json`（权限 `0600`），最后使用旧版程序启动。以后重新升级时，保持状态目录中没有旧 SQLite 数据库、初始化标记及旧迁移备份，让新版重新导入旧版运行期间更新过的 JSON。直接使用迁移前的备份只会恢复迁移时刻的数据。
+回滚到旧版程序：旧版可能不支持 schema version 3、新增的任务交接/注册数据及 `postApproval` 字段，不能直接读取新数据库或 JSON；需先在兼容版本中显式转换并核查新增数据。以下旧版 JSON 恢复流程仅适用于已完成转换的快照。停止 daemon，先执行上面的 backup 和 export；将当前数据库、`state.sqlite3.initialized` 标记、旧 `state.json` 及 `state.json.pre-sqlite.bak` 一起移到独立归档目录，再将最新导出的 JSON 复制为状态目录中的 `state.json`（权限 `0600`），最后使用旧版程序启动。以后重新升级时，保持状态目录中没有旧 SQLite 数据库、初始化标记及旧迁移备份，让新版重新导入旧版运行期间更新过的 JSON。直接使用迁移前的备份只会恢复迁移时刻的数据。
 
 ## 审查等待与回流诊断
 

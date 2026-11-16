@@ -200,3 +200,9 @@ type Monitor interface {
 type NotificationACKProvider interface {
 	NotificationACKRequired() bool
 }
+
+// TaskWaker sends a retryable invitation to claim a task. Receiving a wake must
+// not authorize work; the recipient must acquire the task from Ink first.
+type TaskWaker interface {
+	WakeTask(context.Context, Route, Delivery) error
+}
