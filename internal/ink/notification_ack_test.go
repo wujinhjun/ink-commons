@@ -295,3 +295,60 @@ func TestPollCCConnectApprovalBusyDropRecoveredWithoutRuntimeChanges(t *testing.
 		t.Fatalf("busy drop not recovered: %+v calls=%d", n, calls.Load())
 	}
 }
+
+func TestApprovalNotificationRetriesAndReceiptsSurviveAutoMerge(t *testing.T) {
+	f := newAutoMergeFixture(t)
+	e := &notificationExecutor{requireACK: true}
+	configure := func() {
+		f.s.providers = map[string]execution.Executor{"test": e}
+		f.installTransport(t)
+		original := f.s.up.http.Transport
+		f.s.up.http.Transport = testTransport(func(r *http.Request) (*http.Response, error) {
+			// GitHub's open-PR listing no longer contains a merged PR. Recovery must
+			// explicitly refresh an already closed work item on later poll cycles.
+			if strings.HasSuffix(r.URL.Path, "/pulls") && f.pull.State == "closed" {
+				res := httptest.NewRecorder()
+				reply(res, 200, []Pull{})
+				return res.Result(), nil
+			}
+			return original.RoundTrip(r)
+		})
+	}
+	configure()
+	st, err := f.s.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Work[key(f.repo.Repo, 42)].Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
+	if err := f.s.store.save(st); err != nil {
+		t.Fatal(err)
+	}
+	f.onMerge = func() { f.pull.State, f.pull.Merged = "closed", true }
+	f.s.Poll(context.Background())
+	if f.writes != 1 || len(e.notices) != 1 {
+		t.Fatal("first poll did not deliver and merge")
+	}
+	f.s.Poll(context.Background()) // Observe the merge before the retry is due.
+	if w := notificationWork(t, f.s, f.repo, f.pull); w.Phase != "merged" || w.Notifications[0].State != "awaiting_ack" {
+		t.Fatalf("pending merged notification: %+v", w)
+	}
+	f.s.Close()
+	f.s, err = NewService(Config{Repositories: []Repository{f.repo}}, f.path, map[string]execution.Executor{"test": e})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configure()
+	expireNotification(t, f.s, f.repo, f.pull)
+	f.s.Poll(context.Background())
+	w := notificationWork(t, f.s, f.repo, f.pull)
+	if len(e.notices) != 2 || w.Notifications[0].Attempts != 2 || f.writes != 1 || e.notices[0].EventID != e.notices[1].EventID {
+		t.Fatalf("lost retry after merge/restart: %+v, calls=%d", w.Notifications, len(e.notices))
+	}
+	receiptFirst(t, f.s, e.notices[0].EventID, true)
+	receiptFirst(t, f.s, e.notices[0].EventID, false)
+	reads := f.reads
+	f.s.Poll(context.Background())
+	if len(e.notices) != 2 || f.reads != reads {
+		t.Fatal("received merged notification kept polling/replaying")
+	}
+}

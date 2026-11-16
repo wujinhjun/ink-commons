@@ -35,7 +35,7 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 		return err
 	}
 	w := st.Work[id]
-	if w == nil || w.Phase != "approved" {
+	if w == nil || (w.Phase != "approved" && w.Phase != "merged") {
 		s.mu.Unlock()
 		return nil
 	}
@@ -51,16 +51,24 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 			break
 		}
 	}
-	// derive selected the latest qualifying review for this SHA and reviewer.
 	var review Review
-	for _, r := range w.Reviews {
-		if r.SHA == sha && strings.EqualFold(r.User.Login, w.Reviewer.GitHubLogin) && (r.State == "APPROVED" || r.State == "CHANGES_REQUESTED") {
-			review = r
+	if index < 0 {
+		// Do not create notifications for already closed PRs. Only a pending
+		// event reserved before merge can continue through receipt recovery.
+		if w.Phase != "approved" {
+			s.mu.Unlock()
+			return nil
 		}
-	}
-	if review.State != "APPROVED" {
-		s.mu.Unlock()
-		return nil
+		// derive selected the latest qualifying review for this SHA and reviewer.
+		for _, r := range w.Reviews {
+			if r.SHA == sha && strings.EqualFold(r.User.Login, w.Reviewer.GitHubLogin) && (r.State == "APPROVED" || r.State == "CHANGES_REQUESTED") {
+				review = r
+			}
+		}
+		if review.State != "APPROVED" {
+			s.mu.Unlock()
+			return nil
+		}
 	}
 	n := NotificationRun{Notification: execution.Notification{
 		EventID: fmt.Sprintf("%s:%s:review_approved", id, sha), Event: "review_approved",
@@ -73,6 +81,7 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 			w.Notifications[index].State = "superseded"
 			w.Notifications[index].FinishedAt = time.Now()
 			w.Notifications[index].RetryAt = time.Time{}
+			w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 			err = s.store.save(st)
 			s.mu.Unlock()
 			return err
@@ -150,4 +159,18 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 		live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	}
 	return s.store.save(st)
+}
+
+// Closed PRs normally fall out of polling. An approval notification reserved
+// before merge still needs retry/receipt recovery until consumed or superseded.
+func (w *Work) pendingMergedNotification() bool {
+	if w.Phase != "merged" {
+		return false
+	}
+	for _, n := range w.Notifications {
+		if n.RequireACK && n.SHA == w.Pull.Head.SHA && (n.State == "unknown" || n.State == "awaiting_ack") {
+			return true
+		}
+	}
+	return false
 }

@@ -137,7 +137,7 @@ func TestPollNotifiesDeveloperOfApprovalOnceAcrossRestart(t *testing.T) {
 }
 
 func TestApprovalNotificationRequiresCurrentAssignedReview(t *testing.T) {
-	for _, scenario := range []string{"wrong author", "old sha", "changes requested", "draft", "closed", "unlinked", "newer request changes"} {
+	for _, scenario := range []string{"wrong author", "old sha", "changes requested", "draft", "closed", "merged", "unlinked", "newer request changes"} {
 		t.Run(scenario, func(t *testing.T) {
 			e := &notificationExecutor{}
 			s, repo, p, r, _ := notificationFixture(t, e)
@@ -153,6 +153,8 @@ func TestApprovalNotificationRequiresCurrentAssignedReview(t *testing.T) {
 				p.Draft = true
 			case "closed":
 				p.State = "closed"
+			case "merged":
+				p.State, p.Merged = "closed", true
 			case "unlinked":
 				st, _ := s.store.load()
 				st.Work[key(repo.Repo, p.Number)].Linked = false

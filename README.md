@@ -91,7 +91,7 @@ ink notification ack --event '通知中的事件 ID'
 # ink 不在 PATH 时可使用 "$HOME/.local/lib/ink-commons/ink"
 ```
 
-命令调用本机私有 Unix socket 的 `POST /v1/notifications/ack`（JSON：`{"event_id":"..."}`）。原子持久化收件确认并返回 `{"status":"acknowledged","first":true}`；重复确认返回 `first:false`，Agent 应跳过重复回应。PR head、批准状态或 developer 路由已变化时，确认返回 `superseded`、`first:false`。重试保留原投递路由，路由变更后停止向旧会话重发。收件确认只证明 Agent 已读到通知，不证明用户可见回复已成功发送；确认后 Agent 崩溃可能遗漏回复。Agent 必须能访问同一个 daemon，并遵循确认指令；未确认时会继续重试并保留诊断。
+命令调用本机私有 Unix socket 的 `POST /v1/notifications/ack`（JSON：`{"event_id":"..."}`）。原子持久化收件确认并返回 `{"status":"acknowledged","first":true}`；重复确认返回 `first:false`，Agent 应跳过重复回应。PR head、批准状态或 developer 路由已变化，或 PR 未合并即关闭时，确认返回 `superseded`、`first:false`。重试保留原投递路由，路由变更后停止向旧会话重发。合并前已预留的通知在 PR 合并后仍会继续轮询、重试和接收确认（需 head 保持一致），不让自动合并吞掉待收通知；不会为已合并 PR 新建审批通知。收件确认只证明 Agent 已读到通知，不证明用户可见回复已成功发送；确认后 Agent 崩溃可能遗漏回复。Agent 必须能访问同一个 daemon，并遵循确认指令；未确认时会继续重试并保留诊断。
 
 工作项 API 的 `notifications` 保存 `require_ack`、`attempts`、`retry_at` 及状态。人工负责人记录为 `manual`，不支持通知的执行端为 `unsupported`，无效路由为 `failed`。通用执行端需显式实现 `execution.Notifier`；只有额外声明 `NotificationACKProvider` 的执行端启用收件确认和重试，其余保留原有 `accepted`/`unknown` 一次投递语义，不扩展现有 HTTP provider 协议。通知不替换代码任务，也不授权修改、推送、合并或部署。
 

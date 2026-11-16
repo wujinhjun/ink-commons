@@ -42,7 +42,7 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 			case "acknowledged", "superseded":
 			case "unknown", "awaiting_ack":
 				n.State = "superseded"
-				if work.Phase == "approved" && work.Pull.Head.SHA == n.SHA && work.Developer.Route != nil && n.Route != nil && *work.Developer.Route == *n.Route {
+				if (work.Phase == "approved" || work.Phase == "merged") && work.Pull.Head.SHA == n.SHA && work.Developer.Route != nil && n.Route != nil && *work.Developer.Route == *n.Route {
 					n.State, first = "acknowledged", true
 				}
 				n.FinishedAt, n.RetryAt, n.Error = time.Now(), time.Time{}, ""
