@@ -68,14 +68,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 	}
 	// Bound wake retries, including transport failures and process interruptions.
 	h.Wake.Attempts++
-	delay := time.Duration(s.config.Reliability.defaults().BackoffSeconds) * time.Second
-	for n := 1; n < h.Wake.Attempts && delay < time.Hour; n++ {
-		delay *= 2
-	}
-	if delay > time.Hour {
-		delay = time.Hour
-	}
-	h.Wake.RetryAt = time.Now().Add(delay)
+	h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.Attempts))
 	if err = s.store.save(st); err != nil {
 		s.mu.Unlock()
 		return true, err
@@ -148,4 +141,16 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 		current.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	}
 	return true, s.store.save(live)
+}
+
+// 未领取的任务先保持三次短间隔，再线性退避，避免忙会话持续刷屏。
+// 次数由任务持久化，重启不重置；与执行失败重试的 backoff_seconds 独立。
+func taskWakeRetryDelay(attempts int) time.Duration {
+	if attempts <= 3 {
+		return time.Minute
+	}
+	if attempts >= 62 {
+		return time.Hour
+	}
+	return time.Duration(attempts-2) * time.Minute
 }

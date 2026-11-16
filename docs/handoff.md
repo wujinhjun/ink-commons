@@ -91,7 +91,7 @@ ink task retry --task TASK_UUID
 
 若仍为当前任务，这会把旧任务归档为 superseded 并生成全新待办；若已有后继任务，则解除该条主动阻塞。未收到交接的 claimed/submitted 不能通过此入口重新执行。
 
-- 未领取：唤醒可重发。默认从 `execution.backoff_seconds`（30 秒）指数退避，上限一小时；无需依赖 webhook 的 accepted 证明接单。
+- 未领取：唤醒可重发。首次立即发送；仍未领取时，后续间隔依次为 1、1、1、2、3、4…分钟，上限 60 分钟。次数和下次重试时间按任务持久化，重启不重置，新任务重新计数；领取成功后停止唤醒。该间隔独立于执行失败重试的 `execution.backoff_seconds`；无需依赖 webhook 的 accepted 证明接单。
 - 已领取：不再重复唤醒代码任务。超过 `execution.execution_seconds`（默认一小时）显示 overdue，但不自动释放、不自动重做。
 - 已提交：重试证据核验；不是重新执行开发。
 - 会话创建结果不明：持久化 `preparing` 并停止自动创建，避免重启后复制审查 thread。核查现存 thread 后可通过现有 `assign` 指定确定的会话，使新待办使用该会话；不要重试模糊的创建请求。
