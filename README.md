@@ -110,22 +110,28 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 
 触发记录在启动脚本前持久化；失败、超时或 daemon 中断后不自动重放，也没有自动重试接口。这样避免脚本已经产生外部副作用后再次运行，但中断可能导致事件未执行完成，需要人工核查。脚本应使用 `event_id` 去重；如果它要执行 merge 等对当前版本敏感的操作，还需核对 GitHub 最新 head 和批准状态。hook 本身不自动 merge PR。
 
-## 审查通过后通知开发会话
+## 批准与自动合入通知
 
-指定 reviewer 对当前 head SHA 正式 Approve 后，同砚在下一轮轮询中向当前 developer 路由发送 `review_approved` 通知，包含 PR、批准的 SHA、reviewer 和正式 review 链接。cc-connect 通过 webhook 将这些信息送入原开发 Agent 上下文，并要求简短告知用户。通知独立于代码修改任务，不授权修改、推送、合并或部署，也不会把 PR 标记为已合并。
+指定 reviewer 对当前 head SHA 正式 Approve 后，同砚在下一轮轮询中向当前 developer 路由发送 `review_approved` 通知，包含 PR、批准的 SHA、reviewer 和正式 review 链接。cc-connect 通过 webhook 将这些信息送入原开发 Agent 上下文，并要求简短告知用户。通知包含发送时的 `merge` 观测（自动合入开关、方法、状态、原因及可用的合并提交），供 Agent 参考。通知独立于代码修改任务，不授权修改、推送、合并或部署。
 
 按仓库、PR、SHA 生成稳定事件 ID；新 SHA 获得批准后产生新事件。只有当前指定 reviewer 对当前 SHA 的有效正式批准触发；Draft、未关联或已关闭 PR、旧 SHA 和其他作者不触发。人工 developer 不会回退到历史 bot 会话。
 
-cc-connect 的 Webhook `accepted` 仅表示 HTTP 请求被接受，忙碌会话仍可能丢弃通知。因此新通知启用 Agent 收件确认：发送前持久化 `unknown`、尝试次数和下次重试时间；HTTP 成功后记作 `awaiting_ack`，收到 Agent 确认后才记作 `acknowledged`。未确认或网络结果不明时，在后续成功轮询中退避重试（2、4、8…分钟，上限一小时），重启保留进度；不设自动放弃次数。等待确认时，当前批准版本显示 `approval_notification_unresolved` 诊断。此机制无需修改 cc-connect；投递至少一次，可能重复进入 Agent 上下文。
+cc-connect 的 Webhook `accepted` 仅表示 HTTP 请求被接受，忙碌会话仍可能丢弃通知。因此新通知启用 Agent 收件确认：发送前持久化 `unknown`、尝试次数和下次重试时间；HTTP 成功后记作 `awaiting_ack`，收到 Agent 确认后才记作 `acknowledged`。未确认或网络结果不明时，在后续成功轮询中退避重试（2、4、8…分钟，上限一小时），重启保留进度；不设自动放弃次数。等待确认时，批准通知显示 `approval_notification_unresolved`，合入完成通知显示 `merge_notification_unresolved` 诊断。此机制无需修改 cc-connect；投递至少一次，可能重复进入 Agent 上下文。
 
 通知要求 Agent 在回应用户前运行：
 
 ```sh
 ink notification ack --event '通知中的事件 ID'
+# 仅 first:true 时，回复前再只读查询一次：
+ink notification status --event '通知中的事件 ID'
 # ink 不在 PATH 时可使用 "$HOME/.local/lib/ink-commons/ink"
 ```
 
 命令调用本机私有 Unix socket 的 `POST /v1/notifications/ack`（JSON：`{"event_id":"..."}`）。原子持久化收件确认并返回 `{"status":"acknowledged","first":true}`；重复确认返回 `first:false`，Agent 应跳过重复回应。PR head、批准状态或 developer 路由已变化，或 PR 未合并即关闭时，确认返回 `superseded`、`first:false`。重试保留原投递路由，路由变更后停止向旧会话重发。合并前已预留的通知在 PR 合并后仍会继续轮询、重试和接收确认（需 head 保持一致），不让自动合并吞掉待收通知；不会为已合并 PR 新建审批通知。收件确认只证明 Agent 已读到通知，不证明用户可见回复已成功发送；确认后 Agent 崩溃可能遗漏回复。Agent 必须能访问同一个 daemon，并遵循确认指令；未确认时会继续重试并保留诊断。
+
+`status` 调用只读 `GET /v1/notifications/status?event_id=...`，不会确认收件、调用 GitHub、触发合并或修改配置。返回事件 SHA、当前 head SHA、phase、通知状态及当前 `merge` 观测；CLI 会编码事件 ID 中的 `#` 等字符。观测来自当前仓库配置和持久化账本，可能落后于 GitHub；成功的合入账本已足以返回 `merged`，无需等待下一次 PR phase 同步。状态包括 `merged`、`waiting`、`blocked`、`unknown`、`disabled`、`superseded`、`not_approved`、`closed`。Agent 按状态简短报告，查询失败则说明不可读，不把失败解释为尚未合并；不循环等待，也不重复固定的“批准不代表已合并”提示来替代已确认结果。
+
+自动合入成功时，`pr_merged` 事件与合入账本在同一事务预留，之后使用相同的发送、重试、去重和回执机制。发送前退出或 PR 已从 open 列表移除，仍恢复该事件的初次发送/回执；旧合入请求结果不明时，只在 GitHub 确认最终 head 匹配后创建完成事件，其他 head 或未合并关闭不触发。升级不回填已经完成的历史合并，也不为纯手工合并创建新的完成通知。`review_approved` 与 `pr_merged` 各有稳定事件 ID，按 PR、SHA、事件去重；完成事件首次收到回执后，尚未接收的同 SHA 批准通知记作 superseded，避免通知乱序后再补旧提示。合入不表示已部署。
 
 工作项 API 的 `notifications` 保存 `require_ack`、`attempts`、`retry_at` 及状态。人工负责人记录为 `manual`，不支持通知的执行端为 `unsupported`，无效路由为 `failed`。通用执行端需显式实现 `execution.Notifier`；只有额外声明 `NotificationACKProvider` 的执行端启用收件确认和重试，其余保留原有 `accepted`/`unknown` 一次投递语义，不扩展现有 HTTP provider 协议。通知不替换代码任务，也不授权修改、推送、合并或部署。
 

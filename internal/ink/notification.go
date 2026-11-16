@@ -24,6 +24,14 @@ type NotificationRun struct {
 }
 
 func (s *Service) notifyApproved(ctx context.Context, repo Repository, number int) error {
+	return s.notifyEvent(ctx, repo, number, "review_approved")
+}
+
+func (s *Service) notifyMerged(ctx context.Context, repo Repository, number int) error {
+	return s.notifyEvent(ctx, repo, number, "pr_merged")
+}
+
+func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, event string) error {
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -42,8 +50,8 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 	sha := w.Pull.Head.SHA
 	index := -1
 	for i, n := range w.Notifications {
-		if n.SHA == sha && n.Event == "review_approved" {
-			if !n.RequireACK || (n.State != "unknown" && n.State != "awaiting_ack") || time.Now().Before(n.RetryAt) {
+		if n.SHA == sha && n.Event == event {
+			if (n.State != "unknown" && n.State != "awaiting_ack") || (!n.RequireACK && !(n.Event == "pr_merged" && n.Attempts == 0)) || time.Now().Before(n.RetryAt) {
 				s.mu.Unlock()
 				return nil
 			}
@@ -53,9 +61,9 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 	}
 	var review Review
 	if index < 0 {
-		// Do not create notifications for already closed PRs. Only a pending
-		// event reserved before merge can continue through receipt recovery.
-		if w.Phase != "approved" {
+		// Only create approval notices while approved. Completion notices are
+		// already reserved with the merge journal and enter through index >= 0.
+		if event != "review_approved" || w.Phase != "approved" {
 			s.mu.Unlock()
 			return nil
 		}
@@ -71,7 +79,7 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 		}
 	}
 	n := NotificationRun{Notification: execution.Notification{
-		EventID: fmt.Sprintf("%s:%s:review_approved", id, sha), Event: "review_approved",
+		EventID: fmt.Sprintf("%s:%s:%s", id, sha, event), Event: event,
 		Repository: repo.Repo, Number: number, URL: w.Pull.URL, SHA: sha,
 		Reviewer: review.User.Login, ReviewID: review.ID, ReviewURL: review.URL,
 	}, State: "unknown", StartedAt: time.Now()}
@@ -87,6 +95,7 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 			return err
 		}
 	}
+	n.Merge = mergeStatus(w, repo, n.SHA)
 	var notifier execution.Notifier
 	if index < 0 && w.Developer.Route == nil {
 		n.State = "manual"
@@ -161,16 +170,49 @@ func (s *Service) notifyApproved(ctx context.Context, repo Repository, number in
 	return s.store.save(st)
 }
 
-// Closed PRs normally fall out of polling. An approval notification reserved
-// before merge still needs retry/receipt recovery until consumed or superseded.
+// Closed PRs normally fall out of polling. Reserved notifications still need
+// initial delivery or receipt recovery until consumed or superseded.
 func (w *Work) pendingMergedNotification() bool {
 	if w.Phase != "merged" {
 		return false
 	}
 	for _, n := range w.Notifications {
-		if n.RequireACK && n.SHA == w.Pull.Head.SHA && (n.State == "unknown" || n.State == "awaiting_ack") {
+		if n.SHA == w.Pull.Head.SHA && ((n.Event == "pr_merged" && n.State == "unknown" && n.Attempts == 0) || (n.RequireACK && (n.State == "unknown" || n.State == "awaiting_ack"))) {
 			return true
 		}
 	}
 	return false
+}
+
+// 与确认合入的账本更新在同一事务预留事件，不回填升级前的历史合并。
+func (s *Service) reserveMergedNotification(w *Work, repo Repository, run AutoMergeRun) {
+	if !w.Linked || run.State != "merged" || run.SHA != w.Pull.Head.SHA {
+		return
+	}
+	id := fmt.Sprintf("%s:%s:pr_merged", keyForWork(w), run.SHA)
+	for _, n := range w.Notifications {
+		if n.EventID == id {
+			return
+		}
+	}
+	n := NotificationRun{Notification: execution.Notification{
+		EventID: id, Event: "pr_merged", Repository: w.Repo, Number: w.Pull.Number, URL: w.Pull.URL,
+		SHA: run.SHA, Reviewer: run.Reviewer, ReviewID: run.ReviewID, Merge: mergeStatus(w, repo, run.SHA),
+	}, State: "unknown", StartedAt: time.Now()}
+	for _, r := range w.Reviews {
+		if r.ID == run.ReviewID {
+			n.ReviewURL = r.URL
+			break
+		}
+	}
+	if w.Developer.Route == nil {
+		n.State = "manual"
+		n.FinishedAt = time.Now()
+	} else {
+		route := *w.Developer.Route
+		n.Route = &route
+		provider, ok := s.providers[route.Provider].(execution.NotificationACKProvider)
+		n.RequireACK = ok && provider.NotificationACKRequired()
+	}
+	w.Notifications = append(w.Notifications, n)
 }

@@ -126,18 +126,27 @@ type Executor interface {
 	Deliver(context.Context, Route, Delivery) error
 }
 
-// Notification is informational context for an existing developer conversation,
-// separate from a task that authorizes code changes or a GitHub operation.
+// MergeStatus is a SHA-bound observation, not permission to perform a merge.
+type MergeStatus struct {
+	Enabled  bool   `json:"auto_merge_enabled"`
+	Method   string `json:"method,omitempty"`
+	State    string `json:"state"`
+	Reason   string `json:"reason,omitempty"`
+	MergeSHA string `json:"merge_sha,omitempty"`
+}
+
+// Notification is informational context, separate from authorization to perform work.
 type Notification struct {
-	EventID    string `json:"event_id"`
-	Event      string `json:"event"`
-	Repository string `json:"repository"`
-	Number     int    `json:"pull_number"`
-	URL        string `json:"pull_url"`
-	SHA        string `json:"sha"`
-	Reviewer   string `json:"reviewer"`
-	ReviewID   int64  `json:"review_id"`
-	ReviewURL  string `json:"review_url"`
+	EventID    string       `json:"event_id"`
+	Event      string       `json:"event"`
+	Repository string       `json:"repository"`
+	Number     int          `json:"pull_number"`
+	URL        string       `json:"pull_url"`
+	SHA        string       `json:"sha"`
+	Reviewer   string       `json:"reviewer"`
+	ReviewID   int64        `json:"review_id"`
+	ReviewURL  string       `json:"review_url"`
+	Merge      *MergeStatus `json:"merge,omitempty"`
 }
 
 // Notifier is optional: runtimes must explicitly opt in rather than interpreting

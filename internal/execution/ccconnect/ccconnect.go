@@ -2,6 +2,7 @@ package ccconnect
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -215,7 +216,7 @@ func (e *Executor) Deliver(ctx context.Context, route execution.Route, task exec
 func (e *Executor) NotificationACKRequired() bool { return true }
 
 func (e *Executor) Notify(ctx context.Context, route execution.Route, n execution.Notification) error {
-	if n.Event != "review_approved" {
+	if n.Event != "review_approved" && n.Event != "pr_merged" {
 		return fmt.Errorf("unsupported cc-connect notification event %q", n.Event)
 	}
 	if err := e.ValidateDelivery(); err != nil {
@@ -224,11 +225,21 @@ func (e *Executor) Notify(ctx context.Context, route execution.Route, n executio
 	if err := e.Validate(route, false); err != nil {
 		return err
 	}
-	prompt := fmt.Sprintf("Ink Commons review_approved notification for PR %s\nEvent: %s\nApproved commit: %s\nReviewer: %s\nReview: %s (ID %d)\nThe assigned reviewer has formally approved this exact commit. Add this result to the development conversation and briefly acknowledge it to the user. This is informational, not a fix task or authorization to modify code, commit, push, merge, or deploy. Approval does not imply that the PR has been merged. If the head has changed, the approval applies only to the indicated commit.\n", n.URL, n.EventID, n.SHA, n.Reviewer, n.ReviewURL, n.ReviewID)
-	// Shell quoting keeps the event identifier a single literal argument.
-	command := "ink notification ack --event " + "'" + strings.ReplaceAll(n.EventID, "'", "'\"'\"'") + "'"
-	prompt += "\nBefore replying to the user, run: " + command + ". If ink is not on PATH, use the installed Ink Commons executable (on this Mac: \"$HOME/.local/lib/ink-commons/ink\"). The command returns JSON. Only if first=true, briefly acknowledge this approval to the user. If first=false, this event was already received or superseded: do not repeat the acknowledgement. If the command fails, report the receipt failure; do not claim successful receipt. This receipt confirms delivery only, not completion of any work.\n"
-	return e.sendPrompt(ctx, route, "ink-commons:review_approved", prompt)
+	prompt := fmt.Sprintf("Ink Commons %s notification for PR %s\nEvent: %s\nCommit: %s\nReviewer: %s\nReview: %s (ID %d)\n", n.Event, n.URL, n.EventID, n.SHA, n.Reviewer, n.ReviewURL, n.ReviewID)
+	if n.Event == "review_approved" {
+		prompt += "The assigned reviewer has formally approved this exact commit. Approval and merge are separate observations; use the current status below to report the actual outcome.\n"
+	} else {
+		prompt += "Ink has confirmed the automatic merge of this exact PR head. Report the merged result and merge commit, not merely the approval.\n"
+	}
+	if n.Merge != nil {
+		snapshot, _ := json.Marshal(n.Merge)
+		prompt += "Merge observation at delivery (may change before you reply): " + string(snapshot) + "\n"
+	}
+	prompt += "This is informational, not a fix task or authorization to modify code, commit, push, merge, or deploy. Do not perform a merge yourself. If the head has changed, the event applies only to the indicated commit.\n"
+	quoted := "'" + strings.ReplaceAll(n.EventID, "'", "'\"'\"'") + "'"
+	prompt += "\nBefore replying, run: ink notification ack --event " + quoted + ". If ink is not on PATH, use the installed Ink Commons executable (on this Mac: \"$HOME/.local/lib/ink-commons/ink\"). Only if first=true, continue; first=false means already received or superseded, so do not repeat the acknowledgement. If the command fails, report the receipt failure and do not claim successful receipt.\n"
+	prompt += "After first=true, query once: ink notification status --event " + quoted + ". This is a read-only local observation; do not poll, wait, or change configuration. Report merge.state: merged means already merged (include merge_sha); waiting means auto-merge is enabled but prerequisites are not yet met (include reason); blocked means report the reason; unknown means outcome is unconfirmed; disabled means automatic merge is disabled; closed means closed without merging. If superseded or not_approved, state that this event no longer describes the current head/approval. On status failure, report only the event's known fact and that current merge status could not be read, without claiming it is unmerged. Do not repeat a generic warning that approval does not mean merged when status confirms a merge. Do not infer deployment from merge. Briefly acknowledge the result in the development conversation and end this turn. Receipt confirms delivery only, not completion of work.\n"
+	return e.sendPrompt(ctx, route, "ink-commons:"+n.Event, prompt)
 }
 
 func (e *Executor) sendPrompt(ctx context.Context, route execution.Route, event, prompt string) error {

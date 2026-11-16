@@ -45,6 +45,17 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 				if (work.Phase == "approved" || work.Phase == "merged") && work.Pull.Head.SHA == n.SHA && work.Developer.Route != nil && n.Route != nil && *work.Developer.Route == *n.Route {
 					n.State, first = "acknowledged", true
 				}
+				// 完成通知已被消费后，不再补发同 SHA 的旧批准提示。
+				if first && n.Event == "pr_merged" {
+					for j := range work.Notifications {
+						old := &work.Notifications[j]
+						if old.Event == "review_approved" && old.SHA == n.SHA && (old.State == "unknown" || old.State == "awaiting_ack") {
+							old.State = "superseded"
+							old.FinishedAt = time.Now()
+							old.RetryAt = time.Time{}
+						}
+					}
+				}
 				n.FinishedAt, n.RetryAt, n.Error = time.Now(), time.Time{}, ""
 				work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 				if err := s.store.save(st); err != nil {
