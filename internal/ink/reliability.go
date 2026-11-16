@@ -109,6 +109,12 @@ func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Deliv
 	}
 	if t.Role == "reviewer" {
 		d.Source = reviewSource(w)
+		if w.Review != nil {
+			d.ReuseDevelopmentThread = w.Review.ReuseDevelopmentThread
+			if w.Review.Context.ThreadHistory {
+				d.ContextBefore = reviewHistoryBefore(t.CreatedAt)
+			}
+		}
 	}
 	return d
 }

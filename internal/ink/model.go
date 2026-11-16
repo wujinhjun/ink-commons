@@ -23,6 +23,12 @@ type Push struct {
 }
 
 type Pull struct {
+	Mergeable      *bool  `json:"mergeable,omitempty"`
+	MergeableState string `json:"mergeable_state,omitempty"`
+	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
+	Base           struct {
+		SHA string `json:"sha"`
+	} `json:"base"`
 	Number int    `json:"number"`
 	URL    string `json:"html_url"`
 	Title  string `json:"title"`
@@ -93,6 +99,8 @@ type Workflow struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Work struct {
+	Review        *ReviewFeatures   `json:"review,omitempty"`
+	AutoMerges    []AutoMergeRun    `json:"auto_merges,omitempty"`
 	Notifications []NotificationRun `json:"notifications,omitempty"`
 	Approvals     []ApprovalRun     `json:"postApproval,omitempty"`
 	Workflow      Workflow          `json:"workflow"`

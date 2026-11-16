@@ -194,7 +194,13 @@ func validateState(st state) error {
 		if !ValidRepository(repo.Repo) || seen[repo.Repo] || strings.TrimSpace(repo.ReviewerLogin) == "" {
 			return errors.New("invalid registered repository")
 		}
+		if err := repo.AutoMerge.Validate(); err != nil {
+			return err
+		}
 		if err := repo.PostApproval.Validate(); err != nil {
+			return err
+		}
+		if err := repo.ValidateReviewFeatures(); err != nil {
 			return err
 		}
 		seen[repo.Repo] = true

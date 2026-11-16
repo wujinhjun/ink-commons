@@ -39,8 +39,22 @@ func (s *Service) registerRepository(w http.ResponseWriter, r *http.Request) {
 	if input.HumanDeveloper == "" {
 		input.HumanDeveloper = defaults.HumanDeveloper
 	}
+	if input.AutoMerge == nil {
+		input.AutoMerge = defaults.AutoMerge
+	}
+	if err := input.AutoMerge.Validate(); err != nil {
+		fail(w, apiError{400, err.Error()})
+		return
+	}
 	if input.PostApproval == nil {
 		input.PostApproval = defaults.PostApproval
+	}
+	if input.Review == nil {
+		input.Review = defaults.Review
+	}
+	if err := input.ValidateReviewFeatures(); err != nil {
+		fail(w, apiError{400, err.Error()})
+		return
 	}
 	if strings.TrimSpace(input.ReviewerLogin) == "" {
 		fail(w, apiError{400, "provide reviewer_login or configure repository_defaults.reviewer_login"})
