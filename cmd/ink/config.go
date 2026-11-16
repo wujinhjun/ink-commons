@@ -69,6 +69,9 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	if err := cfg.RepositoryDefaults.PostApproval.Validate(); err != nil {
 		return cfg, nil, err
 	}
+	if err := cfg.RepositoryDefaults.ValidateReviewFeatures(); err != nil {
+		return cfg, nil, err
+	}
 
 	client := &http.Client{
 		Timeout:       10 * time.Second,
@@ -128,6 +131,9 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 			if err := execution.ValidateDestination(providers, *route, true); err != nil {
 				return cfg, nil, fmt.Errorf("%s reviewer: %w", repo.Repo, err)
 			}
+		}
+		if err := repo.ValidateReviewFeatures(); err != nil {
+			return cfg, nil, err
 		}
 		cfg.Repositories = append(cfg.Repositories, repo)
 	}

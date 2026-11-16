@@ -26,6 +26,11 @@ type Service struct {
 }
 
 func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
+	for _, repo := range append([]Repository{config.RepositoryDefaults}, config.Repositories...) {
+		if err := repo.ValidateReviewFeatures(); err != nil {
+			return nil, err
+		}
+	}
 	if err := config.Reliability.Validate(); err != nil {
 		return nil, err
 	}
@@ -243,6 +248,15 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		work.Reviews = mergeReviews(work.Reviews, reviews)
 	}
 	work.derive()
+	// Refresh features only before a new task has made an external attempt.
+	// Existing reviewer sessions retain their saved placement.
+	if work.Task == nil || len(work.Task.Runs) == 0 {
+		work.Review = nil
+		if repo.Review != nil {
+			features := *repo.Review
+			work.Review = &features
+		}
+	}
 	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	return s.store.save(st)
 }
@@ -288,6 +302,13 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 	work := st.Work[id]
 	if work == nil || work.Task == nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
 		return nil, nil
+	}
+	// Missing provenance is a local configuration problem, not an unknown
+	// external execution. Reject it before reserving an attempt or session.
+	if err := s.validateReviewPreparation(work); err != nil {
+		work.Task.Error = "review preparation: " + err.Error()
+		work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		return nil, s.store.save(st)
 	}
 
 	// Persist the attempt before making external requests. If the daemon restarts

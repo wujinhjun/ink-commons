@@ -43,6 +43,9 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 		}
 	}
 	if t != nil {
+		if len(t.Runs) == 0 && strings.HasPrefix(t.Error, "review preparation:") {
+			w.raiseAlert("review_preparation_invalid", t.ID, "审查上下文或会话准备配置无效，任务未启动："+t.Error, now)
+		}
 		w.Workflow.State = "waiting_agent"
 		if t.Delivery == "manual" {
 			w.Workflow.State = "waiting_human"

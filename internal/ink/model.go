@@ -93,6 +93,7 @@ type Workflow struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Work struct {
+	Review        *ReviewFeatures   `json:"review,omitempty"`
 	Notifications []NotificationRun `json:"notifications,omitempty"`
 	Approvals     []ApprovalRun     `json:"postApproval,omitempty"`
 	Workflow      Workflow          `json:"workflow"`

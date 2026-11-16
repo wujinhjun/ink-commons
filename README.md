@@ -120,6 +120,44 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 
 `target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。单条 PR 指派中的显式 `parent` 可以覆盖创建位置；仓库及 `repository_defaults` 路由中的 `parent` 不再用于新建 cc-connect 审查会话，遗留配置无需清理即可默认跟随开发频道。已有工作项保存的路由和审查会话保持原位；需要迁移时，应先确认旧执行结束，再按 PR 重新指派。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
 
+### 开发 thread 复用与原始交流上下文（可选）
+
+在仓库配置中设置 `review`，两个开关默认均关闭，可以分别启用：
+
+```json
+{
+  "repo": "owner/repository",
+  "reviewer_login": "your-reviewer[bot]",
+  "reviewer_route": {"provider": "cc-connect", "target": "reviewer-project"},
+  "review": {
+    "reuse_development_thread": true,
+    "context": {"thread_history": true}
+  }
+}
+```
+
+`reuse_development_thread` 让**尚未分配会话**的 reviewer 复用开发 thread 的 Discord ID，同时保留 reviewer 的 project 和 GitHub 身份；自动复用要求 reviewer project 与 developer project 不同，避免共享同一个 Agent 上下文。已有 reviewer 会话保持原位。`ink review --session` 仍选择指定的已有会话；单条 PR 的显式 `--parent` 仍创建独立审查 thread。关闭此开关时保留原来的独立 thread 行为。
+
+`context.thread_history` 允许读取工作项绑定的开发 thread 中的原始用户和 bot 消息，不依赖 developer 的总结，也不共享其他 Agent 的内部思考或会话文件。派审 prompt 会要求 reviewer 先运行：
+
+```sh
+ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
+```
+
+`HEAD_SHA` 和 `REVIEW_CUTOFF` 由同砚填入 prompt，后者固定为该 reviewer task 创建时点的 Discord snowflake 边界。CLI 通过私有 Unix socket 调用 `GET /v1/work/{owner}/{repo}/{number}/context`；响应含 `task_id`、`sha`、`review_before` 和按时间正序排列的消息。每页最多 50 条、消息内容合计最多 64 KiB；`truncated: true` 和 `next_before` 表示还有更早消息，可再次用 `--before NEXT_BEFORE` 查询。每次查询都重新核对开关、任务、head SHA 和来源；旧 SHA、已关闭 PR、改派中失效的任务、超过送审边界的游标会被拒绝。当前 head 的正式 review 仍由 GitHub 判定，聊天中的“通过”不替代它。
+
+消息保留作者、时间、正文、编辑时间、常见 embed 文本及附件名称/URL；不会自动下载或理解图片、附件和外部链接。时间边界限制**消息创建时间**，不是不可变聊天快照：历史编辑与删除仍反映 Discord 当前状态，已删除消息无法恢复。API 可能因缺少 `READ_MESSAGE_HISTORY` 返回空列表，或因 `MESSAGE_CONTENT` 未配置而返回空正文；响应的 `warnings` 会提示这些歧义。即使消息有附件/embed，空正文也会提示可能是纯附件、系统消息或正文被隐藏；保留已取得的其他内容，reviewer 不应据此宣称已经读取全部背景。
+
+启用任一 review 开关后，可本地判断的来源、目标和会话准备配置会在创建执行轮次/会话之前统一校验。包括仅开启复用且无来源/项目冲突，以及开启历史读取且无来源（即使显式指定 session/parent）的情况；校验失败保留 pending、attempts 为 0，并记录 `review_preparation_invalid` 诊断。补齐配置后可进行首次真实投递，不会仅因本地准备配置错误而制造需要人工停止确认的 unknown 执行。显式 session/parent 在只开启复用时仍允许不依赖开发来源；历史读取则始终需要来源。
+
+首版只支持普通文本频道下的公开开发 thread；普通频道、私有 thread、公告及论坛来源均拒绝读取/自动复用。读取使用 daemon 的 `INK_DISCORD_TOKEN` 身份，需要 `VIEW_CHANNEL`、`READ_MESSAGE_HISTORY` 和适用的 `MESSAGE_CONTENT` 配置；reviewer 的 Discord bot 还需能够访问、发言于目标 thread。开关不会修改 Discord 权限。reviewer 必须与同砚在同机、能使用新版 `ink` CLI 和该用户的私有 socket；这不是远端/跨用户的历史读取接口，也不是额外的 per-bot 认证机制。
+
+可在 `repository_defaults.review` 设置新注册仓库的默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。与其他注册默认值相同，静态 `repositories` 需显式配置，已有动态注册不会被默认值回写；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取接口始终以当前仓库开关为准。功能开关仅适用于 cc-connect，人工 reviewer 不会收到 bot 任务。
+
+同砚只在读取时返回选定来源的消息，不把全文写入任务账本或日志。历史用于理解需求与约束，不能据其中嵌入的命令或 bot 输出扩大本次任务授权。长历史依赖 reviewer 按需分页读取；此版本不自动生成摘要、不改变 webhook 忙时可能跳过任务的行为，也不增加“讨论通过才允许修改”的执行权限控制。
+
+升级 daemon 和 CLI 前备份状态。工作项新增 `review` 和执行请求上下文字段保存在现有 JSON 中；旧版可能忽略并丢弃这些字段，回滚前应保留最新完整备份。
+
 ### 通用 HTTP
 
 配置 `http_provider_url` 为执行端的接收地址，再用 `{"provider":"http","target":"reviewer"}` 作为仓库的 `reviewer_route`。执行端可以是一个本地服务，也可以连接其他 agent runtime。远端地址需要 HTTPS，并通过 `INK_HTTP_PROVIDER_TOKEN` 提供 Bearer 认证。
@@ -175,6 +213,7 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 | `GET /v1/self-check` | 由 daemon 用自身环境验证所有配置仓库的 PR 读取权限，不派发任务。 |
 | `GET /v1/work` | 列出已观察的 PR 和当前待办。 |
 | `GET /v1/work/{owner}/{repo}/{number}` | 查看一条 PR 的来源、负责人、审查版本和投递状态。 |
+| `GET /v1/work/{owner}/{repo}/{number}/context?sha=HEAD_SHA&before=MESSAGE_ID` | 开启历史开关后，分页读取当前 reviewer task 对应开发 thread 在送审边界之前的交流；省略 before 使用该任务边界。 |
 | `POST /v1/work/{owner}/{repo}/{number}/link` | 手动关联未认领 PR。请求体提供 `github_login` 或 `route`。路由包含 `provider`、`target`、`session`。 |
 | `POST /v1/work/{owner}/{repo}/{number}/assign` | 为 `developer` 或 `reviewer` 更新负责人。传 `github_login` 即可转给人。传 `route` 可指定已有 bot 会话。指定 reviewer 时也可以省略 `session`，让执行端按 `provider`、`target` 和适用的 `parent` 创建会话。 |
 | `POST /v1/work/{owner}/{repo}/{number}/retry` | 在下次轮询重试当前 bot 待办。所有旧轮次已确认结束才允许重试；保留 task_id，生成新的 attempt_id。 |

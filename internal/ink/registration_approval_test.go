@@ -14,7 +14,7 @@ import (
 
 func TestRegistrationPersistsAndPollsWithoutRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), stateDatabase)
-	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "reviewer"}}
+	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "reviewer", Review: &ReviewFeatures{Context: ReviewContextFeatures{ThreadHistory: true}}}}
 	s, err := NewService(cfg, path, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestRegistrationPersistsAndPollsWithoutRestart(t *testing.T) {
 	}
 	defer s.Close()
 	repos := s.repositories()
-	if len(repos) != 1 || repos[0].Repo != "acme/project" || repos[0].ReviewerLogin != "reviewer" {
+	if len(repos) != 1 || repos[0].Repo != "acme/project" || repos[0].ReviewerLogin != "reviewer" || repos[0].Review == nil || !repos[0].Review.Context.ThreadHistory {
 		t.Fatalf("lost registration: %+v", repos)
 	}
 }
