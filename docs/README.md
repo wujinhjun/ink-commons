@@ -1,5 +1,6 @@
 # 项目文档
 
+- [中心化配置](configuration.md)：全局默认值、仓库覆盖、动态 CLI、任务快照和兼容迁移。
 - [主动领取与业务交接](handoff.md)：cooperative 模式的启用、领取、幂等交接、结果核验和异常恢复。
 - [执行生命周期与可靠执行端](execution.md)：task/attempt、Monitor 协议、执行账本与恢复边界。
 - [macOS 部署与恢复](../deploy/macos/README.md)：指定版本构建、launchd 激活、校验及失败回滚。

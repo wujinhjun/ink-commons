@@ -19,6 +19,12 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 		return false, err
 	}
 	w := st.Work[id]
+	if w != nil {
+		if err := s.preparePendingConfig(w); err != nil {
+			s.mu.Unlock()
+			return false, err
+		}
+	}
 	if w == nil || w.Task == nil || w.Task.Handoff == nil {
 		s.mu.Unlock()
 		return false, nil
@@ -54,10 +60,18 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 		s.mu.Unlock()
 		return true, err
 	}
+	if err := s.freezeTaskConfig(w); err != nil {
+		s.mu.Unlock()
+		return true, err
+	}
 	d := deliveryFor(w, t, "", 0)
 	prepared := *route
 	if prepared.Session == "" {
 		if err := execution.ValidatePreparation(s.providers, prepared, d); err != nil {
+			t.ConfigSnapshot = nil
+			if t.Role == "reviewer" && w.RoundConfig != nil && w.RoundConfig.SHA == t.SHA {
+				w.RoundConfig = nil
+			}
 			h.Wake.Error = err.Error()
 			err = s.store.save(st)
 			s.mu.Unlock()

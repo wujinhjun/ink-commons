@@ -90,6 +90,33 @@ func (q *Queries) ListRepositories(ctx context.Context) ([]Repository, error) {
 	return items, nil
 }
 
+const listRuntimeConfig = `-- name: ListRuntimeConfig :many
+SELECT scope, payload, revision FROM runtime_config ORDER BY scope
+`
+
+func (q *Queries) ListRuntimeConfig(ctx context.Context) ([]RuntimeConfig, error) {
+	rows, err := q.db.QueryContext(ctx, listRuntimeConfig)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RuntimeConfig
+	for rows.Next() {
+		var i RuntimeConfig
+		if err := rows.Scan(&i.Scope, &i.Payload, &i.Revision); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWork = `-- name: ListWork :many
 SELECT id, payload FROM work_items ORDER BY id
 `
@@ -144,6 +171,22 @@ type PutRepositoryParams struct {
 
 func (q *Queries) PutRepository(ctx context.Context, arg PutRepositoryParams) error {
 	_, err := q.db.ExecContext(ctx, putRepository, arg.Name, arg.Payload)
+	return err
+}
+
+const putRuntimeConfig = `-- name: PutRuntimeConfig :exec
+INSERT INTO runtime_config(scope, payload, revision) VALUES (?, ?, ?)
+ON CONFLICT(scope) DO UPDATE SET payload = excluded.payload, revision = excluded.revision
+`
+
+type PutRuntimeConfigParams struct {
+	Scope    string
+	Payload  string
+	Revision int64
+}
+
+func (q *Queries) PutRuntimeConfig(ctx context.Context, arg PutRuntimeConfigParams) error {
+	_, err := q.db.ExecContext(ctx, putRuntimeConfig, arg.Scope, arg.Payload, arg.Revision)
 	return err
 }
 

@@ -4,15 +4,15 @@
 
 ## 启用范围
 
-单仓库设置 `"task_mode": "cooperative"`，或注册时使用：
+用 `ink config set task_mode cooperative --repo owner/repository` 设置中心仓库策略，或注册时使用：
 
 ```sh
 ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PROJECT owner/repository
 ```
 
-也可设 `repository_defaults.task_mode` 为新注册仓库的默认值；静态仓库必须显式配置，已注册仓库不被默认值回写。显式 `legacy` 覆盖注册默认值。配置文件修改后需要重启 daemon。
+也可用 `ink config set task_mode cooperative --global` 设置动态继承的全局默认值。显式 `legacy` 覆盖全局值，unset 恢复继承。运行期改配无需重启；旧 JSON 仅用于首次迁移，详见 [中心化配置](configuration.md)。
 
-开关只控制之后生成的任务；已有任务的模式及负责人快照不被改写。旧任务和历史 `unknown` 仍按原执行确认规则处理，不能通过打开开关或普通 `retry` 绕过。首次启用应在工作空闲、旧任务已完成核验/恢复后进行。关闭开关也不会撤销已经领取的 cooperative 任务，仍需交接。旧交接完成后，新一轮 legacy 审批恢复 legacy 行为，不会被已完成的 cooperative 历史永久阻塞。
+开关影响尚未首次派发的新任务；已派发任务的模式及负责人快照不被改写。旧任务和历史 `unknown` 仍按原执行确认规则处理，不能通过打开开关或普通 `retry` 绕过。首次启用应在工作空闲、旧任务已完成核验/恢复后进行。关闭开关也不会撤销已经领取的 cooperative 任务，仍需交接。旧交接完成后，新一轮 legacy 审批恢复 legacy 行为，不会被已完成的 cooperative 历史永久阻塞。
 
 当前只有 cc-connect 实现 `execution.TaskWaker`。其他 provider 不会退回直接执行，会在 API 中显示不支持唤醒；也可通过本机 CLI 人工领取。Agent 必须能访问同一个私有 Unix socket。
 
@@ -110,7 +110,7 @@ ink task retry --task TASK_UUID
 
 ## 升级与回滚
 
-升级前用 `ink state backup` / `ink state export` 备份。状态数据库升级至 schema version 3，保护新增的任务领取/交接记录；旧二进制会拒绝打开该版本，避免它丢弃 credential 哈希后再次派发。没有新增 SQL 表，任务及 outbox 仍在 work payload 内事务保存。
+升级前用 `ink state backup` / `ink state export` 备份。状态数据库使用 schema version 4，保护任务领取/交接记录和中心配置；旧二进制拒绝打开该版本。任务及 outbox 仍在 work payload 内事务保存，运行期配置存入独立 runtime_config 表。
 
 不要把数据库 user_version 手工改回 2。若需降级，先交回/核查所有未决 cooperative 和旧执行任务，并保留最新完整备份；显式转换和核对状态之后才可使用旧版。恢复升级前快照会丢失之后发生的任务交接。
 

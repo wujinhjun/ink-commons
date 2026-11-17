@@ -479,7 +479,7 @@ func TestCooperativeAutoMergeDoesNotRunBeforeVerifiedHandoff(t *testing.T) {
 	task := f.work(t).Task
 	f.claim(t, task, claimA, 200)
 	f.repo.AutoMerge = &AutoMergeConfig{Enabled: true}
-	f.s.config.Repositories[0] = f.repo
+	setRepositoryConfigForTest(t, f.s, f.repo)
 	f.reviews = []Review{reviewFor(7, f.pull.Head.SHA, "reviewer", "APPROVED")}
 	f.observe(t)
 	called := false
@@ -497,12 +497,12 @@ func TestCooperativeSchemaUpgradeProtectsClaimsFromOlderBinaries(t *testing.T) {
 	f := newHandoffFixture(t)
 	task := f.work(t).Task
 	f.claim(t, task, claimA, 200)
-	if _, err := f.s.store.db.Exec("PRAGMA user_version=2"); err != nil {
+	if _, err := f.s.store.db.Exec("DROP TABLE runtime_config; PRAGMA user_version=2"); err != nil {
 		t.Fatal(err)
 	}
 	f.restart(t)
 	var version int
-	if err := f.s.store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+	if err := f.s.store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
 		t.Fatal(version, err)
 	}
 	if f.work(t).Task.Handoff.ClaimHash != claimHash(claimA) {
@@ -521,7 +521,7 @@ func TestResolvedCooperativeHistoryDoesNotGateLaterLegacyApproval(t *testing.T) 
 			f.submit(t, task, claimA, HandoffSubmission{RequestID: "approve-A", Handoff: true, ReviewID: 7, Outcome: "APPROVED"}, 200)
 			f.verify(t)
 			f.repo.TaskMode = "legacy"
-			f.s.config.Repositories[0] = f.repo
+			setRepositoryConfigForTest(t, f.s, f.repo)
 			if !sameSHA {
 				f.pull.Head.SHA = strings.Repeat("b", 40)
 			}
@@ -544,7 +544,7 @@ func TestSwitchToLegacyRetainsUnresolvedCooperativeOwnership(t *testing.T) {
 	task := f.work(t).Task
 	f.claim(t, task, claimA, 200)
 	f.repo.TaskMode = "legacy"
-	f.s.config.Repositories[0] = f.repo
+	setRepositoryConfigForTest(t, f.s, f.repo)
 	f.pull.Head.SHA = strings.Repeat("b", 40)
 	f.reviews = []Review{reviewFor(8, f.pull.Head.SHA, "reviewer", "APPROVED")}
 	f.observe(t)

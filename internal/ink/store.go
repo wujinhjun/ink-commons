@@ -20,12 +20,15 @@ import (
 
 const stateDatabase = "state.sqlite3"
 const legacyState = "state.json"
-const schemaVersion = 3
+const schemaVersion = 4
 
 type state struct {
-	Repositories []Repository     `json:"repositories,omitempty"`
-	Pushes       []Push           `json:"pushes"`
-	Work         map[string]*Work `json:"work"`
+	// Configurations is populated only for JSON export/import. Workflow saves
+	// deliberately ignore it; runtime policy has a separate transactional API.
+	Configurations []ConfigRecord   `json:"configurations,omitempty"`
+	Repositories   []Repository     `json:"repositories,omitempty"`
+	Pushes         []Push           `json:"pushes"`
+	Work           map[string]*Work `json:"work"`
 }
 
 // stateStore keeps the workflow snapshot API; each read and incremental save is a
@@ -122,9 +125,15 @@ func (s *stateStore) initialize(legacy, marker string) error {
 		}
 		version = 3
 	}
+	if version == 3 {
+		if _, err := tx.Exec(`CREATE TABLE runtime_config (scope TEXT PRIMARY KEY, payload TEXT NOT NULL, revision INTEGER NOT NULL); PRAGMA user_version = 4;`); err != nil {
+			return err
+		}
+		version = 4
+	}
 	if version == schemaVersion {
 		// Detect missing tables before serving; never recreate damaged workflow tables.
-		for _, table := range []string{"work_items", "pushes", "repositories"} {
+		for _, table := range []string{"work_items", "pushes", "repositories", "runtime_config"} {
 			rows, err := tx.Query("SELECT * FROM " + table + " LIMIT 0")
 			if err != nil {
 				return err
@@ -152,7 +161,8 @@ func (s *stateStore) initialize(legacy, marker string) error {
 	}
 	if _, err := tx.Exec(`CREATE TABLE work_items (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
  CREATE TABLE pushes (position INTEGER PRIMARY KEY, payload TEXT NOT NULL);
- CREATE TABLE repositories (name TEXT PRIMARY KEY, payload TEXT NOT NULL);`); err != nil {
+ CREATE TABLE repositories (name TEXT PRIMARY KEY, payload TEXT NOT NULL);
+ CREATE TABLE runtime_config (scope TEXT PRIMARY KEY, payload TEXT NOT NULL, revision INTEGER NOT NULL);`); err != nil {
 		return err
 	}
 	data, err := os.ReadFile(legacy)
@@ -181,6 +191,9 @@ func (s *stateStore) initialize(legacy, marker string) error {
 			return err
 		}
 		if err := syncState(tx, st); err != nil {
+			return err
+		}
+		if err := importConfigRecords(tx, st.Configurations); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -222,9 +235,10 @@ func validateState(st state) error {
 
 func decodeState(data []byte) (state, error) {
 	var raw struct {
-		Repositories []Repository               `json:"repositories,omitempty"`
-		Pushes       []Push                     `json:"pushes"`
-		Work         map[string]json.RawMessage `json:"work"`
+		Configurations []ConfigRecord             `json:"configurations,omitempty"`
+		Repositories   []Repository               `json:"repositories,omitempty"`
+		Pushes         []Push                     `json:"pushes"`
+		Work           map[string]json.RawMessage `json:"work"`
 	}
 	var st state
 	d := json.NewDecoder(bytes.NewReader(data))
@@ -235,6 +249,7 @@ func decodeState(data []byte) (state, error) {
 	if d.Decode(new(any)) != io.EOF {
 		return st, errors.New("expected one state object")
 	}
+	st.Configurations = raw.Configurations
 	st.Repositories = raw.Repositories
 	st.Pushes = raw.Pushes
 	if raw.Work != nil {
@@ -516,6 +531,10 @@ func StateSnapshot(dir, output string, asJSON bool) error {
 	}
 	defer s.db.Close()
 	st, err := s.load()
+	if err != nil {
+		return err
+	}
+	st.Configurations, err = s.configRecords()
 	if err != nil {
 		return err
 	}

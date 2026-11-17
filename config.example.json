@@ -1,17 +1,3 @@
 {
-  "poll_seconds": 60,
-  "repository_defaults": {
-    "review": {
-      "reuse_development_thread": false,
-      "context": {"thread_history": false}
-    },
-    "auto_merge": {"enabled": false, "method": "merge"}
-  },
-  "repositories": [
-    {
-      "repo": "owner/repository",
-      "human_developer": "developer-login",
-      "reviewer_login": "reviewer-login"
-    }
-  ]
+  "poll_seconds": 60
 }

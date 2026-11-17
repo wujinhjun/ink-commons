@@ -101,6 +101,12 @@ func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Deliv
 	if t.Role == "reviewer" {
 		assignee = w.Reviewer
 	}
+	if t.ConfigSnapshot != nil {
+		assignee = t.ConfigSnapshot.Developer
+		if t.Role == "reviewer" {
+			assignee = t.ConfigSnapshot.Reviewer
+		}
+	}
 	// A cooperative owner keeps the identity it claimed, even after the
 	// work is reassigned and this task moves into history.
 	if t.Handoff != nil {
@@ -114,9 +120,14 @@ func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Deliv
 	}
 	if t.Role == "reviewer" {
 		d.Source = reviewSource(w)
-		if w.Review != nil {
-			d.ReuseDevelopmentThread = w.Review.ReuseDevelopmentThread
-			if w.Review.Context.ThreadHistory {
+		features := w.Review
+		if t.ConfigSnapshot != nil {
+			d.Source = cloneRoute(t.ConfigSnapshot.Source)
+			features = t.ConfigSnapshot.Repository.Review
+		}
+		if features != nil {
+			d.ReuseDevelopmentThread = features.ReuseDevelopmentThread
+			if features.Context.ThreadHistory {
 				d.ContextBefore = reviewHistoryBefore(t.CreatedAt)
 			}
 		}
@@ -221,8 +232,8 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 	s.delivering[id] = true
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.delivering, id); s.mu.Unlock() }()
-	c := s.config.Reliability.defaults()
 	for _, t := range w.executionTasks() {
+		c := t.reliability(s.config.Reliability)
 		for i := range t.Runs {
 			a := &t.Runs[i]
 			if execution.Terminal(a.State) {

@@ -52,7 +52,9 @@ func (s *Service) validateReviewPreparation(w *Work) error {
 		}
 	}
 	route := *w.Reviewer.Route
-	if repo, ok := s.repo(w.Repo); ok {
+	if w.Task.ConfigSnapshot != nil {
+		route = allocationRoute(w.Task.ConfigSnapshot.Repository, route)
+	} else if repo, ok := s.repo(w.Repo); ok {
 		route = allocationRoute(repo, route)
 	}
 	if err := execution.ValidateDestination(s.providers, route, route.Session == ""); err != nil {
@@ -68,6 +70,47 @@ func reviewHistoryBefore(t time.Time) string {
 		return ""
 	}
 	return strconv.FormatUint(uint64(t.UnixMilli()-discordEpoch)<<22, 10)
+}
+
+// reviewContextBinding is the immutable read authorization for one task. Both
+// sides of a potentially slow provider read must resolve to the same binding.
+type reviewContextBinding struct {
+	TaskID string
+	SHA    string
+	Before string
+	Source execution.Route
+}
+
+func bindReviewContext(work *Work, repo Repository) (reviewContextBinding, error) {
+	var binding reviewContextBinding
+	task := work.Task
+	if !work.Linked || task == nil || task.Role != "reviewer" || work.Phase != "review_pending" || task.SHA != work.Pull.Head.SHA {
+		return binding, apiError{409, "context requires the current reviewer task and its head SHA"}
+	}
+	features, source, reviewer := repo.Review, reviewSource(work), work.Reviewer.Route
+	if snapshot := task.ConfigSnapshot; snapshot != nil {
+		// Cooperative tasks have no attempt requests. The task snapshot is the
+		// authority for their history permission and development conversation too.
+		if snapshot.SHA != task.SHA {
+			return binding, apiError{409, "task configuration SHA does not match"}
+		}
+		features, source, reviewer = snapshot.Repository.Review, snapshot.Source, snapshot.Reviewer.Route
+	}
+	if features == nil || !features.Context.ThreadHistory {
+		return binding, apiError{403, "history was not enabled for this task"}
+	}
+	anchor := reviewHistoryBefore(task.CreatedAt)
+	if anchor == "" || source == nil || source.Provider != ccconnect.Name || reviewer == nil || reviewer.Provider != ccconnect.Name {
+		return binding, apiError{409, "context requires a Discord development thread and cc-connect reviewer"}
+	}
+	if len(task.Runs) > 0 {
+		request := task.Runs[len(task.Runs)-1].Request
+		if request.ContextBefore == "" || request.Source == nil || *request.Source != *source || request.SHA != task.SHA {
+			return binding, apiError{409, "history was not enabled for this attempt or its development source changed"}
+		}
+		anchor = request.ContextBefore
+	}
+	return reviewContextBinding{TaskID: task.ID, SHA: task.SHA, Before: anchor, Source: *source}, nil
 }
 
 // reviewContext resolves the source server-side, never from a caller's channel
@@ -98,31 +141,20 @@ func (s *Service) reviewContext(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError{404, "PR not observed yet"})
 		return
 	}
-	task := work.Task
-	if !work.Linked || task == nil || task.Role != "reviewer" || work.Phase != "review_pending" || r.URL.Query().Get("sha") != work.Pull.Head.SHA {
+	if r.URL.Query().Get("sha") != work.Pull.Head.SHA {
 		s.mu.Unlock()
 		fail(w, apiError{409, "context requires the current reviewer task and its head SHA"})
 		return
 	}
-	anchor := reviewHistoryBefore(task.CreatedAt)
-	source := reviewSource(work)
-	if anchor == "" || source == nil || source.Provider != ccconnect.Name || work.Reviewer.Route == nil || work.Reviewer.Route.Provider != ccconnect.Name {
+	binding, err := bindReviewContext(work, repo)
+	if err != nil {
 		s.mu.Unlock()
-		fail(w, apiError{409, "context requires a Discord development thread and cc-connect reviewer"})
+		fail(w, err)
 		return
 	}
-	route := *source
-	if len(task.Runs) > 0 {
-		request := task.Runs[len(task.Runs)-1].Request
-		if request.ContextBefore == "" || request.Source == nil || *request.Source != route || request.SHA != task.SHA {
-			s.mu.Unlock()
-			fail(w, apiError{409, "history was not enabled for this attempt or its development source changed"})
-			return
-		}
-		anchor = request.ContextBefore
-	}
+	route, anchor := binding.Source, binding.Before
 	reader, ok := s.providers[route.Provider].(execution.ConversationReader)
-	taskID, sha := task.ID, task.SHA
+	taskID, sha := binding.TaskID, binding.SHA
 	s.mu.Unlock()
 	if !ok {
 		fail(w, apiError{409, "execution provider cannot read conversation history"})
@@ -144,12 +176,17 @@ func (s *Service) reviewContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A slow history request must not return context for a superseded task or
-	// continue granting access after the feature was disabled/reassigned.
+	// continue granting access after the live feature was disabled. A developer
+	// reassignment may not redirect a frozen reviewer task to another source.
 	s.mu.Lock()
 	currentRepo, enabled := s.repo(repoName)
 	latest, loadErr := s.store.load()
 	live := latest.Work[key(repoName, number)]
-	valid := loadErr == nil && enabled && currentRepo.Review != nil && currentRepo.Review.Context.ThreadHistory && live != nil && live.Task != nil && live.Task.ID == taskID && live.Task.SHA == sha && live.Phase == "review_pending" && reviewSource(live) != nil && *reviewSource(live) == route
+	valid := false
+	if loadErr == nil && enabled && currentRepo.Review != nil && currentRepo.Review.Context.ThreadHistory && live != nil {
+		currentBinding, bindErr := bindReviewContext(live, currentRepo)
+		valid = bindErr == nil && currentBinding == binding
+	}
 	s.mu.Unlock()
 	if loadErr != nil {
 		fail(w, loadErr)

@@ -19,3 +19,9 @@ DELETE FROM work_items WHERE id = ?;
 DELETE FROM pushes WHERE position = ?;
 -- name: DeleteRepository :exec
 DELETE FROM repositories WHERE name = ?;
+
+-- name: ListRuntimeConfig :many
+SELECT scope, payload, revision FROM runtime_config ORDER BY scope;
+-- name: PutRuntimeConfig :exec
+INSERT INTO runtime_config(scope, payload, revision) VALUES (?, ?, ?)
+ON CONFLICT(scope) DO UPDATE SET payload = excluded.payload, revision = excluded.revision;

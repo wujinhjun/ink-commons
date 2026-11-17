@@ -16,6 +16,16 @@ import (
 	"ink-commons/internal/ink"
 )
 
+// DaemonConfig contains only static process/provider settings. Mutable policy
+// lives in SQLite; the legacy fields below are accepted solely for first import.
+type DaemonConfig struct {
+	GitHubCommand string `json:"github_command,omitempty"`
+	PollSeconds   int    `json:"poll_seconds"`
+	CCConnectURL  string `json:"cc_connect_url"`
+	HTTPURL       string `json:"http_provider_url,omitempty"`
+	HTTPExecution bool   `json:"http_provider_execution,omitempty"`
+}
+
 func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) {
 	var file struct {
 		RepositoryDefaults ink.Repository `json:"repository_defaults,omitempty"`
@@ -24,12 +34,8 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 			ReviewerProject string `json:"reviewer_project,omitempty"`
 			ReviewChannel   string `json:"review_channel_id,omitempty"`
 		} `json:"repositories"`
-		Reliability   ink.Reliability `json:"execution"`
-		GitHubCommand string          `json:"github_command,omitempty"`
-		PollSeconds   int             `json:"poll_seconds"`
-		CCConnectURL  string          `json:"cc_connect_url"`
-		HTTPURL       string          `json:"http_provider_url,omitempty"`
-		HTTPExecution bool            `json:"http_provider_execution,omitempty"`
+		Reliability ink.Reliability `json:"execution"`
+		DaemonConfig
 	}
 	var cfg ink.Config
 	f, err := os.Open(path)

@@ -1,6 +1,7 @@
 package ink
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,9 @@ func (s *Service) Handler() http.Handler {
 			"last_poll": timestamp(s.lastPoll.Load()), "last_github_ok": timestamp(s.up.lastOK.Load())})
 	})
 	mux.HandleFunc("GET /v1/self-check", s.selfCheck)
+	mux.HandleFunc("GET /v1/config", s.configuration)
+	mux.HandleFunc("POST /v1/config", s.configuration)
+	mux.HandleFunc("DELETE /v1/config", s.configuration)
 	mux.HandleFunc("GET /v1/repositories", s.listRepositories)
 	mux.HandleFunc("POST /v1/repositories", s.registerRepository)
 	mux.HandleFunc("GET /v1/work", s.listWork)
@@ -223,6 +227,16 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	if action == "assign" && change.Role == "reviewer" && work.Linked {
 		requested := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
 		if requested.GitHubLogin != "" && sameReviewer(work.Reviewer, requested) {
+			// Equal values still express an explicit PR override. Preserve the active
+			// task/session while recording that future rounds must not inherit.
+			if work.ReviewerOverride == nil || !bytes.Equal(jsonValue(work.ReviewerOverride), jsonValue(requested)) {
+				work.ReviewerOverride = cloneAssignee(requested)
+				work.Version++
+				if err := s.store.save(st); err != nil {
+					fail(w, err)
+					return
+				}
+			}
 			reply(w, 200, work)
 			return
 		}
@@ -285,6 +299,7 @@ func applyChange(work *Work, action string, change workChange) error {
 			return apiError{409, "PR already linked"}
 		}
 		work.Linked, work.Origin, work.Developer = true, change.Route, assignee
+		work.DeveloperOverride = cloneAssignee(assignee)
 	case "assign":
 		if !work.Linked {
 			return apiError{409, "link the PR first"}
@@ -294,8 +309,11 @@ func applyChange(work *Work, action string, change workChange) error {
 		}
 		if change.Role == "developer" {
 			work.Developer = assignee
+			work.DeveloperOverride = cloneAssignee(assignee)
 		} else if change.Role == "reviewer" {
 			work.Reviewer = assignee
+			work.ReviewerOverride = cloneAssignee(assignee)
+			work.RoundConfig = nil
 		} else {
 			return apiError{400, "role must be developer or reviewer"}
 		}

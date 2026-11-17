@@ -2,13 +2,11 @@ package ink
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"reflect"
 	"strings"
 	"time"
-
-	"ink-commons/internal/execution"
 )
 
 func (s *Service) listRepositories(w http.ResponseWriter, r *http.Request) {
@@ -16,97 +14,45 @@ func (s *Service) listRepositories(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) registerRepository(w http.ResponseWriter, r *http.Request) {
-	var input Repository
-	if err := decode(w, r, &input); err != nil {
+	var raw map[string]json.RawMessage
+	if err := decode(w, r, &raw); err != nil {
 		fail(w, err)
 		return
 	}
-	input.Repo = strings.ToLower(strings.TrimSpace(input.Repo))
-	if !ValidRepository(input.Repo) {
+	var name string
+	if err := json.Unmarshal(raw["repo"], &name); err != nil {
 		fail(w, apiError{400, "expected owner/repo"})
 		return
 	}
-	defaults := s.config.RepositoryDefaults
-	if input.TaskMode == "" {
-		input.TaskMode = defaults.TaskMode
+	name = strings.ToLower(strings.TrimSpace(name))
+	if !ValidRepository(name) {
+		fail(w, apiError{400, "expected owner/repo"})
+		return
 	}
-	if input.ReviewerLogin == "" {
-		input.ReviewerLogin = defaults.ReviewerLogin
-	}
-	if input.ReviewerCommand == "" {
-		input.ReviewerCommand = defaults.ReviewerCommand
-	}
-	if input.ReviewerRoute == nil {
-		input.ReviewerRoute = defaults.ReviewerRoute
-	}
-	if input.HumanDeveloper == "" {
-		input.HumanDeveloper = defaults.HumanDeveloper
-	}
-	if input.AutoMerge == nil {
-		input.AutoMerge = defaults.AutoMerge
-	}
-	if err := input.AutoMerge.Validate(); err != nil {
+	delete(raw, "repo")
+	values := ConfigValues(raw)
+	if err := validateValues(values); err != nil {
 		fail(w, apiError{400, err.Error()})
 		return
 	}
-	if input.PostApproval == nil {
-		input.PostApproval = defaults.PostApproval
-	}
-	if input.Review == nil {
-		input.Review = defaults.Review
-	}
-	if err := input.ValidateReviewFeatures(); err != nil {
-		fail(w, apiError{400, err.Error()})
-		return
-	}
-	if strings.TrimSpace(input.ReviewerLogin) == "" {
-		fail(w, apiError{400, "provide reviewer_login or configure repository_defaults.reviewer_login"})
-		return
-	}
-	if err := input.PostApproval.Validate(); err != nil {
-		fail(w, apiError{400, err.Error()})
-		return
-	}
-	if input.ReviewerRoute != nil {
-		if provider, ok := s.providers[input.ReviewerRoute.Provider].(interface{ ValidateDelivery() error }); ok {
-			if err := provider.ValidateDelivery(); err != nil {
-				fail(w, apiError{400, err.Error()})
-				return
-			}
-		}
-		if err := execution.ValidateDestination(s.providers, *input.ReviewerRoute, true); err != nil {
-			fail(w, apiError{400, "invalid reviewer route: " + err.Error()})
-			return
-		}
-	}
-	// Only read PRs using the daemon's repository-scoped identity. No fallback to
-	// the invoking shell's personal GitHub credentials.
+	// Permission check uses the daemon's identity, never invoking shell credentials.
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	var pulls []Pull
-	if _, err := s.up.gitHubGet(ctx, "/repos/"+input.Repo+"/pulls?state=open&per_page=1", &pulls); err != nil {
+	if _, err := s.up.gitHubGet(ctx, "/repos/"+name+"/pulls?state=open&per_page=1", &pulls); err != nil {
 		fail(w, apiError{422, fmt.Sprintf("cannot read repository PRs: %v", err)})
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if old, ok := s.repo(input.Repo); ok {
-		if !reflect.DeepEqual(old, input) {
-			fail(w, apiError{409, "repository already registered with different settings"})
-			return
-		}
-		reply(w, 200, old)
-		return
-	}
-	st, err := s.store.load()
+	repo, created, err := s.registerConfig(name, values)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	st.Repositories = append(st.Repositories, input)
-	if err := s.store.save(st); err != nil {
-		fail(w, err)
-		return
+	status := 200
+	if created {
+		status = 201
 	}
-	reply(w, 201, input)
+	reply(w, status, repo)
 }
