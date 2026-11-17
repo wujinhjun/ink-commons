@@ -86,6 +86,8 @@ CLI 经仅本地 daemon 用户可访问的 Unix socket 调用：
 
 当前 SHA 的 reviewer 在本轮首次暴露后固定，避免改默认 reviewer 重新解释既有批准；新 SHA 使用新默认值。开发任务可采用最新执行策略，但保留前一审查轮次的 reviewer，其快照来源可标为 `round_snapshot`。分配出的 session 是运行状态，只有目标 provider、target、parent 和 reviewer 身份兼容时才跨任务复用。
 
+历史读取在发起请求和返回结果前均核对当前任务的快照权限、来源及读取边界。当前仓库关闭历史开关可撤销访问；之后重新开启不能扩大已派发任务的快照权限，改派开发者也不会切换该 reviewer 任务的来源 thread。
+
 postApproval 在事件准备执行时重新读取配置，把 hook 和 generation 写入批准事件记录后执行。继续按仓库、PR、SHA 去重，不自动重放失败或结果不明的事件。自动合入仍按现有流程在保留副作用前重新核对中心配置和 GitHub 状态。
 
 ## 兼容迁移与备份

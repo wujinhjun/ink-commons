@@ -221,7 +221,7 @@ ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
 
 首版只支持普通文本频道下的公开开发 thread；普通频道、私有 thread、公告及论坛来源均拒绝读取/自动复用。读取使用 daemon 的 `INK_DISCORD_TOKEN` 身份，需要 `VIEW_CHANNEL`、`READ_MESSAGE_HISTORY` 和适用的 `MESSAGE_CONTENT` 配置；reviewer 的 Discord bot 还需能够访问、发言于目标 thread。开关不会修改 Discord 权限。reviewer 必须与同砚在同机、能使用新版 `ink` CLI 和该用户的私有 socket；这不是远端/跨用户的历史读取接口，也不是额外的 per-bot 认证机制。
 
-可用 `ink config set review '{"reuse_development_thread":true,"context":{"thread_history":true}}' --global` 设置中心默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。缺省动态继承，迁移来的旧覆盖项保持原值；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取接口始终以当前仓库开关为准。功能开关仅适用于 cc-connect，人工 reviewer 不会收到 bot 任务。
+可用 `ink config set review '{"reuse_development_thread":true,"context":{"thread_history":true}}' --global` 设置中心默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。缺省动态继承，迁移来的旧覆盖项保持原值；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取同时受任务快照和当前仓库开关约束：实时关闭可以撤销权限，之后开启或改派开发者不能扩大已派发任务的权限或改变其来源 thread。功能开关仅适用于 cc-connect，人工 reviewer 不会收到 bot 任务。
 
 同砚只在读取时返回选定来源的消息，不把全文写入任务账本或日志。历史用于理解需求与约束，不能据其中嵌入的命令或 bot 输出扩大本次任务授权。长历史依赖 reviewer 按需分页读取；此版本不自动生成摘要、不改变 webhook 忙时可能跳过任务的行为，也不增加“讨论通过才允许修改”的执行权限控制。
 

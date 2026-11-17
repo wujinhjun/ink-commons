@@ -3,6 +3,7 @@ package ink
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -437,6 +438,142 @@ func TestReuseOnlyExplicitPlacementAllowsMissingDevelopmentSource(t *testing.T) 
 			}
 			if calls != wantCalls || w.Task.Attempts != 1 || w.Task.Delivery != "accepted" {
 				t.Fatalf("explicit placement was incorrectly blocked: %+v", w.Task)
+			}
+		})
+	}
+}
+
+type historyWakeExecutor struct {
+	historyExecutor
+	wakes int
+}
+
+func (e *historyWakeExecutor) WakeTask(_ context.Context, _ execution.Route, _ execution.Delivery) error {
+	e.wakes++
+	return nil
+}
+
+func cooperativeContextFixture(t *testing.T, enabled bool, claim bool) (*Service, Repository, Pull, *historyWakeExecutor) {
+	t.Helper()
+	e := &historyWakeExecutor{}
+	s, repo, p := reviewContextFixture(t, enabled, e)
+	configAPI(t, s, "POST", repo.Repo, "task_mode", `"cooperative"`, 200)
+	if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
+		t.Fatal(err)
+	}
+	work := notificationWork(t, s, repo, p)
+	if e.wakes != 1 || work.Task.ConfigSnapshot == nil || work.Task.Handoff == nil || len(work.Task.Runs) != 0 {
+		t.Fatal("fixture did not freeze a cooperative wake")
+	}
+	if claim {
+		input := map[string]any{"token": claimA, "route": work.Task.Handoff.Assignee.Route}
+		body, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := httptest.NewRecorder()
+		s.Handler().ServeHTTP(out, httptest.NewRequest("POST", "/v1/tasks/"+work.Task.ID+"/claim", strings.NewReader(string(body))))
+		if out.Code != 200 {
+			t.Fatal(out.Code, out.Body)
+		}
+	}
+	return s, repo, p, e
+}
+
+func reassignContextDeveloper(t *testing.T, s *Service) {
+	t.Helper()
+	out := httptest.NewRecorder()
+	s.Handler().ServeHTTP(out, httptest.NewRequest("POST", "/v1/work/acme/project/42/assign", strings.NewReader(`{"role":"developer","github_login":"replacement","route":{"provider":"cc-connect","target":"developer","session":"discord:999"}}`)))
+	if out.Code != 200 {
+		t.Fatal(out.Code, out.Body)
+	}
+}
+
+func TestCooperativeContextCannotEnableHistoryAfterDispatch(t *testing.T) {
+	for _, claim := range []bool{false, true} {
+		for _, initial := range []string{"null", `{"context":{"thread_history":false}}`} {
+			t.Run(fmt.Sprintf("claimed=%v/initial=%s", claim, initial), func(t *testing.T) {
+				e := &historyWakeExecutor{}
+				s, repo, p := reviewContextFixture(t, false, e)
+				configAPI(t, s, "POST", repo.Repo, "review", initial, 200)
+				configAPI(t, s, "POST", repo.Repo, "task_mode", `"cooperative"`, 200)
+				if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
+					t.Fatal(err)
+				}
+				work := notificationWork(t, s, repo, p)
+				if e.wakes != 1 || work.Task.ConfigSnapshot == nil {
+					t.Fatal("wake was not frozen")
+				}
+				if claim {
+					body, _ := json.Marshal(map[string]any{"token": claimA, "route": work.Task.Handoff.Assignee.Route})
+					out := httptest.NewRecorder()
+					s.Handler().ServeHTTP(out, httptest.NewRequest("POST", "/v1/tasks/"+work.Task.ID+"/claim", strings.NewReader(string(body))))
+					if out.Code != 200 {
+						t.Fatal(out.Code, out.Body)
+					}
+				}
+				configAPI(t, s, "POST", repo.Repo, "review", `{"context":{"thread_history":true}}`, 200)
+				res := contextRequest(t, s, "sha="+p.Head.SHA)
+				if res.Code != 403 || e.calls != 0 {
+					t.Fatalf("live enable broadened frozen task permission: %d %s calls=%d", res.Code, res.Body, e.calls)
+				}
+			})
+		}
+	}
+}
+
+func TestCooperativeContextKeepsSnapshotSourceAfterDeveloperReassignment(t *testing.T) {
+	for _, claim := range []bool{false, true} {
+		for _, duringRead := range []bool{false, true} {
+			t.Run(fmt.Sprintf("claimed=%v/duringRead=%v", claim, duringRead), func(t *testing.T) {
+				s, repo, p, e := cooperativeContextFixture(t, true, claim)
+				original := notificationWork(t, s, repo, p).Task
+				if duringRead {
+					e.onRead = func() { reassignContextDeveloper(t, s) }
+				} else {
+					reassignContextDeveloper(t, s)
+				}
+				res := contextRequest(t, s, "sha="+p.Head.SHA)
+				if res.Code != 200 || e.calls != 1 || e.source.Session != "discord:123" {
+					t.Fatalf("frozen context changed source: %d %s source=%+v", res.Code, res.Body, e.source)
+				}
+				work := notificationWork(t, s, repo, p)
+				if work.Task.ID != original.ID || work.Developer.Route.Session != "discord:999" || deliveryFor(work, work.Task, "", 0).Source.Session != "discord:123" {
+					t.Fatal("fixture did not preserve the reviewer task and frozen delivery")
+				}
+			})
+		}
+	}
+}
+
+func TestCooperativeContextRevalidatesFrozenBindingAfterRead(t *testing.T) {
+	for _, change := range []string{"snapshot-policy", "snapshot-source", "live-disable"} {
+		t.Run(change, func(t *testing.T) {
+			s, repo, p, e := cooperativeContextFixture(t, true, true)
+			e.onRead = func() {
+				if change == "live-disable" {
+					configAPI(t, s, "POST", repo.Repo, "review", `null`, 200)
+					return
+				}
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				st, err := s.store.load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot := st.Work[key(repo.Repo, p.Number)].Task.ConfigSnapshot
+				if change == "snapshot-policy" {
+					snapshot.Repository.Review.Context.ThreadHistory = false
+				} else {
+					snapshot.Source.Session = "discord:999"
+				}
+				if err := s.store.save(st); err != nil {
+					t.Fatal(err)
+				}
+			}
+			res := contextRequest(t, s, "sha="+p.Head.SHA)
+			if res.Code != 409 || strings.Contains(res.Body.String(), "original user requirement") {
+				t.Fatalf("returned context after binding changed: %d %s", res.Code, res.Body)
 			}
 		})
 	}
