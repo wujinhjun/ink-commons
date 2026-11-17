@@ -52,7 +52,9 @@ func (s *Service) validateReviewPreparation(w *Work) error {
 		}
 	}
 	route := *w.Reviewer.Route
-	if repo, ok := s.repo(w.Repo); ok {
+	if w.Task.ConfigSnapshot != nil {
+		route = allocationRoute(w.Task.ConfigSnapshot.Repository, route)
+	} else if repo, ok := s.repo(w.Repo); ok {
 		route = allocationRoute(repo, route)
 	}
 	if err := execution.ValidateDestination(s.providers, route, route.Session == ""); err != nil {

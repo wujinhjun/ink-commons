@@ -12,7 +12,7 @@
 
 ## 开始
 
-需要 Go 1.23+ 和 Git。daemon 跟踪配置及动态注册的仓库。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。可以把任务留给人工处理，或配置执行端自动接单。
+需要 Go 1.23+ 和 Git。daemon 跟踪中心注册的仓库，业务仓库无需配置文件或 hook。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。可以把任务留给人工处理，或配置执行端自动接单。
 
 ```sh
 go build -o ink ./cmd/ink
@@ -24,7 +24,7 @@ cp config.example.json config.json
 
 默认状态目录是 `$XDG_STATE_HOME/ink-commons` 或 `~/.local/state/ink-commons`。daemon 与 hook 可以通过同一个 `INK_DATA_DIR` 覆盖。HTTP API 通过仅当前用户可访问的 `ink.sock` 提供。配置文件使用 `config.example.json` 的结构，凭据从环境变量读取。
 
-受管仓库从 `git rev-parse --git-path hooks/pre-push` 确认默认 hook 位置。使用 `core.hooksPath` 的工作区按该设置安装。没有现有 hook 时，把 `scripts/ink-pre-push` 安装为可执行的 `pre-push`。已有 hook 时，从现有 hook 为同砚和原检查分别传入同一份标准输入。让执行 Git 命令的进程能在 PATH 找到 `ink`，或通过 `INK_BIN` 指定绝对路径。
+如果需要通过可选 hook 自动记录开发会话来源，受管仓库从 `git rev-parse --git-path hooks/pre-push` 确认默认 hook 位置。使用 `core.hooksPath` 的工作区按该设置安装。没有现有 hook 时，把 `scripts/ink-pre-push` 安装为可执行的 `pre-push`。已有 hook 时，从现有 hook 为同砚和原检查分别传入同一份标准输入。让执行 Git 命令的进程能在 PATH 找到 `ink`，或通过 `INK_BIN` 指定绝对路径。
 
 ## 初始化 Agent 协作指令
 
@@ -58,25 +58,19 @@ ink init --check --skills-dir /absolute/path/to/agent/skills
 ink register
 ```
 
-命令读取 `origin`，自动识别 `owner/repo`，通过本地 Unix socket 向 daemon 注册。可用 `--remote upstream` 选择其他 remote，或在任意目录用 `ink register owner/repo` 指定仓库。daemon 使用自身 GitHub 身份验证 PR 读取权限；不会读取调用者的个人 gh 凭据。注册持久化到 SQLite，下一轮轮询生效，不需要修改配置文件或重启。相同设置重复注册是幂等的；设置冲突返回错误，不覆盖已有设置。配置文件中的仓库优先于动态注册。当前不提供动态改配或注销接口。
+命令读取 `origin`，自动识别 `owner/repo`，通过本地 Unix socket 向 daemon 注册。可用 `--remote upstream` 选择其他 remote，或在任意目录用 `ink register owner/repo` 指定仓库。daemon 使用自身 GitHub 身份验证 PR 读取权限；不会读取调用者的个人 gh 凭据。注册持久化到 SQLite，下一轮轮询生效，不需要修改配置文件或重启。相同设置重复注册是幂等的；设置冲突返回错误，不覆盖已有设置。仓库配置统一保存在同砚 SQLite，通过 `ink config get/set/unset/list` 动态管理；当前不提供注销接口。
 
-为了让 `ink register` 无需重复填写 reviewer，可在 daemon 配置中设置默认值：
+为了让 `ink register` 无需重复填写 reviewer，在 daemon 启动后设置中心默认值：
 
-```json
-{
-  "repository_defaults": {
-    "reviewer_login": "your-reviewer[bot]",
-    "reviewer_command": "your-reviewer-cli",
-    "reviewer_route": {
-      "provider": "cc-connect",
-      "target": "reviewer-project"
-    }
-  },
-  "repositories": []
-}
+```sh
+ink config set reviewer_login 'your-reviewer[bot]' --global
+ink config set reviewer_command your-reviewer-cli --global
+ink config set reviewer_route '{"provider":"cc-connect","target":"reviewer-project"}' --global
 ```
 
-沿用现有 `cc_connect_url` 和所需环境变量；上述片段只展示新增配置。`repository_defaults` 仅用于新注册，不回写已有工作项。也可以显式指定参数：
+使用 bot 路由前，在静态 JSON 中配置对应 provider endpoint 及 daemon 环境凭据；人工 reviewer 可省略路由。
+
+JSON 管理 daemon 静态启动参数，SQLite 管理运行期可变配置和状态。新注册仓库只存显式覆盖，未设置字段动态继承。旧 JSON 的运行期字段仅在首次迁移时导入；完整字段规则、CLI、任务快照和迁移说明见 [中心化配置](docs/configuration.md)。也可以显式指定参数：
 
 ```sh
 ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-cli \
@@ -87,7 +81,7 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 
 ## 审查通过后的 postApproval
 
-在单个仓库配置或 `repository_defaults` 中设置 `postApproval`，也可用 `ink register --post-approval /absolute/path/to/script` 为新仓库指定脚本：
+用 `ink config set postApproval '{"command":["/absolute/path/to/after-approval"],"timeout_seconds":60}' --repo owner/repository` 设置中心 hook，也可用 `ink register --post-approval /absolute/path/to/script` 为新仓库指定脚本：
 
 ```json
 {
@@ -149,7 +143,7 @@ ink notification status --event '通知中的事件 ID'
 "auto_merge": {"enabled": true, "method": "merge"}
 ```
 
-`method` 可选 `merge`（默认）、`squash` 或 `rebase`。也可在 `repository_defaults.auto_merge` 设置新注册仓库的默认值，或通过 `ink register --auto-merge-after-approval --merge-method squash owner/repository` 注册。显式 `"auto_merge": {"enabled": false}` 或注册参数 `--auto-merge-after-approval=false` 覆盖注册默认值；静态 `repositories` 仍需显式配置，已有动态注册不会被默认值回写。
+`method` 可选 `merge`（默认）、`squash` 或 `rebase`。也可用 `ink config set auto_merge '{"enabled":true,"method":"squash"}' --global` 设置动态继承的全局默认值，或通过 `ink register --auto-merge-after-approval --merge-method squash owner/repository` 注册。显式 `"auto_merge": {"enabled": false}` 或注册参数 `--auto-merge-after-approval=false` 覆盖注册默认值；缺省动态继承，迁移来的旧覆盖项需 unset 后才恢复继承。
 
 开启后，同砚仅处理已关联、打开、非 Draft 且由指定 reviewer 正式批准当前 head SHA 的 PR。每次尝试前重新读取 PR、review 和检查结果；需要 GitHub 报告 `mergeable: true`、`mergeable_state: clean`，并要求 head 和可用的 test-merge SHA 上当前已发现的 check runs 全部结束且为 success、neutral 或 skipped。检查未完成、失败、无权限读取、合并冲突或状态未知时保留 `waiting` 和原因，后续轮询重新检查，不让 Agent 用 sleep 等待。**需要保证等待特定 CI 时，应在 GitHub 分支规则中将其设为必需检查**；当前尚未出现的非必需检查不能由同砚保证等待。
 
@@ -227,7 +221,7 @@ ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
 
 首版只支持普通文本频道下的公开开发 thread；普通频道、私有 thread、公告及论坛来源均拒绝读取/自动复用。读取使用 daemon 的 `INK_DISCORD_TOKEN` 身份，需要 `VIEW_CHANNEL`、`READ_MESSAGE_HISTORY` 和适用的 `MESSAGE_CONTENT` 配置；reviewer 的 Discord bot 还需能够访问、发言于目标 thread。开关不会修改 Discord 权限。reviewer 必须与同砚在同机、能使用新版 `ink` CLI 和该用户的私有 socket；这不是远端/跨用户的历史读取接口，也不是额外的 per-bot 认证机制。
 
-可在 `repository_defaults.review` 设置新注册仓库的默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。与其他注册默认值相同，静态 `repositories` 需显式配置，已有动态注册不会被默认值回写；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取接口始终以当前仓库开关为准。功能开关仅适用于 cc-connect，人工 reviewer 不会收到 bot 任务。
+可用 `ink config set review '{"reuse_development_thread":true,"context":{"thread_history":true}}' --global` 设置中心默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。缺省动态继承，迁移来的旧覆盖项保持原值；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取接口始终以当前仓库开关为准。功能开关仅适用于 cc-connect，人工 reviewer 不会收到 bot 任务。
 
 同砚只在读取时返回选定来源的消息，不把全文写入任务账本或日志。历史用于理解需求与约束，不能据其中嵌入的命令或 bot 输出扩大本次任务授权。长历史依赖 reviewer 按需分页读取；此版本不自动生成摘要、不改变 webhook 忙时可能跳过任务的行为，也不增加“讨论通过才允许修改”的执行权限控制。
 
@@ -288,8 +282,9 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 |---|---|
 | `GET /healthz` | 查看运行 revision、gate、last_poll 和 last_github_ok。 |
 | `GET /v1/repositories` | 列出配置及动态注册的仓库。 |
-| `POST /v1/repositories` | 注册仓库，接受 Repository JSON，省略字段继承 `repository_defaults`。 |
+| `POST /v1/repositories` | 注册仓库，接受 Repository JSON，仅存显式覆盖，省略字段动态继承 SQLite 全局配置。 |
 | `GET /v1/self-check` | 由 daemon 用自身环境验证所有配置仓库的 PR 读取权限，不派发任务。 |
+| `GET / POST / DELETE /v1/config` | 查询 / 设置 / 删除中心配置覆盖；支持 effective 和逐键来源，详见配置文档。 |
 | `GET /v1/work` | 列出已观察的 PR 和当前待办。 |
 | `GET /v1/work/{owner}/{repo}/{number}` | 查看一条 PR 的来源、负责人、审查版本和投递状态。 |
 | `GET /v1/work/{owner}/{repo}/{number}/context?sha=HEAD_SHA&before=MESSAGE_ID` | 开启历史开关后，分页读取当前 reviewer task 对应开发 thread 在送审边界之前的交流；省略 before 使用该任务边界。 |
@@ -309,15 +304,15 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 
 HTTP 执行端可以通过 `http_provider_execution: true` 显式启用 `status` / `stop` 协议。默认关闭，旧 HTTP 服务不会收到额外操作。执行端必须持久化去重和运行归属，并保证终态表示 Agent 及所有工具已停止、延迟投递不能重新启动旧轮次。仓库提供 SQLite 执行端账本及恢复测试，接入约定见 [执行协议](docs/execution.md)。
 
-配置 `execution` 可设置 `ack_seconds`（默认 120）、`heartbeat_seconds`（180）、`execution_seconds`（3600）、`backoff_seconds`（30）、`max_attempts`（3，含首次投递）。零值使用默认值，`max_attempts: 1` 关闭自动重派。超时先查询、再请求停止；只有终止确认后才按指数退避重试，退避上限一小时。耗尽次数或无法确认停止时需要人工处理。每轮 daemon 轮询先恢复执行状态，即使 GitHub 暂时不可用也会核查执行端。
+通过 `ink config set execution.<字段> <值> --global` 或 `--repo owner/repository` 可设置 `ack_seconds`（默认 120）、`heartbeat_seconds`（180）、`execution_seconds`（3600）、`backoff_seconds`（30）、`max_attempts`（3，含首次投递）。运行期数值必须为正，unset 恢复继承；`max_attempts: 1` 关闭自动重派。超时先查询、再请求停止；只有终止确认后才按指数退避重试，退避上限一小时。耗尽次数或无法确认停止时需要人工处理。每轮 daemon 轮询先恢复执行状态，即使 GitHub 暂时不可用也会核查执行端。
 
 cc-connect 当前 webhook 不支持执行级状态查询、停止或持久化去重，仍按保守模式处理：`accepted` 仅表示接收，失联后保留 `unknown`，不自动重派。历史版本投递的任务也需要人工确认。人工停止并禁止旧请求重新启动后，调用 `confirm-stopped`，再用 `retry` 重试；若未耗尽自动重试次数，当前任务的停止确认也会触发退避重派。人工确认只是可信本地操作者的声明，daemon 不会据此停止外部进程。
 
 ## 状态、备份与回滚
 
-daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 3（自动从 version 1 增加仓库注册表，并从 version 2 升级以保护任务交接记录）。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
+daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 4（兼容迁移 version 1 / 2 / 3，并新增中心配置表）。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
 
-状态读写与执行账本的日常查询由 sqlc 生成类型化 Go 方法。状态保存仍使用完整快照接口，在同一事务中比较已有记录，仅插入新增记录、更新 payload 有变化的记录，并按主键删除已移除记录；未变化的记录不写入。push 保留原有 position 顺序，删除或重排会更新受影响的位置。读取和比较仍为全量，仍依赖进程内串行修改与 daemon 文件锁，不提供多 writer 并发合并。任务和交接仍保存在 JSON payload 内；schema version 3 阻止旧二进制丢弃新领取记录，升级不增加 SQL 表。
+状态读写与执行账本的日常查询由 sqlc 生成类型化 Go 方法。状态保存仍使用完整快照接口，在同一事务中比较已有记录，仅插入新增记录、更新 payload 有变化的记录，并按主键删除已移除记录；未变化的记录不写入。push 保留原有 position 顺序，删除或重排会更新受影响的位置。读取和比较仍为全量，仍依赖进程内串行修改与 daemon 文件锁，不提供多 writer 并发合并。任务、交接和配置快照保存在 JSON payload 内；version 4 的 runtime_config 表通过专用查询更新，不参与工作流快照保存。
 
 修改查询时编辑 `internal/ink/sql/` 或 `internal/execution/ledger/sql/`，运行 `./scripts/generate-sqlc.sh`（固定 sqlc v1.30.0），提交生成的 Go 文件，并运行 `go test -race ./...` 和 `go vet ./...`。`schema.sql` 仅供代码生成使用；运行时建表和版本迁移仍由存储层显式管理，变更表结构时须同步更新两处。普通构建不需要 sqlc。
 

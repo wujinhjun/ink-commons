@@ -137,6 +137,16 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		fail(out, apiError{400, "a private random claim token of 32-256 bytes is required"})
 		return
 	}
+	if r.PathValue("action") == "claim" && w.Task == t {
+		if err := s.preparePendingConfig(w); err != nil {
+			fail(out, err)
+			return
+		}
+	}
+	if t.Handoff == nil {
+		fail(out, apiError{409, "task mode changed before dispatch"})
+		return
+	}
 	h := t.Handoff
 	hash := claimHash(input.Token)
 	first := false
@@ -162,6 +172,10 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		}
 		if w.Task != t || h.State != "pending" || w.Pull.State != "open" || w.Pull.Draft || !w.Linked || w.executionBlocked() {
 			fail(out, apiError{409, "task is not eligible; wait for the previous handoff or resolve legacy execution"})
+			return
+		}
+		if err := s.freezeTaskConfig(w); err != nil {
+			fail(out, err)
 			return
 		}
 		h.State, h.ClaimHash, h.ClaimedAt = "claimed", hash, time.Now()

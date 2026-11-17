@@ -156,6 +156,7 @@ func TestReviewFeaturesRefreshForNewSHAAndPersistBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo.Review = &ReviewFeatures{Context: ReviewContextFeatures{ThreadHistory: true}}
+	setRepositoryConfigForTest(t, s, repo)
 	p.Head.SHA = strings.Repeat("b", 40)
 	if err := s.observe(repo, p, nil); err != nil {
 		t.Fatal(err)
@@ -229,8 +230,13 @@ func TestReviewContextAttemptCannotFollowNewDeveloperSource(t *testing.T) {
 
 func TestReviewContextDisabledDuringReadReturnsNoMessages(t *testing.T) {
 	e := &historyExecutor{}
-	s, _, p := reviewContextFixture(t, true, e)
-	e.onRead = func() { s.mu.Lock(); s.config.Repositories[0].Review = &ReviewFeatures{}; s.mu.Unlock() }
+	s, repo, p := reviewContextFixture(t, true, e)
+	e.onRead = func() {
+		s.mu.Lock()
+		repo.Review = &ReviewFeatures{}
+		setRepositoryConfigForTest(t, s, repo)
+		s.mu.Unlock()
+	}
 	res := contextRequest(t, s, "sha="+p.Head.SHA)
 	if res.Code != 409 || strings.Contains(res.Body.String(), "original user requirement") {
 		t.Fatal("context returned after gate disabled")

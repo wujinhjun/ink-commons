@@ -37,7 +37,7 @@ func TestNotificationStatusUsesCurrentReadOnlyObservation(t *testing.T) {
 	e := &notificationExecutor{requireACK: true}
 	s, repo, p, r, _ := notificationFixture(t, e)
 	repo.AutoMerge = &AutoMergeConfig{Enabled: true, Method: "squash"}
-	s.config.Repositories[0] = repo
+	setRepositoryConfigForTest(t, s, repo)
 	if err := s.observe(repo, p, []Review{r}); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,8 @@ func TestNotificationStatusUsesCurrentReadOnlyObservation(t *testing.T) {
 			if tc.runState != "" {
 				w.AutoMerges = []AutoMergeRun{{SHA: p.Head.SHA, State: tc.runState, Method: "squash", Reason: "check result", MergeSHA: strings.Repeat("d", 40)}}
 			}
-			s.config.Repositories[0].AutoMerge = &AutoMergeConfig{Enabled: tc.enabled, Method: "squash"}
+			repo.AutoMerge = &AutoMergeConfig{Enabled: tc.enabled, Method: "squash"}
+			setRepositoryConfigForTest(t, s, repo)
 			if err := s.store.save(st); err != nil {
 				t.Fatal(err)
 			}
@@ -106,7 +107,9 @@ func TestNotificationStatusUsesCurrentReadOnlyObservation(t *testing.T) {
 	}
 	readNoticeStatus(t, s, "missing", 404)
 	readNoticeStatus(t, s, "", 400)
-	s.config.Repositories = nil
+	if _, err := s.store.db.Exec("DELETE FROM runtime_config WHERE scope = ?", repo.Repo); err != nil {
+		t.Fatal(err)
+	}
 	readNoticeStatus(t, s, event, 409)
 }
 
@@ -120,7 +123,7 @@ func TestMergedNoticeIsReservedWithResultAndRecoveredAfterRestart(t *testing.T) 
 			e := &notificationExecutor{requireACK: ack}
 			s, repo, p, r, path := notificationFixture(t, e)
 			repo.AutoMerge = &AutoMergeConfig{Enabled: true}
-			s.config.Repositories[0] = repo
+			setRepositoryConfigForTest(t, s, repo)
 			if err := s.observe(repo, p, []Review{r}); err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +210,7 @@ func TestApprovalStatusCanAdvanceWhileNoticeIsInFlight(t *testing.T) {
 	e := &notificationExecutor{requireACK: true}
 	s, repo, p, r, _ := notificationFixture(t, e)
 	repo.AutoMerge = &AutoMergeConfig{Enabled: true}
-	s.config.Repositories[0] = repo
+	setRepositoryConfigForTest(t, s, repo)
 	if err := s.observe(repo, p, []Review{r}); err != nil {
 		t.Fatal(err)
 	}

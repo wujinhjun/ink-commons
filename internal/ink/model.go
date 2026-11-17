@@ -73,18 +73,19 @@ type Attempt struct {
 }
 
 type Task struct {
-	Handoff   *TaskHandoff `json:"handoff,omitempty"`
-	CreatedAt time.Time    `json:"created_at,omitempty"`
-	ID        string       `json:"task_id,omitempty"`
-	Runs      []Attempt    `json:"runs,omitempty"`
-	RetryAt   time.Time    `json:"retry_at,omitempty"`
-	Role      string       `json:"role"`
-	SHA       string       `json:"sha"`
-	ReviewID  int64        `json:"review_id,omitempty"`
-	ReviewURL string       `json:"review_url,omitempty"`
-	Delivery  string       `json:"delivery"`
-	Error     string       `json:"error,omitempty"`
-	Attempts  int          `json:"attempts"`
+	ConfigSnapshot *TaskConfigSnapshot `json:"config_snapshot,omitempty"`
+	Handoff        *TaskHandoff        `json:"handoff,omitempty"`
+	CreatedAt      time.Time           `json:"created_at,omitempty"`
+	ID             string              `json:"task_id,omitempty"`
+	Runs           []Attempt           `json:"runs,omitempty"`
+	RetryAt        time.Time           `json:"retry_at,omitempty"`
+	Role           string              `json:"role"`
+	SHA            string              `json:"sha"`
+	ReviewID       int64               `json:"review_id,omitempty"`
+	ReviewURL      string              `json:"review_url,omitempty"`
+	Delivery       string              `json:"delivery"`
+	Error          string              `json:"error,omitempty"`
+	Attempts       int                 `json:"attempts"`
 }
 
 type Alert struct {
@@ -100,24 +101,28 @@ type Workflow struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Work struct {
-	TaskMode      string            `json:"task_mode,omitempty"`
-	Version       uint64            `json:"version,omitempty"`
-	Review        *ReviewFeatures   `json:"review,omitempty"`
-	AutoMerges    []AutoMergeRun    `json:"auto_merges,omitempty"`
-	Notifications []NotificationRun `json:"notifications,omitempty"`
-	Approvals     []ApprovalRun     `json:"postApproval,omitempty"`
-	Workflow      Workflow          `json:"workflow"`
-	Alerts        []Alert           `json:"alerts,omitempty"`
-	Repo          string            `json:"repo"`
-	Pull          Pull              `json:"pull_request"`
-	Origin        *execution.Route  `json:"origin,omitempty"`
-	Linked        bool              `json:"linked"`
-	Developer     Assignee          `json:"developer"`
-	Reviewer      Assignee          `json:"reviewer"`
-	Phase         string            `json:"phase"`
-	Task          *Task             `json:"task,omitempty"`
-	History       []*Task           `json:"execution_history,omitempty"`
-	Reviews       []Review          `json:"reviews,omitempty"`
+	InheritsConfig    *bool               `json:"inherits_config,omitempty"`
+	ReviewerOverride  *Assignee           `json:"reviewer_override,omitempty"`
+	DeveloperOverride *Assignee           `json:"developer_override,omitempty"`
+	RoundConfig       *TaskConfigSnapshot `json:"round_config,omitempty"`
+	TaskMode          string              `json:"task_mode,omitempty"`
+	Version           uint64              `json:"version,omitempty"`
+	Review            *ReviewFeatures     `json:"review,omitempty"`
+	AutoMerges        []AutoMergeRun      `json:"auto_merges,omitempty"`
+	Notifications     []NotificationRun   `json:"notifications,omitempty"`
+	Approvals         []ApprovalRun       `json:"postApproval,omitempty"`
+	Workflow          Workflow            `json:"workflow"`
+	Alerts            []Alert             `json:"alerts,omitempty"`
+	Repo              string              `json:"repo"`
+	Pull              Pull                `json:"pull_request"`
+	Origin            *execution.Route    `json:"origin,omitempty"`
+	Linked            bool                `json:"linked"`
+	Developer         Assignee            `json:"developer"`
+	Reviewer          Assignee            `json:"reviewer"`
+	Phase             string              `json:"phase"`
+	Task              *Task               `json:"task,omitempty"`
+	History           []*Task             `json:"execution_history,omitempty"`
+	Reviews           []Review            `json:"reviews,omitempty"`
 }
 
 func (w *Work) derive() {

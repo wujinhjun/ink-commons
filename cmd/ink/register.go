@@ -21,7 +21,7 @@ func register(args []string) error {
 	flags := flag.NewFlagSet("register", flag.ContinueOnError)
 	taskMode := flags.String("task-mode", "", "legacy or cooperative task handoff")
 	remote := flags.String("remote", "origin", "Git remote to detect when OWNER/REPO is omitted")
-	login := flags.String("github-login", "", "reviewer login (default: daemon repository_defaults)")
+	login := flags.String("github-login", "", "reviewer login (default: central global configuration)")
 	command := flags.String("github-command", "", "reviewer GitHub CLI/App command")
 	provider := flags.String("provider", "cc-connect", "review execution provider")
 	target := flags.String("target", "", "review execution target")
@@ -81,7 +81,13 @@ func register(args []string) error {
 			return err
 		}
 	}
-	payload, err := json.Marshal(repo)
+	var explicit map[string]json.RawMessage
+	encoded, _ := json.Marshal(repo)
+	_ = json.Unmarshal(encoded, &explicit)
+	if *login == "" {
+		delete(explicit, "reviewer_login")
+	}
+	payload, err := json.Marshal(explicit)
 	if err != nil {
 		return err
 	}

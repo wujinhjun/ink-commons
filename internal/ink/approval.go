@@ -45,6 +45,8 @@ type ApprovalEvent struct {
 }
 
 type ApprovalRun struct {
+	Hook           *ApprovalHook `json:"hook,omitempty"`
+	ConfigRevision int64         `json:"config_revision,omitempty"`
 	ApprovalEvent
 	State      string    `json:"state"`
 	StartedAt  time.Time `json:"started_at"`
@@ -53,10 +55,20 @@ type ApprovalRun struct {
 }
 
 func (s *Service) postApproval(ctx context.Context, repo Repository, number int) error {
-	if repo.PostApproval == nil || ctx.Err() != nil {
+	if ctx.Err() != nil {
 		return nil
 	}
 	s.mu.Lock()
+	effective, err := s.store.effectiveConfig(repo.Repo)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	repo = effective.Repository
+	if repo.PostApproval == nil {
+		s.mu.Unlock()
+		return nil
+	}
 	st, err := s.store.load()
 	if err != nil {
 		s.mu.Unlock()
@@ -87,7 +99,7 @@ func (s *Service) postApproval(ctx context.Context, repo Repository, number int)
 	event := ApprovalEvent{ID: fmt.Sprintf("%s:%s", key(repo.Repo, number), sha), Event: "postApproval", Repository: repo.Repo, PullNumber: number, PullURL: work.Pull.URL, SHA: sha, ReviewID: review.ID, ReviewURL: review.URL, Reviewer: review.User.Login}
 	// Reserve durably BEFORE exec. Interrupted or failed hooks are not automatically
 	// replayed: a hook may already have caused an external side effect.
-	work.Approvals = append(work.Approvals, ApprovalRun{ApprovalEvent: event, State: "unknown", StartedAt: time.Now()})
+	work.Approvals = append(work.Approvals, ApprovalRun{ApprovalEvent: event, Hook: repo.PostApproval, ConfigRevision: effective.Revision, State: "unknown", StartedAt: time.Now()})
 	err = s.store.save(st)
 	s.mu.Unlock()
 	if err != nil {

@@ -48,8 +48,68 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 		store.db.Close()
 		return nil, err
 	}
+	if err := store.migrateConfig(config, st); err != nil {
+		store.db.Close()
+		return nil, err
+	}
+	records, err := store.configRecords()
+	if err != nil {
+		store.db.Close()
+		return nil, err
+	}
+	for _, record := range records {
+		if record.Scope == legacyConfigScope {
+			continue
+		}
+		if _, err := effectiveFromRecords(records, record.Scope); err != nil {
+			store.db.Close()
+			return nil, err
+		}
+	}
 	changed := false
 	for _, w := range st.Work {
+		if w.InheritsConfig == nil {
+			managed := false
+			w.InheritsConfig = &managed
+			w.ReviewerOverride = cloneAssignee(w.Reviewer)
+			w.DeveloperOverride = cloneAssignee(w.Developer)
+		}
+		for _, t := range w.executionTasks() {
+			if t.ConfigSnapshot == nil && taskStarted(t) {
+				effective, err := store.effectiveConfig(w.Repo)
+				if err != nil {
+					// Historical state can contain work whose repository was removed.
+					// Preserve it for recovery without registering it again.
+					effective, err = resolveConfig("", nil, nil, 0)
+					if err != nil {
+						store.db.Close()
+						return nil, err
+					}
+					effective.Repository.Repo = w.Repo
+					effective.Execution = config.Reliability.defaults()
+				}
+				effective.Repository.ReviewerLogin = w.Reviewer.GitHubLogin
+				effective.Repository.ReviewerCommand = w.Reviewer.GitHubCommand
+				effective.Repository.ReviewerRoute = cloneAssignee(w.Reviewer).Route
+				effective.Repository.HumanDeveloper = w.Developer.GitHubLogin
+				effective.Repository.Review = w.Review
+				effective.Repository.TaskMode = normalTaskMode(w.TaskMode)
+				t.ConfigSnapshot = &TaskConfigSnapshot{EffectiveConfig: effective, Reviewer: *cloneAssignee(w.Reviewer), Developer: *cloneAssignee(w.Developer), Legacy: true, SHA: t.SHA, Source: cloneRoute(reviewSource(w))}
+				if t.Handoff != nil {
+					if t.Role == "reviewer" {
+						t.ConfigSnapshot.Reviewer = *cloneAssignee(t.Handoff.Assignee)
+					} else {
+						t.ConfigSnapshot.Developer = *cloneAssignee(t.Handoff.Assignee)
+					}
+				}
+				if len(t.Runs) > 0 {
+					t.ConfigSnapshot.Source = cloneRoute(t.Runs[len(t.Runs)-1].Request.Source)
+				}
+				if t.Role == "reviewer" && t.SHA == w.Pull.Head.SHA {
+					w.RoundConfig = copyTaskSnapshot(t.ConfigSnapshot)
+				}
+			}
+		}
 		if migrateExecution(w) {
 			changed = true
 		}
@@ -69,41 +129,18 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 
 func (s *Service) Close() error { return s.store.db.Close() }
 
-// Caller holds s.mu. Static configuration takes precedence over runtime registration.
+// Caller holds s.mu. All repository policy is resolved from central SQLite.
 func (s *Service) repo(name string) (Repository, bool) {
-	for _, r := range s.config.Repositories {
-		if r.Repo == name {
-			return r, true
-		}
-	}
-	st, err := s.store.load()
-	if err == nil {
-		for _, r := range st.Repositories {
-			if r.Repo == name {
-				return r, true
-			}
-		}
-	}
-	return Repository{}, false
+	cfg, err := s.store.effectiveConfig(name)
+	return cfg.Repository, err == nil
 }
 
 func (s *Service) repositories() []Repository {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	repos := append([]Repository{}, s.config.Repositories...)
-	st, err := s.store.load()
+	repos, err := s.runtimeRepositories()
 	if err != nil {
-		log.Printf("load repository registry: %v", err)
-		return repos
-	}
-	seen := map[string]bool{}
-	for _, r := range repos {
-		seen[r.Repo] = true
-	}
-	for _, r := range st.Repositories {
-		if !seen[r.Repo] {
-			repos = append(repos, r)
-		}
+		log.Printf("load repository configuration: %v", err)
 	}
 	return repos
 }
@@ -240,7 +277,8 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	id := key(repo.Repo, pull.Number)
 	work := st.Work[id]
 	if work == nil {
-		work = &Work{Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
+		managed := true
+		work = &Work{InheritsConfig: &managed, Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
 		if repo.ReviewerRoute != nil {
 			route := *repo.ReviewerRoute
 			// Discord placement belongs to this PR's development conversation.
@@ -252,9 +290,15 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		}
 		st.Work[id] = work
 	}
-	work.TaskMode = repo.TaskMode
 	work.Version++
 	work.Pull = pull
+	// Re-read under the state lock; the poll list may predate a config update.
+	latest, err := s.store.effectiveConfig(repo.Repo)
+	if err != nil {
+		return err
+	}
+	repo = latest.Repository
+	s.refreshPendingConfig(work, repo)
 	if pull.State == "open" && !work.Linked {
 		if origin := matchOrigin(st.Pushes, pull); origin != nil {
 			work.Origin, work.Linked, work.Developer.Route = origin, true, origin
@@ -264,13 +308,9 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		work.Reviews = mergeReviews(work.Reviews, reviews)
 	}
 	work.derive()
-	// Refresh features only before a new task has made an external attempt.
-	// Existing reviewer sessions retain their saved placement.
-	if work.Task == nil || len(work.Task.Runs) == 0 {
-		work.Review = nil
-		if repo.Review != nil {
-			features := *repo.Review
-			work.Review = &features
+	if work.Task != nil && work.Task.Delivery == "manual" && !taskStarted(work.Task) {
+		if err := s.freezeTaskConfig(work); err != nil {
+			return err
 		}
 	}
 	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
@@ -316,6 +356,11 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 		return nil, err
 	}
 	work := st.Work[id]
+	if work != nil {
+		if err := s.preparePendingConfig(work); err != nil {
+			return nil, err
+		}
+	}
 	if work == nil || work.Task == nil || work.Task.Handoff != nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
 		return nil, nil
 	}
@@ -325,6 +370,10 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 		work.Task.Error = "review preparation: " + err.Error()
 		work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 		return nil, s.store.save(st)
+	}
+
+	if err := s.freezeTaskConfig(work); err != nil {
+		return nil, err
 	}
 
 	// Persist the attempt before making external requests. If the daemon restarts
@@ -399,6 +448,9 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 		s.mu.Unlock()
 	}()
 	task := work.Task
+	if task.ConfigSnapshot != nil {
+		repo = task.ConfigSnapshot.Repository
+	}
 	route := work.Developer.Route
 	if task.Role == "reviewer" {
 		route = work.Reviewer.Route

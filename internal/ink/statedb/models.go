@@ -14,6 +14,12 @@ type Repository struct {
 	Payload string
 }
 
+type RuntimeConfig struct {
+	Scope    string
+	Payload  string
+	Revision int64
+}
+
 type WorkItem struct {
 	ID      string
 	Payload string
