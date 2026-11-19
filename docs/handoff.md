@@ -125,7 +125,7 @@ ink task retry --task TASK_UUID
 
 ## 阻塞通知
 
-可为仓库启用同砚的阻塞通知。空对象将通知发到 PR 关联的 Discord 开发会话，也可以指定 Discord 频道或线程 ID。
+可为仓库启用同砚的阻塞通知。空对象将通知发到任务领取时记录的 Discord 开发会话。之后改派开发者不会改变这个默认目标。也可以指定 Discord 频道或线程 ID。
 
 ~~~sh
 ink config set task_blocked '{}' --repo owner/repository

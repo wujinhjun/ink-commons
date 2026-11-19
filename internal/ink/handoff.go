@@ -242,7 +242,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		h.Verification = "waiting for GitHub verification"
 		if h.State == "blocked" {
 			h.Verification = result.Reason
-			s.reserveBlockedNotice(w, h)
+			s.reserveBlockedNotice(w, t)
 		}
 		first = true
 	default:

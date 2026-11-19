@@ -32,12 +32,15 @@ type BlockedNotice struct {
 
 // The notice shares the transaction with the blocked handoff. Historical
 // blocked tasks are not backfilled when an operator enables the hook.
-func (s *Service) reserveBlockedNotice(w *Work, h *TaskHandoff) {
+func (s *Service) reserveBlockedNotice(w *Work, task *Task) {
 	repo, ok := s.repo(w.Repo)
 	if !ok || repo.TaskBlocked == nil {
 		return
 	}
 	source := reviewSource(w)
+	if task.ConfigSnapshot != nil {
+		source = task.ConfigSnapshot.Source
+	}
 	n := &BlockedNotice{}
 	switch {
 	case repo.TaskBlocked.DiscordChannelID != "":
@@ -47,7 +50,7 @@ func (s *Service) reserveBlockedNotice(w *Work, h *TaskHandoff) {
 	default:
 		n.Error = "no linked Discord development conversation; configure task_blocked.discord_channel_id"
 	}
-	h.BlockedNotice = n
+	task.Handoff.BlockedNotice = n
 }
 
 func (s *Service) reconcileBlockedNotices(ctx context.Context) error {

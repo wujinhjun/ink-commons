@@ -1,8 +1,11 @@
 package ink
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -92,8 +95,57 @@ func TestBlockedNoticeOptInAndDefaultDestination(t *testing.T) {
 	}
 	w := f.work(t)
 	w.Developer.Route = &execution.Route{Provider: "cc-connect", Target: "developer", Session: "discord:456"}
-	f.s.reserveBlockedNotice(w, w.Task.Handoff)
+	w.Task.ConfigSnapshot = nil // Historical task without a frozen source.
+	f.s.reserveBlockedNotice(w, w.Task)
 	if n := w.Task.Handoff.BlockedNotice; n == nil || n.Session != "discord:456" {
 		t.Fatalf("unexpected default destination: %+v", n)
+	}
+}
+
+func TestBlockedNoticeKeepsClaimedTaskDestinationAfterDeveloperReassignment(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override string
+		want     string
+	}{
+		{"original development conversation", "", "discord:123"},
+		{"explicit channel override", "555", "discord:555"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHandoffFixture(t)
+			f.s.providers["cc-connect"] = &blockedNoticeExecutor{}
+			if _, err := f.s.changeConfig(f.repo.Repo, "task_blocked", jsonValue(TaskBlockedHook{DiscordChannelID: tc.override}), false); err != nil {
+				t.Fatal(err)
+			}
+			assign := func(session string) {
+				t.Helper()
+				route := &execution.Route{Provider: "cc-connect", Target: "developer", Session: session}
+				body := jsonValue(workChange{Role: "developer", GitHubLogin: "developer", Route: route})
+				req := httptest.NewRequest(http.MethodPost, "/v1/work/acme/project/42/assign", bytes.NewReader(body))
+				out := httptest.NewRecorder()
+				f.s.Handler().ServeHTTP(out, req)
+				if out.Code != http.StatusOK {
+					t.Fatalf("assign got %d: %s", out.Code, out.Body)
+				}
+			}
+
+			assign("discord:123")
+			task := f.work(t).Task
+			f.claim(t, task, claimA, 200)
+			assign("discord:999")
+			w := f.work(t)
+			if w.Developer.Route.Session != "discord:999" || w.Task.ID != task.ID ||
+				w.Task.ConfigSnapshot == nil || w.Task.ConfigSnapshot.Source == nil ||
+				w.Task.ConfigSnapshot.Source.Session != "discord:123" {
+				t.Fatal("expected a reassigned developer and an unchanged reviewer task source")
+			}
+			f.submit(t, task, claimA, HandoffSubmission{
+				RequestID: "blocked", Handoff: true, Outcome: "blocked", Reason: "GitHub unavailable",
+			}, 200)
+			n := f.work(t).Task.Handoff.BlockedNotice
+			if n == nil || n.Session != tc.want {
+				t.Fatalf("expected notice to %s, got %+v", tc.want, n)
+			}
+		})
 	}
 }
