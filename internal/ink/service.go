@@ -187,6 +187,9 @@ func key(repo string, number int) string { return fmt.Sprintf("%s#%d", repo, num
 
 func (s *Service) Poll(ctx context.Context) {
 	defer func() { s.lastPoll.Store(time.Now().Unix()) }()
+	if err := s.reconcileBlockedNotices(ctx); err != nil {
+		log.Printf("blocked task notifications: %v", err)
+	}
 	if err := s.reconcileHandoffs(ctx); err != nil {
 		log.Printf("handoff verification: %v", err)
 	}

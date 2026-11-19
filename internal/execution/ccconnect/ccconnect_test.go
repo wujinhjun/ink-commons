@@ -420,3 +420,49 @@ func TestMergeCompletionNotificationCarriesOutcomeAndReadOnlyStatusCommand(t *te
 		t.Fatal("unsupported event was delivered")
 	}
 }
+
+func TestTaskBlockedNotificationPostsDirectlyToDiscord(t *testing.T) {
+	var nonce string
+	calls := 0
+	client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Host != "discord.com" ||
+			r.URL.Path != "/api/v10/channels/123/messages" || r.Header.Get("Authorization") != "Bot bot-test" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
+		}
+		var body struct {
+			Content  string `json:"content"`
+			Nonce    string `json:"nonce"`
+			Enforce  bool   `json:"enforce_nonce"`
+			Mentions struct {
+				Parse []string `json:"parse"`
+			} `json:"allowed_mentions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"https://github.com/acme/project/pull/42", "GitHub unavailable", "ink task retry --task task-123"} {
+			if !strings.Contains(body.Content, want) {
+				t.Fatalf("missing %q in %q", want, body.Content)
+			}
+		}
+		if body.Mentions.Parse == nil || len(body.Mentions.Parse) != 0 || !body.Enforce || len(body.Nonce) != 24 {
+			t.Fatalf("unexpected delivery options: %+v", body)
+		}
+		if calls > 1 && body.Nonce != nonce {
+			t.Fatal("nonce changed between retries")
+		}
+		nonce = body.Nonce
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{\"id\":\"456\"}"))}, nil
+	})}
+	e, err := New(client, "", "", "bot-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := execution.Delivery{TaskID: "task-123", Role: "reviewer", URL: "https://github.com/acme/project/pull/42"}
+	for range 2 {
+		if err := e.NotifyTaskBlocked(context.Background(), "discord:123:789", task, "GitHub unavailable @everyone"); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

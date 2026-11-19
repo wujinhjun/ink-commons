@@ -2,6 +2,8 @@ package ccconnect
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -276,4 +278,36 @@ func (e *Executor) WakeTask(ctx context.Context, route execution.Route, task exe
 	}
 	prompt := fmt.Sprintf("Ink Commons task wake (not an execution authorization).\nTask: %s\nPR: %s\nFirst run: ink task claim --task %s\nUse the installed Ink Commons executable if ink is not on PATH. The command binds to CC_PROJECT and CC_SESSION_KEY. Do not edit, run checks, submit reviews or push before a successful claim with first=true. On first=false or conflict, do not execute again; report the status if needed. Read the returned delivery for the exact SHA, role, GitHub identity/command, review URL and context cutoff. Reviewer: inspect that exact SHA, verify the configured identity, and submit a formal APPROVED or CHANGES_REQUESTED review. Developer: address the specified review, check and push a new SHA. Read enabled history with ink context before reviewing. After all task tools and writes have finished, explicitly hand off using ink task submit --task %s --handoff --request-id <stable-id> with --new-sha <pushed-sha> for a developer, or --review-id <id> --outcome APPROVED|CHANGES_REQUESTED for a reviewer. If blocked, submit --outcome blocked --reason <reason> --handoff. After handoff, perform no more work for this task. Check ink task status --task %s; if verification is pending, Ink retries it. Then report the result and end this turn. Do not sleep, poll in a loop, start background waiters, or immediately claim successor tasks to wait for review or CI. Retry a lost submit response with the same request ID and evidence; never repeat code work solely because the PR still says changes_requested.\n", task.TaskID, task.URL, task.TaskID, task.TaskID, task.TaskID)
 	return e.sendPrompt(ctx, route, "ink-commons:task-wake", prompt)
+}
+
+func (e *Executor) NotifyTaskBlocked(ctx context.Context, session string, task execution.Delivery, reason string) error {
+	channel, err := discordChannel(session)
+	if err != nil {
+		return err
+	}
+	if e.discordToken == "" {
+		return fmt.Errorf("configure INK_DISCORD_TOKEN for task_blocked notifications")
+	}
+	// Keep Discord's message limit and suppress mentions in the reported reason.
+	reasonRunes := []rune(strings.TrimSpace(reason))
+	if len(reasonRunes) > 650 {
+		reason = string(reasonRunes[:650]) + "…"
+	}
+	digest := sha256.Sum256([]byte("task.blocked:" + task.TaskID))
+	body := map[string]any{
+		"content":          fmt.Sprintf("同砚任务已阻塞（%s）\nPR %s\n提交 %s\n任务 %s\n原因 %s\n修复后可运行 \x60ink task retry --task %s\x60", task.Role, task.URL, task.SHA, task.TaskID, reason, task.TaskID),
+		"allowed_mentions": map[string]any{"parse": []string{}},
+		"nonce":            hex.EncodeToString(digest[:12]),
+		"enforce_nonce":    true,
+	}
+	var message struct {
+		ID string `json:"id"`
+	}
+	if err := execution.PostJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+channel+"/messages", "Bot "+e.discordToken, body, &message); err != nil {
+		return err
+	}
+	if !snowflake(message.ID) {
+		return fmt.Errorf("Discord returned an invalid message ID")
+	}
+	return nil
 }

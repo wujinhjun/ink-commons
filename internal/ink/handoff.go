@@ -15,15 +15,16 @@ import (
 // TaskHandoff is a cooperative business handoff, never an executor termination
 // receipt. It is opt-in for newly created tasks; legacy attempts remain intact.
 type TaskHandoff struct {
-	State        string             `json:"state"`
-	Assignee     Assignee           `json:"assignee"`
-	ClaimHash    string             `json:"claim_hash,omitempty"`
-	ClaimedAt    time.Time          `json:"claimed_at,omitempty"`
-	SubmittedAt  time.Time          `json:"submitted_at,omitempty"`
-	FinishedAt   time.Time          `json:"finished_at,omitempty"`
-	Submission   *HandoffSubmission `json:"submission,omitempty"`
-	Verification string             `json:"verification,omitempty"`
-	Wake         TaskWake           `json:"wake"`
+	BlockedNotice *BlockedNotice     `json:"blocked_notice,omitempty"`
+	State         string             `json:"state"`
+	Assignee      Assignee           `json:"assignee"`
+	ClaimHash     string             `json:"claim_hash,omitempty"`
+	ClaimedAt     time.Time          `json:"claimed_at,omitempty"`
+	SubmittedAt   time.Time          `json:"submitted_at,omitempty"`
+	FinishedAt    time.Time          `json:"finished_at,omitempty"`
+	Submission    *HandoffSubmission `json:"submission,omitempty"`
+	Verification  string             `json:"verification,omitempty"`
+	Wake          TaskWake           `json:"wake"`
 }
 
 type TaskWake struct {
@@ -241,6 +242,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		h.Verification = "waiting for GitHub verification"
 		if h.State == "blocked" {
 			h.Verification = result.Reason
+			s.reserveBlockedNotice(w, t)
 		}
 		first = true
 	default:

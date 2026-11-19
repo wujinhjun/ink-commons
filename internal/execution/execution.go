@@ -215,3 +215,8 @@ type NotificationACKProvider interface {
 type TaskWaker interface {
 	WakeTask(context.Context, Route, Delivery) error
 }
+
+// TaskBlockedNotifier delivers an informational alert without waking an agent.
+type TaskBlockedNotifier interface {
+	NotifyTaskBlocked(ctx context.Context, session string, task Delivery, reason string) error
+}

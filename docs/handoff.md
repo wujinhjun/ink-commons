@@ -122,3 +122,17 @@ ink task retry --task TASK_UUID
 - `POST /v1/tasks/{task_id}/retry`：`{token}`，仅用于明确 blocked 并交回的任务。
 
 `token` 是调用方生成的 32-256 字节私有随机字符串；CLI 使用 32 字节随机数的十六进制表示。GET 不返回 token，数据库/API 只包含 claim 哈希。全局旧 `work/.../retry` 不用于 cooperative 任务。
+
+## 阻塞通知
+
+可为仓库启用同砚的阻塞通知。空对象将通知发到任务领取时记录的 Discord 开发会话。之后改派开发者不会改变这个默认目标。也可以指定 Discord 频道或线程 ID。
+
+~~~sh
+ink config set task_blocked '{}' --repo owner/repository
+ink config set task_blocked '{"discord_channel_id":"123456789012345678"}' --repo owner/repository
+ink config set task_blocked null --repo owner/repository
+~~~
+
+守护进程通过已有的 INK_DISCORD_TOKEN 直接发消息，Bot 需要在目标会话拥有发送权限。消息包含 PR、提交 SHA、任务 ID、阻塞原因和手动重试命令。通知不唤醒 Agent，也不重派任务。
+
+同砚在首次接受 blocked 交接时持久化通知和目标。重复提交不会创建新通知，启用配置也不会回填历史阻塞。投递失败由 daemon 在后续轮询退避重试，任务状态中的 blocked_notice 显示尝试次数、下次重试时间或发送结果。Discord 通过任务级固定 nonce 在其去重窗口内合并请求结果不明时的重复发送。如果响应丢失且重试超出 Discord 的去重窗口，仍可能收到重复消息。
