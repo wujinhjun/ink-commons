@@ -69,6 +69,9 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		cfg.PollSeconds = 60
 	}
 	cfg.RepositoryDefaults = file.RepositoryDefaults
+	if err := cfg.RepositoryDefaults.TaskBlocked.Validate(); err != nil {
+		return cfg, nil, err
+	}
 	if err := cfg.RepositoryDefaults.AutoMerge.Validate(); err != nil {
 		return cfg, nil, err
 	}
@@ -119,6 +122,9 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	seen := make(map[string]bool)
 	for _, entry := range file.Repositories {
 		repo := entry.Repository
+		if err := repo.TaskBlocked.Validate(); err != nil {
+			return cfg, nil, err
+		}
 		if err := repo.AutoMerge.Validate(); err != nil {
 			return cfg, nil, err
 		}

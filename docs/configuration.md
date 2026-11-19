@@ -21,6 +21,7 @@ Ink Commons 集中管理所有仓库的配置和状态。业务仓库不需要 `
 | `review` | ReviewFeatures / null | 全局、仓库；整体替换；null 关闭 |
 | `auto_merge` | AutoMergeConfig / null | 全局、仓库；整体替换；null 关闭 |
 | `postApproval` | ApprovalHook / null | 全局、仓库；整体替换；null 禁用 |
+| `task_blocked` | TaskBlockedHook / null | 全局、仓库；整体替换；默认关闭 |
 | `execution.ack_seconds` | int / 120 | 全局、仓库，按字段覆盖 |
 | `execution.heartbeat_seconds` | int / 180 | 同上 |
 | `execution.execution_seconds` | int / 3600 | 同上 |

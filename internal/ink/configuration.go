@@ -73,6 +73,7 @@ var configFields = func() map[string]configField {
 		}},
 		"reviewer_route": {jsonValue(nil), true, checked[execution.Route]},
 		"postApproval":   {jsonValue(nil), true, checked[ApprovalHook]},
+		"task_blocked":   {jsonValue(nil), true, checked[TaskBlockedHook]},
 		"review":         {jsonValue(nil), true, checked[ReviewFeatures]},
 		"auto_merge":     {jsonValue(nil), true, checked[AutoMergeConfig]},
 	}
@@ -147,6 +148,9 @@ func resolveConfig(name string, global GlobalConfig, override RepositoryOverride
 	if err := effective.Execution.Validate(); err != nil {
 		return effective, err
 	}
+	if err := effective.Repository.TaskBlocked.Validate(); err != nil {
+		return effective, err
+	}
 	if err := effective.Repository.PostApproval.Validate(); err != nil {
 		return effective, err
 	}
@@ -169,7 +173,7 @@ func legacyRepositoryValues(repo Repository) ConfigValues {
 		"reviewer_login": jsonValue(repo.ReviewerLogin), "reviewer_command": jsonValue(repo.ReviewerCommand),
 		"human_developer": jsonValue(repo.HumanDeveloper), "reviewer_route": jsonValue(repo.ReviewerRoute),
 		"postApproval": jsonValue(repo.PostApproval), "review": jsonValue(repo.Review), "auto_merge": jsonValue(repo.AutoMerge),
-		"task_mode": jsonValue(normalTaskMode(repo.TaskMode)),
+		"task_mode": jsonValue(normalTaskMode(repo.TaskMode)), "task_blocked": jsonValue(repo.TaskBlocked),
 	}
 }
 
