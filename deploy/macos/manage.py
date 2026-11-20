@@ -123,13 +123,32 @@ def cc_process_pids():
     return sorted(set(pids))
 
 
+def stage_artifact(artifact, target, revision):
+    checksum = (artifact / 'SHA256SUMS').read_text()
+    expected = re.fullmatch(r'([0-9a-f]{64})  ink\n?', checksum)
+    if expected is None:
+        raise DeploymentError('invalid ink artifact checksum file')
+    shutil.copyfile(artifact / 'ink', target)
+    with target.open('rb') as binary:
+        actual = hashlib.file_digest(binary, 'sha256').hexdigest()
+    if actual != expected[1]:
+        raise DeploymentError('ink artifact checksum mismatch')
+    target.chmod(0o700)
+    try:
+        result = run([target, 'version'], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        raise DeploymentError('ink artifact version could not be read on this Mac') from None
+    if result.stdout.strip() != revision.encode():
+        raise DeploymentError('ink artifact revision does not match --revision')
+
+
 def stage(args):
     if os.geteuid() == 0:
         raise DeploymentError('stage must run as the service user, without sudo')
     if sys.version_info < (3, 11, 8):
         raise DeploymentError('Python 3.11.8+ required')
     repo = Path(__file__).resolve().parents[2]
-    revision = output(['git', '-C', repo, 'rev-parse', '--verify', args.revision + '^{commit}'])
+    revision = output(['git', '-C', repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{commit}'])
     home = Path.home().resolve()
     extra_env = parse_env(args.env)
     root = home / '.local/lib/ink-commons/releases'
@@ -149,16 +168,25 @@ def stage(args):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(dir=root) as temp:
         temp = Path(temp)
-        source = temp / 'source'
-        source.mkdir()
-        archive = run(['git', '-C', repo, 'archive', revision], stdout=subprocess.PIPE).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
-            bundle.extractall(source, filter='data')
         candidate = temp / 'release'
         candidate.mkdir(mode=0o700)
-        run(['go', 'build', '-trimpath', '-ldflags',
-             '-X ink-commons/internal/ink.BuildRevision=' + revision,
-             '-o', candidate / 'ink', './cmd/ink'], cwd=source)
+        if args.artifact_dir:
+            stage_artifact(Path(args.artifact_dir).expanduser(), candidate / 'ink', revision)
+            for name in ('runtime.py', 'manage.py'):
+                script = run(['git', '-C', repo, 'show', revision + ':deploy/macos/' + name],
+                             stdout=subprocess.PIPE).stdout
+                (candidate / name).write_bytes(script)
+        else:
+            source = temp / 'source'
+            source.mkdir()
+            archive = run(['git', '-C', repo, 'archive', revision], stdout=subprocess.PIPE).stdout
+            with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+                bundle.extractall(source, filter='data')
+            run(['go', 'build', '-trimpath', '-ldflags',
+                 '-X ink-commons/internal/ink.BuildRevision=' + revision,
+                 '-o', candidate / 'ink', './cmd/ink'], cwd=source)
+            for name in ('runtime.py', 'manage.py'):
+                shutil.copy2(source / 'deploy/macos' / name, candidate / name)
         cc_source = Path(args.cc_connect_binary).expanduser().resolve() if args.cc_connect_binary else existing_cc_binary(home)
         if not cc_source.is_file():
             raise DeploymentError('cc-connect source binary is missing')
@@ -166,8 +194,6 @@ def stage(args):
             raise DeploymentError('cc-connect is already release-pinned; explicitly select --cc-connect-binary to reuse or upgrade it')
         print('cc-connect source:',cc_source,'sha256:',hashlib.sha256(cc_source.read_bytes()).hexdigest()[:16])
         shutil.copy2(cc_source, candidate / 'cc-connect')
-        for name in ('runtime.py', 'manage.py'):
-            shutil.copy2(source / 'deploy/macos' / name, candidate / name)
         atomic(candidate / 'config.json', json.dumps(config).encode())
         settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
                     'data': str(home / '.local/state/ink-commons'),
@@ -517,6 +543,7 @@ def main():
     commands = parser.add_subparsers(dest='action', required=True)
     build = commands.add_parser('stage')
     build.add_argument('--revision', required=True)
+    build.add_argument('--artifact-dir', help='extracted GitHub Actions artifact directory')
     build.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
     build.add_argument('--cc-connect-binary')
     build.add_argument('--config', default='~/.config/ink-commons/config.json')
