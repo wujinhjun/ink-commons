@@ -59,6 +59,12 @@ func confirmConflict(t *testing.T, f *handoffFixture) *Task {
 func TestMergeConflictTaskReusesDeveloperHandoff(t *testing.T) {
 	f := approvedConflictFixture(t)
 	task := confirmConflict(t, f)
+	f.githubError = true
+	preflightConflict(t, f)
+	if w := f.work(t); w.Task == nil || w.Task.ID != task.ID {
+		t.Fatal("failed PR read replaced the active conflict task")
+	}
+	f.githubError = false
 	f.observe(t)
 	f.restart(t)
 	preflightConflict(t, f)
@@ -118,5 +124,33 @@ func TestMergeConflictTaskClearsOnPositiveMergeabilityOrChangedBase(t *testing.T
 				f.claim(t, task, claimB, 409)
 			}
 		})
+	}
+}
+
+func TestMergeConflictConfirmationRestartsAfterFailedPRRead(t *testing.T) {
+	f := approvedConflictFixture(t)
+	preflightConflict(t, f)
+	st, err := f.s.store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := st.Work[key(f.repo.Repo, f.pull.Number)]
+	if w.MergeConflict == nil {
+		t.Fatal("first dirty response should begin confirmation")
+	}
+	w.MergeConflict.Since = time.Now().Add(-mergeConflictConfirmation)
+	if err := f.s.store.save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	f.githubError = true
+	preflightConflict(t, f)
+	if f.work(t).MergeConflict != nil {
+		t.Fatal("failed PR read retained the confirmation")
+	}
+	f.githubError = false
+	preflightConflict(t, f)
+	if w := f.work(t); w.Task != nil || w.MergeConflict == nil {
+		t.Fatal("first dirty response after recovery should restart confirmation")
 	}
 }

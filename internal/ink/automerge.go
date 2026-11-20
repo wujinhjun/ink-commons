@@ -271,7 +271,9 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		}
 	}
 	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting"}
-	version, trackingConflict := w.Version, w.MergeConflict != nil || (w.Task != nil && w.Task.ConflictBase != nil)
+	version, observedPull := w.Version, w.Pull
+	confirmingConflict := w.MergeConflict != nil
+	trackingConflict := confirmingConflict || (w.Task != nil && w.Task.ConflictBase != nil)
 	s.mu.Unlock()
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo.Repo, number)
 	wait := func(reason string) error {
@@ -282,6 +284,12 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	var pull Pull
 	if _, _, err := s.up.gitHubJSON(ctx, http.MethodGet, path, "inspect", stackAPIVersion, nil, &pull); err != nil {
+		if confirmingConflict {
+			observedPull.Mergeable = nil
+			if err := s.observeMergeConflict(repo.Repo, number, version, observedPull, false); err != nil {
+				return err
+			}
+		}
 		return wait("cannot refresh PR before merge")
 	}
 	if pull.State != "open" || pull.Draft || pull.Head.SHA != run.SHA {
