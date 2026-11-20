@@ -97,6 +97,9 @@ func migrateExecution(w *Work) bool {
 
 func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Delivery {
 	d := execution.Delivery{TaskID: t.ID, AttemptID: attemptID, Attempt: number, Repository: w.Repo, Number: w.Pull.Number, URL: w.Pull.URL, Role: t.Role, SHA: t.SHA, ReviewID: t.ReviewID, ReviewURL: t.ReviewURL}
+	if t.ConflictBase != nil {
+		d.ConflictBaseRef, d.ConflictBaseSHA = t.ConflictBase.Ref, t.ConflictBase.SHA
+	}
 	assignee := w.Developer
 	if t.Role == "reviewer" {
 		assignee = w.Reviewer

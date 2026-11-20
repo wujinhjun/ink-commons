@@ -84,6 +84,7 @@ type Attempt struct {
 }
 
 type Task struct {
+	ConflictBase   *PullBase           `json:"conflict_base,omitempty"`
 	ConfigSnapshot *TaskConfigSnapshot `json:"config_snapshot,omitempty"`
 	Handoff        *TaskHandoff        `json:"handoff,omitempty"`
 	CreatedAt      time.Time           `json:"created_at,omitempty"`
@@ -112,6 +113,7 @@ type Workflow struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Work struct {
+	MergeConflict     *MergeConflict      `json:"merge_conflict,omitempty"`
 	InheritsConfig    *bool               `json:"inherits_config,omitempty"`
 	ReviewerOverride  *Assignee           `json:"reviewer_override,omitempty"`
 	DeveloperOverride *Assignee           `json:"developer_override,omitempty"`
@@ -137,6 +139,7 @@ type Work struct {
 }
 
 func (w *Work) derive() {
+	w.retireStaleConflictTasks()
 	if w.Pull.State == "closed" {
 		w.Phase = "closed"
 		if w.Pull.Merged {
@@ -169,7 +172,9 @@ func (w *Work) derive() {
 	}
 	if latest.State == "APPROVED" {
 		w.Phase = "approved"
-		w.replaceTask(nil)
+		if w.Task == nil || w.Task.ConflictBase == nil || !w.matchesConflictTask(w.Task, latest) {
+			w.replaceTask(nil)
+		}
 		return
 	}
 	w.Phase = "changes_requested"
@@ -177,7 +182,8 @@ func (w *Work) derive() {
 }
 
 func (w *Work) setTask(task Task, assignee Assignee) {
-	if w.Task != nil && w.Task.Role == task.Role && w.Task.SHA == task.SHA && w.Task.ReviewID == task.ReviewID {
+	if w.Task != nil && w.Task.Role == task.Role && w.Task.SHA == task.SHA && w.Task.ReviewID == task.ReviewID &&
+		(w.Task.ConflictBase == nil) == (task.ConflictBase == nil) {
 		return
 	}
 	task.Delivery = "manual"

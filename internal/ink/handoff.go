@@ -392,7 +392,7 @@ func (w *Work) refreshHandoffWorkflow(now time.Time, c Reliability) {
 			}
 		}
 	}
-	if w.Phase == "approved" && w.handoffMergeBlocked() {
+	if w.Phase == "approved" && (w.Task == nil || w.Task.ConflictBase == nil) && w.handoffMergeBlocked() {
 		w.Workflow = Workflow{State: "waiting_handoff", Reason: "Approval observed; waiting for a verified reviewer handoff"}
 	}
 }

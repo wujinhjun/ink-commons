@@ -145,7 +145,7 @@ ink notification status --event '通知中的事件 ID'
 
 `method` 可选 `merge`（默认）、`squash` 或 `rebase`。也可用 `ink config set auto_merge '{"enabled":true,"method":"squash"}' --global` 设置动态继承的全局默认值，或通过 `ink register --auto-merge-after-approval --merge-method squash owner/repository` 注册。显式 `"auto_merge": {"enabled": false}` 或注册参数 `--auto-merge-after-approval=false` 覆盖注册默认值；缺省动态继承，迁移来的旧覆盖项需 unset 后才恢复继承。
 
-开启后，同砚仅处理已关联、打开、非 Draft 且由指定 reviewer 正式批准当前 head SHA 的 PR。每次尝试前重新读取 PR、review 和检查结果；需要 GitHub 报告 `mergeable: true`、`mergeable_state: clean`，并要求 head 和可用的 test-merge SHA 上当前已发现的 check runs 全部结束且为 success、neutral 或 skipped。检查未完成、失败、无权限读取、合并冲突或状态未知时保留 `waiting` 和原因，后续轮询重新检查，不让 Agent 用 sleep 等待。**需要保证等待特定 CI 时，应在 GitHub 分支规则中将其设为必需检查**；当前尚未出现的非必需检查不能由同砚保证等待。
+开启后，同砚仅处理已关联、打开、非 Draft 且由指定 reviewer 正式批准当前 head SHA 的 PR。每次尝试前重新读取 PR、review 和检查结果；需要 GitHub 报告 `mergeable: true`、`mergeable_state: clean`，并要求 head 和可用的 test-merge SHA 上当前已发现的 check runs 全部结束且为 success、neutral 或 skipped。检查未完成、失败、无权限读取、合并冲突或状态未知时保留 `waiting` 和原因，后续轮询重新检查。cooperative 模式下，指定 reviewer 已完成批准交接后，同一 base 和 head 间隔至少 30 秒仍被 GitHub 报告为冲突时，同砚给开发会话派一个可领取的核查任务。开发者本地试合，处理实际冲突并推送后由同砚重新送审。若本地试合成功，用 blocked handoff 记录 GitHub 与本地结果的差异。**需要保证等待特定 CI 时，应在 GitHub 分支规则中将其设为必需检查**；当前尚未出现的非必需检查不能由同砚保证等待。
 
 实际调用 GitHub merge API 时携带批准的 `sha`，避免 head 变化后误合入新提交；不使用管理员绕过。GitHub 分支保护、必需检查、额外 review 和仓库允许的合并方式仍由服务端执行。批准与 merge 之间无法实现跨 API 的原子校验；对必须严格维持到合并时的审批条件，应使用 GitHub 分支规则约束。没有 CI 的仓库可以在 GitHub 报告 clean 后合入。
 

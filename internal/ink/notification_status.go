@@ -67,6 +67,14 @@ func mergeStatus(w *Work, repo Repository, sha string) *execution.MergeStatus {
 		result.Reason = "an earlier merge outcome is unresolved"
 		return result
 	}
+	if w.Task != nil && w.Task.ConflictBase != nil && w.Task.Handoff != nil {
+		result.Reason = "waiting for merge conflict task " + w.Task.ID
+		if w.Task.Handoff.State == "blocked" {
+			result.State = "blocked"
+			result.Reason = w.Task.Handoff.Verification
+		}
+		return result
+	}
 	if w.handoffMergeBlocked() {
 		result.State = "waiting"
 		result.Reason = "waiting for verified reviewer handoff"

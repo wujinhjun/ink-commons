@@ -46,6 +46,12 @@ func compatibleRoute(a, b *execution.Route) bool {
 // Caller holds Service.mu. Preserve the reviewer for an already exposed SHA:
 // changing defaults must never reinterpret an existing review as an approval.
 func (s *Service) refreshPendingConfig(w *Work, repo Repository) {
+	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled || repo.TaskMode != "cooperative" {
+		w.MergeConflict = nil
+		if t := w.Task; t != nil && t.ConflictBase != nil && t.Handoff.State == "pending" {
+			w.replaceTask(nil)
+		}
+	}
 	if w.InheritsConfig == nil {
 		managed := false
 		w.InheritsConfig = &managed
@@ -177,7 +183,7 @@ func copyTaskSnapshot(snapshot *TaskConfigSnapshot) *TaskConfigSnapshot {
 }
 
 func (s *Service) preparePendingConfig(w *Work) error {
-	if w.Task == nil || taskStarted(w.Task) {
+	if w.Task == nil || (taskStarted(w.Task) && w.Task.ConflictBase == nil) {
 		return nil
 	}
 	effective, err := s.store.effectiveConfig(w.Repo)
