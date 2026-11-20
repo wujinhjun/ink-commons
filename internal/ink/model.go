@@ -22,20 +22,31 @@ type Push struct {
 	At    time.Time       `json:"at"`
 }
 
+type PullBase struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
+}
+
+type PullStack struct {
+	ID       int64    `json:"id"`
+	Position int      `json:"position"`
+	Size     int      `json:"size"`
+	Base     PullBase `json:"base"`
+}
+
 type Pull struct {
-	Mergeable      *bool  `json:"mergeable,omitempty"`
-	MergeableState string `json:"mergeable_state,omitempty"`
-	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
-	Base           struct {
-		SHA string `json:"sha"`
-	} `json:"base"`
-	Number int    `json:"number"`
-	URL    string `json:"html_url"`
-	Title  string `json:"title"`
-	State  string `json:"state"`
-	Draft  bool   `json:"draft"`
-	Merged bool   `json:"merged"`
-	Head   struct {
+	Mergeable      *bool      `json:"mergeable,omitempty"`
+	MergeableState string     `json:"mergeable_state,omitempty"`
+	MergeCommitSHA string     `json:"merge_commit_sha,omitempty"`
+	Base           PullBase   `json:"base"`
+	Stack          *PullStack `json:"stack,omitempty"`
+	Number         int        `json:"number"`
+	URL            string     `json:"html_url"`
+	Title          string     `json:"title"`
+	State          string     `json:"state"`
+	Draft          bool       `json:"draft"`
+	Merged         bool       `json:"merged"`
+	Head           struct {
 		Ref  string `json:"ref"`
 		SHA  string `json:"sha"`
 		Repo *struct {

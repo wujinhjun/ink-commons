@@ -116,3 +116,25 @@ func TestGitHubAppIntegration(t *testing.T) {
 		t.Fatal("unexpected repository")
 	}
 }
+
+func TestGitHubCommandKeepsAsyncConflictResponse(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "app-cli")
+	body := `#!/bin/sh
+case "$*" in
+  '--profile code -R acme/project api --include --method PUT /repos/acme/project/pulls/42/merge-async --header X-GitHub-Api-Version: 2026-03-10 --input -') ;;
+  *) exit 2 ;;
+esac
+printf 'HTTP/2.0 409 Conflict\r\n\r\n{"status":"pending","details":{"uuid":"630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42"}}'
+exit 1
+`
+	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	up := newUpstream("")
+	up.command = script
+	var response stackMergeResult
+	_, status, err := up.gitHubJSON(context.Background(), "PUT", "/repos/acme/project/pulls/42/merge-async", "code", stackAPIVersion, []byte("{}"), &response, 409)
+	if err != nil || status != 409 || response.Details.ID != testStackRequestID {
+		t.Fatalf("HTTP %d, result %+v, error %v", status, response, err)
+	}
+}
