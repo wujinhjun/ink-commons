@@ -187,7 +187,7 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 		}
 	}
 	if reserve {
-		if w.handoffMergeBlocked() {
+		if w.handoffMergeBlocked() || (w.Task != nil && w.Task.ConflictBase != nil) {
 			return false, nil
 		}
 		current, ok := s.repo(repo.Repo)
@@ -260,7 +260,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		s.mu.Unlock()
 		return nil
 	}
-	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled || w.Phase != "approved" || w.handoffMergeBlocked() {
+	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled || w.Phase != "approved" || (w.handoffMergeBlocked() && !w.blockedConflictTask()) {
 		s.mu.Unlock()
 		return nil
 	}
@@ -271,6 +271,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		}
 	}
 	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting"}
+	version, trackingConflict := w.Version, w.MergeConflict != nil || (w.Task != nil && w.Task.ConflictBase != nil)
 	s.mu.Unlock()
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo.Repo, number)
 	wait := func(reason string) error {
@@ -288,6 +289,15 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	if pull.Stack != nil && (pull.Stack.ID <= 0 || pull.Stack.Position <= 0 || pull.Stack.Base.Ref == "" || pull.Base.Ref != pull.Stack.Base.Ref) {
 		return wait("waiting for this PR to become the bottom of its GitHub stack")
+	}
+	dirty := pull.Mergeable != nil && !*pull.Mergeable && pull.MergeableState == "dirty"
+	if trackingConflict || dirty {
+		if err := s.observeMergeConflict(repo.Repo, number, version, pull, dirty); err != nil {
+			return err
+		}
+	}
+	if dirty {
+		return wait("GitHub reports a merge conflict with " + pull.Base.Ref)
 	}
 	if pull.Mergeable == nil || !*pull.Mergeable || pull.MergeableState != "clean" {
 		return wait("GitHub has not reported a clean, mergeable PR")

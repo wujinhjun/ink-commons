@@ -63,6 +63,8 @@ type Delivery struct {
 	SHA                    string `json:"sha"`
 	ReviewID               int64  `json:"review_id,omitempty"`
 	ReviewURL              string `json:"review_url,omitempty"`
+	ConflictBaseRef        string `json:"conflict_base_ref,omitempty"`
+	ConflictBaseSHA        string `json:"conflict_base_sha,omitempty"`
 	// Source is the development conversation associated with this task.
 	Source *Route `json:"source,omitempty"`
 }

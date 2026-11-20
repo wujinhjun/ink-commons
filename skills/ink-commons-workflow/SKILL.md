@@ -22,7 +22,7 @@ description: Use Ink Commons (同砚 / ink common) to send a GitHub PR for revie
 - 只有领取成功且 `first:true` 才开始本次工作。`first:false` 或冲突时不要再次执行，必要时查询一次状态并结束回合。若首次领取响应丢失，先核对已有工作记录，不把重试当新授权。
 - 从返回的 delivery 读取角色、精确 SHA、review URL、GitHub 身份/命令和 context cutoff。使用任务指定身份，不自行改用个人凭据。领取文件是私有凭据，不打印或提交。
 - Reviewer：按需用 `ink context --sha SHA --before CUTOFF PR_URL` 读取已启用的背景；上下文关闭时不绕过。审查精确 SHA，按需要在独立 worktree 验证，使用指定身份提交绑定 `commit_id` 的正式 APPROVED 或 CHANGES_REQUESTED review；聊天结论不能代替正式 review。
-- Developer：处理指定 review，完成检查并推送新 SHA。尚未成功领取时，即使 GitHub 显示 changes_requested，也不自行开始这轮返工。
+- Developer：处理指定 review，完成检查并推送新 SHA。若 delivery 带有 `conflict_base_ref` 和 `conflict_base_sha`，先核对 PR 的 head 和 base 仍匹配任务，再用这两个提交本地试合。有实际冲突时在 PR 分支解决、检查并推送新 SHA。提交已变或试合成功时，用 blocked handoff 说明观测结果。成功领取前不开始返工。
 
 ## 收尾与交接
 
