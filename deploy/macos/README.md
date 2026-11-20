@@ -1,10 +1,26 @@
 # macOS 部署与恢复
 
-本目录管理同砚的运行版本，以及从登录服务迁移到开机服务。`stage` 只构建一个指定 Git 提交，不切换服务；`activate` 才停止旧进程、备份状态和 plist、切换二进制并验证实际运行 SHA。不会执行 `git pull` 后偷偷更新线上版本。
+本目录管理同砚的运行版本，以及从登录服务迁移到开机服务。`stage` 为指定 Git 提交准备部署目录。`activate` 停止旧进程、备份状态和 plist、切换二进制并验证实际运行 SHA。
 
-需要 Go 1.23+、Python **3.11.8+**（系统自带 Python 3.9 不适用），以及已安装且可用的 Yuxingyi App CLI。以下 `PYTHON` 应替换为本机 Python 的绝对路径，`REVISION` 是待部署的完整提交 SHA，`USER` 是已有服务用户。路径包含空格时保持引号。
+部署需要 Git、Python **3.11.8+** 和已安装且可用的 Yuxingyi App CLI。本机源码构建还需要 Go 1.23+。以下 `PYTHON` 应替换为本机 Python 的绝对路径，`REVISION` 是待部署的完整提交 SHA，`USER` 是已有服务用户。路径包含空格时保持引号。
 
-## 构建与版本核对
+## 下载 CI 产物并准备部署
+
+PR 和 `main` 都在 GitHub 托管的 macOS runner 上运行 Go 测试、`go vet`、部署脚本测试和编译检查。`main` 的成功运行提供 Apple Silicon 产物，保留 30 天。
+
+在 [Ink Commons CI](https://github.com/wujinhjun/ink-commons/actions/workflows/ci.yml?query=branch%3Amain) 选择要部署的 `main` 运行，下载并解压同一提交的 `ink-darwin-arm64-<完整提交 SHA>`。以服务用户在含该提交的仓库内执行：
+
+```sh
+PYTHON=/absolute/path/to/python3.12
+REVISION=<full-commit-sha>
+ARTIFACT_DIR=/absolute/path/to/extracted-artifact
+"$PYTHON" deploy/macos/manage.py stage --revision "$REVISION" --artifact-dir "$ARTIFACT_DIR"
+"$PYTHON" deploy/macos/manage.py status --user "$(id -un)"
+```
+
+`stage` 校验产物内的 SHA-256 和二进制报告的提交 SHA，从同一 Git 提交取出部署脚本。这条路径无需在部署机安装 Go。下面的 skill 安装和显式激活步骤适用于两种构建方式。
+
+## 本机源码构建
 
 以服务用户在仓库内执行，不使用 sudo：
 
@@ -15,7 +31,7 @@ REVISION=<full-commit-sha>
 "$PYTHON" deploy/macos/manage.py status --user "$(id -un)"
 ```
 
-`stage` 从指定提交的 `git archive` 构建，不包含工作区修改；将 SHA 写入二进制。产物保存到 `~/.local/lib/ink-commons/releases/<SHA>/`，已存在时拒绝覆盖。release 内保存生成的非敏感同砚配置和本机路径，不复制 cc-connect token；启动时才从本机 `~/.cc-connect/config.toml` 读取 webhook / Discord token。本入口面向已有 cc-connect 的部署，没有 cc-connect 时需先安装或指定二进制来源。stage 会输出 cc-connect 来源路径及 SHA256 前缀；已迁移后若来源在旧 release 内，必须显式传 `--cc-connect-binary` 选择复用该二进制或升级到新二进制，避免误以为自动升级。release 还会复制现有 cc-connect 二进制并记录 SHA256，系统服务引用此稳定副本，避免依赖会话构建目录；也可通过 `--cc-connect-binary` 指定来源。可用 `--config`、`--cc-config`、`--project`、`--github-command` 覆盖来源，GitHub 默认使用 `~/.local/bin/yuxingyi`。
+省略 `--artifact-dir` 时，`stage` 从指定提交的 `git archive` 构建，并将 SHA 写入二进制。两种方式准备的部署版本都保存在 `~/.local/lib/ink-commons/releases/<SHA>/`，已存在时拒绝覆盖。release 内保存生成的非敏感同砚配置和本机路径，不复制 cc-connect token；启动时才从本机 `~/.cc-connect/config.toml` 读取 webhook / Discord token。本入口面向已有 cc-connect 的部署，没有 cc-connect 时需先安装或指定二进制来源。stage 会输出 cc-connect 来源路径及 SHA256 前缀；已迁移后若来源在旧 release 内，必须显式传 `--cc-connect-binary` 选择复用该二进制或升级到新二进制，避免误以为自动升级。release 还会复制现有 cc-connect 二进制并记录 SHA256，系统服务引用此稳定副本，避免依赖会话构建目录；也可通过 `--cc-connect-binary` 指定来源。可用 `--config`、`--cc-config`、`--project`、`--github-command` 覆盖来源，GitHub 默认使用 `~/.local/bin/yuxingyi`。
 
 生成配置的 `github_command` 是绝对 App CLI 路径。每个 GitHub 请求执行 `yuxingyi --profile inspect -R OWNER/REPO api ...`，由已有 broker 获取单仓库短期 token；不会读取个人 `gh auth token`，也不缓存启动时的一小时 token。多个受管仓库分别认证，daemon 的读取失败不回退个人身份。这不改变 reviewer **提交** review 的身份；后者仍需配置仓库的 `reviewer_command`，或使用 `ink review --github-command yanshi-reviewer`。原有 `INK_GITHUB_TOKEN` 仍供其他部署方式使用；配置了 `github_command` 时以 App CLI 为准。
 

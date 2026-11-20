@@ -18,6 +18,72 @@ runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
 
 
+class ArtifactStageTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.home = Path(temp.name).resolve()
+        self.revision = m.output(['git', '-C', ROOT, 'rev-parse', 'HEAD'])
+        self.artifact = self.home / 'artifact'
+        self.artifact.mkdir()
+        self.config = self.home / 'config.json'
+        self.config.write_text('{}')
+        self.cc_binary = self.home / 'cc-connect'
+        self.cc_binary.write_bytes(b'local cc-connect')
+        self.releases = self.home / '.local/lib/ink-commons/releases'
+        self.args = SimpleNamespace(revision=self.revision, artifact_dir=str(self.artifact),
+                                    env=[], config=str(self.config), github_command=sys.executable,
+                                    cc_config=str(self.home / 'config.toml'), project='test',
+                                    cc_connect_binary=str(self.cc_binary))
+
+    def write_artifact(self, revision):
+        binary = self.artifact / 'ink'
+        binary.write_text(f"#!/bin/sh\nprintf '%s\\n' '{revision}'\n")
+        binary.chmod(0o644)  # GitHub Actions 下载的 ZIP 会移除执行权限。
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        (self.artifact / 'SHA256SUMS').write_text(f'{digest}  ink\n')
+
+    def stage(self):
+        real_run = m.run
+
+        def run_without_go(args, **kwargs):
+            self.assertNotEqual(args[0], 'go')
+            return real_run(args, **kwargs)
+
+        with patch.object(m.Path, 'home', return_value=self.home), \
+             patch.object(m.os, 'geteuid', return_value=501), \
+             patch.object(m, 'run', side_effect=run_without_go), \
+             patch.object(sys, 'path', [str(ROOT / 'deploy/macos'), *sys.path]), \
+             patch('runtime.environment'):
+            m.stage(self.args)
+
+    def test_stages_verified_artifact_and_matching_scripts_without_go(self):
+        self.write_artifact(self.revision)
+        self.stage()
+        release = self.releases / self.revision
+        self.assertEqual(m.output([release / 'ink', 'version']), self.revision)
+        self.assertEqual((release / 'cc-connect').read_bytes(), self.cc_binary.read_bytes())
+        for script in ('runtime.py', 'manage.py'):
+            expected = m.run(['git', '-C', ROOT, 'show', f'{self.revision}:deploy/macos/{script}'],
+                             capture_output=True).stdout
+            self.assertEqual((release / script).read_bytes(), expected)
+        with self.assertRaisesRegex(m.DeploymentError, 'release already exists'):
+            self.stage()
+
+    def test_rejects_tampered_binary(self):
+        self.write_artifact(self.revision)
+        (self.artifact / 'ink').write_bytes(b'tampered')
+        with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch'):
+            self.stage()
+        self.assertEqual(list(self.releases.iterdir()), [])
+
+    def test_rejects_binary_for_a_different_revision(self):
+        self.write_artifact('0' * 40)
+        with self.assertRaisesRegex(m.DeploymentError, 'revision does not match'):
+            self.stage()
+        self.assertEqual(list(self.releases.iterdir()), [])
+
+
 class DeployTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
