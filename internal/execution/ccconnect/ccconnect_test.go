@@ -384,6 +384,30 @@ func TestCooperativeWakeRequiresClaimBeforeAnyWork(t *testing.T) {
 	if strings.Contains(prompt, "hook-test") {
 		t.Fatal("wake disclosed runtime credential")
 	}
+
+	conflictTask := execution.Delivery{
+		TaskID:          "conflict-task",
+		URL:             "https://github.com/acme/project/pull/42",
+		Role:            "developer",
+		ConflictBaseRef: "main",
+		ConflictBaseSHA: strings.Repeat("a", 40),
+	}
+	route := execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}
+	if err := e.WakeTask(context.Background(), route, conflictTask); err != nil {
+		t.Fatal(err)
+	}
+	wantHeader := "Ink Commons: GitHub reports a merge conflict after approval.\n" +
+		"PR: https://github.com/acme/project/pull/42\n" +
+		"Target branch: main\n" +
+		"First run: ink task claim --task conflict-task\n"
+	if !strings.HasPrefix(prompt, wantHeader) {
+		t.Fatalf("unexpected merge conflict wake: %s", prompt)
+	}
+	if !strings.Contains(prompt, "before a successful claim with first=true") ||
+		!strings.Contains(prompt, "try merging the two commits locally") ||
+		strings.Contains(prompt, "rebase") {
+		t.Fatalf("unexpected merge conflict instructions: %s", prompt)
+	}
 }
 
 func TestMergeCompletionNotificationCarriesOutcomeAndReadOnlyStatusCommand(t *testing.T) {
