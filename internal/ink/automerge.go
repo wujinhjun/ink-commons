@@ -70,21 +70,25 @@ func reconcileClosedAutoMerges(w *Work, now time.Time) bool {
 		}
 		changed = true
 		run.UpdatedAt = now
-		run.State = "failed"
-		run.Reason = "observed PR closed without merging"
-		run.MergeSHA = ""
-		if w.Pull.Merged {
-			if w.Pull.Head.SHA == run.SHA {
-				run.State = "merged"
-				run.Reason = ""
-				run.MergeSHA = w.Pull.MergeCommitSHA
-			} else {
-				run.State = "superseded"
-				run.Reason = "observed PR merged with a different head " + w.Pull.Head.SHA + "; the older SHA-bound request is not attributed as the merge"
-			}
-		}
+		run.recordClosedPull(w.Pull)
 	}
 	return changed
+}
+
+func (run *AutoMergeRun) recordClosedPull(pull Pull) {
+	run.MergeSHA = ""
+	switch {
+	case !pull.Merged:
+		run.State = "failed"
+		run.Reason = "observed PR closed without merging"
+	case pull.Head.SHA != run.SHA:
+		run.State = "superseded"
+		run.Reason = "observed PR merged with a different head " + pull.Head.SHA + "; the older SHA-bound request is not attributed as the merge"
+	default:
+		run.State = "merged"
+		run.Reason = ""
+		run.MergeSHA = pull.MergeCommitSHA
+	}
 }
 
 func approvedReview(reviews []Review, sha, login string) *Review {
@@ -165,21 +169,22 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 	if w == nil {
 		return false, nil
 	}
-	if (reserve || run.State == "waiting") && hasInFlightAutoMerge(w) {
+	// Preflight may not overwrite an in-flight write. A response tied to the
+	// exact reservation can release it after a definitive rejection.
+	if (reserve || (run.State == "waiting" && run.UpdatedAt.IsZero())) && hasInFlightAutoMerge(w) {
 		return false, nil
 	}
 	for _, old := range w.AutoMerges {
 		if old.SHA != run.SHA {
 			continue
 		}
-		if !run.UpdatedAt.IsZero() && !old.UpdatedAt.Equal(run.UpdatedAt) {
+		if !reserve && !run.UpdatedAt.IsZero() && !old.UpdatedAt.Equal(run.UpdatedAt) {
 			return false, nil
 		}
 		switch old.State {
 		case "merged", "failed", "superseded":
 			return false, nil
 		}
-
 	}
 	if reserve {
 		if w.handoffMergeBlocked() {
@@ -190,7 +195,9 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 			return false, nil
 		}
 	}
-	run.UpdatedAt = time.Now()
+	if !reserve || run.UpdatedAt.IsZero() {
+		run.UpdatedAt = time.Now()
+	}
 	found := false
 	for i := range w.AutoMerges {
 		if w.AutoMerges[i].SHA == run.SHA {
@@ -316,6 +323,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	run.State = "unknown"
 	run.Reason = "merge request reserved; outcome not yet confirmed"
+	run.UpdatedAt = time.Now()
 	reserved, err := s.updateAutoMerge(repo, number, run, true)
 	if err != nil || !reserved {
 		return err

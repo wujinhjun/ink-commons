@@ -41,6 +41,9 @@ func (s *Service) startStackMerge(ctx context.Context, repo Repository, number i
 	var result stackMergeResult
 	_, status, err := s.up.gitHubJSON(ctx, http.MethodPut, stackMergePath(repo, number), "code", stackAPIVersion, body, &result, http.StatusConflict)
 	switch {
+	case status == http.StatusBadRequest:
+		run.State = "waiting"
+		run.Reason = "GitHub rejected the stack merge before accepting it (HTTP 400); waiting for preflight"
 	case err != nil:
 		run.Reason = "stack merge request could not be confirmed: " + err.Error()
 	case status == http.StatusAccepted || status == http.StatusConflict:
@@ -56,6 +59,16 @@ func (s *Service) startStackMerge(ctx context.Context, repo Repository, number i
 			run.RequestID = id.String()
 			run.State = "pending"
 			run.Reason = "waiting for GitHub to complete the stack merge"
+		}
+	case status == http.StatusOK && result.Status == "merged":
+		// A PUT that finds an already merged PR does not identify which PR head landed.
+		path := fmt.Sprintf("/repos/%s/pulls/%d", repo.Repo, number)
+		var pull Pull
+		if _, _, readErr := s.up.gitHubJSON(ctx, http.MethodGet, path, "inspect", stackAPIVersion, nil, &pull); readErr != nil ||
+			pull.Number != number || pull.State != "closed" || !pull.Merged || !validSHA(pull.Head.SHA) || !validSHA(pull.MergeCommitSHA) {
+			run.Reason = "waiting to verify the head of the already merged PR"
+		} else {
+			run.recordClosedPull(pull)
 		}
 	default:
 		run.recordStackMergeResult(result)

@@ -153,7 +153,7 @@ GitHub 原生 Stack PR 使用异步合入。只有当前目标分支已经是 st
 
 读取使用配置的 GitHub App `inspect` profile；实际 merge 请求和异步合入结果查询使用同一 CLI 的 `code` profile，并以 JSON stdin 传入 SHA 和方法。App 需要相应仓库的 contents 写权限、PR/checks 读取权限，且 broker 允许 code profile；使用 `INK_GITHUB_TOKEN` 部署时同样需要相应权限。不会回退个人 gh 凭据，不自动扩大 App 权限。
 
-工作项 API 的 `auto_merges` 保存 SHA、reviewer、review ID、方式、状态、merge SHA、更新时间及原因。merge 发出前持久化 `unknown` 预留；同一 PR 的并发轮询和重启不会重复发请求。响应丢失、失败或中断后保留 unknown 并产生诊断，不自动重放；**任何历史 SHA 仍有 unknown 时，都继续告警并阻止该 PR 的新 head 自动合入**，避免后续 push 掩盖未决结果。仍然打开且结果不明的 PR 需人工核查和处理，当前没有自动重放/重置接口。
+工作项 API 的 `auto_merges` 保存 SHA、reviewer、review ID、方式、状态、merge SHA、更新时间及原因。merge 发出前持久化 `unknown` 预留；同一 PR 的并发轮询和重启不会重复发请求。响应丢失、中断或结果无法判定时保留 unknown 并产生诊断，不自动重放。GitHub 对 Stack 合入返回明确的 HTTP 400 拒绝时，后续轮询会从预检开始；**任何历史 SHA 仍有 unknown 时，都继续告警并阻止该 PR 的新 head 自动合入**，避免后续 push 掩盖未决结果。仍然打开且结果不明的 PR 需人工核查和处理，当前没有自动重放/重置接口。
 
 GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关闭也可完成只读对账：未合并关闭时记为 failed；已合并且最终 head 匹配该记录时记为 merged；已合并但 head 不同时记为 superseded 并保留原因，不声称旧 SHA 已合入，也不把其他 head 的 merge SHA 归给旧请求。
 

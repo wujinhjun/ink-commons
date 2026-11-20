@@ -117,7 +117,9 @@ func TestStackMergeWaitsForRetargetAndApprovalOfRebasedHead(t *testing.T) {
 		if input["sha"] != f.pull.Head.SHA {
 			t.Fatalf("wrong merge head: %q", input["sha"])
 		}
-		reply(w, 200, map[string]any{"status": "merged", "details": map[string]string{"sha": strings.Repeat("d", 40)}})
+		f.pull.State, f.pull.Merged = "closed", true
+		f.pull.MergeCommitSHA = strings.Repeat("d", 40)
+		reply(w, 200, map[string]any{"status": "merged", "details": map[string]string{"sha": f.pull.MergeCommitSHA}})
 	})
 	poll := func() {
 		t.Helper()
@@ -141,8 +143,9 @@ func TestStackMergeWaitsForRetargetAndApprovalOfRebasedHead(t *testing.T) {
 	}
 	f.reviews[0].SHA = f.pull.Head.SHA
 	poll()
-	if submits != 1 || f.writes != 0 {
-		t.Fatalf("stack submits=%d synchronous writes=%d", submits, f.writes)
+	work = notificationWork(t, f.s, f.repo, f.pull)
+	if run := work.AutoMerges[len(work.AutoMerges)-1]; submits != 1 || f.writes != 0 || run.State != "merged" || run.SHA != f.pull.Head.SHA {
+		t.Fatalf("stack submits=%d synchronous writes=%d run=%+v", submits, f.writes, run)
 	}
 }
 
@@ -201,6 +204,98 @@ func TestStackMergeOnlyAdoptsConflictForMatchingRequest(t *testing.T) {
 			run := work.AutoMerges[0]
 			if submits != 1 || (matching && run.State != "failed") || (!matching && (run.State != "unknown" || run.RequestID != "")) {
 				t.Fatalf("unexpected result: %+v, submits %d", run, submits)
+			}
+		})
+	}
+}
+
+func TestStackMergeRejectedBeforeAcceptanceReturnsToPreflight(t *testing.T) {
+	f := newAutoMergeFixture(t)
+	f.setStack(1, "main")
+	ctx := context.Background()
+	submits := 0
+	f.stackTransport(t, func(w http.ResponseWriter, r *http.Request) {
+		submits++
+		if submits == 1 {
+			f.pull.Draft = true
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reply(w, 202, map[string]any{"status": "pending", "details": map[string]string{"uuid": testStackRequestID}})
+	})
+	step := func(state string) {
+		t.Helper()
+		if err := f.s.autoMerge(ctx, f.repo, 42); err != nil {
+			t.Fatal(err)
+		}
+		work := notificationWork(t, f.s, f.repo, f.pull)
+		if run := work.AutoMerges[0]; run.State != state {
+			t.Fatalf("expected %s, got %+v", state, run)
+		}
+	}
+	step("waiting")
+	step("waiting")
+	f.pull.Draft = false
+	f.checkState = "in_progress"
+	step("waiting")
+	if submits != 1 {
+		t.Fatalf("submitted %d times before preflight passed", submits)
+	}
+	f.checkState = "completed"
+	step("pending")
+	if submits != 2 {
+		t.Fatalf("submitted %d times, want 2", submits)
+	}
+}
+
+func TestStackMergeAlreadyMergedResponseRequiresMatchingClosedHead(t *testing.T) {
+	for _, scenario := range []struct {
+		name, want string
+		closed     bool
+		changeHead bool
+	}{
+		{name: "approved head merged", want: "merged", closed: true},
+		{name: "different head merged", want: "superseded", closed: true, changeHead: true},
+		{name: "closed state not yet observed", want: "unknown"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			f := newAutoMergeFixture(t)
+			f.setStack(1, "main")
+			approved := f.pull.Head.SHA
+			mergeSHA := strings.Repeat("d", 40)
+			f.stackTransport(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut {
+					t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
+				}
+				if scenario.closed {
+					f.pull.State, f.pull.Merged = "closed", true
+					f.pull.MergeCommitSHA = mergeSHA
+				}
+				if scenario.changeHead {
+					f.pull.Head.SHA = strings.Repeat("e", 40)
+				}
+				reply(w, 200, map[string]any{"status": "merged", "details": map[string]string{"sha": mergeSHA}})
+			})
+			if err := f.s.autoMerge(context.Background(), f.repo, 42); err != nil {
+				t.Fatal(err)
+			}
+			work := notificationWork(t, f.s, f.repo, f.pull)
+			run := work.AutoMerges[0]
+			if f.reads != 3 || run.State != scenario.want || run.SHA != approved {
+				t.Fatalf("reads=%d, run=%+v", f.reads, run)
+			}
+			notifications := 0
+			for _, n := range work.Notifications {
+				if n.Event == "pr_merged" && n.SHA == approved {
+					notifications++
+				}
+			}
+			if scenario.want == "merged" {
+				if run.MergeSHA != mergeSHA || notifications != 1 {
+					t.Fatalf("run=%+v, notifications=%d", run, notifications)
+				}
+			} else if run.MergeSHA != "" || notifications != 0 {
+				t.Fatalf("attributed an unverified merge: run=%+v, notifications=%d", run, notifications)
 			}
 		})
 	}
