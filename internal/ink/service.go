@@ -224,7 +224,7 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 		open[pull.Number] = true
 	}
 	for _, work := range snapshot.Work {
-		if work.Repo != repo.Repo || (work.Pull.State != "open" && !work.pendingMergedNotification() && !hasUnknownAutoMerge(work)) || open[work.Pull.Number] {
+		if work.Repo != repo.Repo || (work.Pull.State != "open" && !work.pendingMergedNotification() && !hasInFlightAutoMerge(work)) || open[work.Pull.Number] {
 			continue
 		}
 		var pull Pull

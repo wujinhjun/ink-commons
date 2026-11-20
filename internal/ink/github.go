@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -70,30 +71,51 @@ func newUpstream(token string) upstream {
 }
 
 func (u upstream) gitHubGet(ctx context.Context, path string, result any) (http.Header, error) {
+	header, _, err := u.gitHubJSON(ctx, http.MethodGet, path, "inspect", "", nil, result)
+	return header, err
+}
+
+const stackAPIVersion = "2026-03-10"
+
+func (u upstream) gitHubJSON(ctx context.Context, method, path, profile, version string, input []byte, result any, acceptedErrors ...int) (http.Header, int, error) {
+	var res *http.Response
+	var err error
 	if u.command != "" {
-		return u.commandGet(ctx, path, result)
+		res, err = u.commandResponse(ctx, method, path, profile, version, input)
+	} else {
+		var req *http.Request
+		req, err = http.NewRequestWithContext(ctx, method, u.github+path, bytes.NewReader(input))
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid upstream request")
+		}
+		if u.token != "" {
+			req.Header.Set("Authorization", "Bearer "+u.token)
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		if version != "" {
+			req.Header.Set("X-GitHub-Api-Version", version)
+		}
+		if input != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		res, err = u.http.Do(req)
+		if err != nil {
+			err = fmt.Errorf("upstream transport failure")
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.github+path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("invalid upstream request")
-	}
-	if u.token != "" {
-		req.Header.Set("Authorization", "Bearer "+u.token)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	res, err := u.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("upstream transport failure")
+		return nil, 0, err
 	}
 	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("upstream HTTP %d", res.StatusCode)
+	status := res.StatusCode
+	if (status < 200 || status >= 300) && !slices.Contains(acceptedErrors, status) {
+		return nil, status, fmt.Errorf("upstream HTTP %d", status)
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 32<<20)).Decode(result); err != nil {
-		return nil, fmt.Errorf("invalid upstream response")
+		return nil, status, fmt.Errorf("invalid upstream response (HTTP %d)", status)
 	}
 	u.lastOK.Store(time.Now().Unix())
-	return res.Header, nil
+	return res.Header, status, nil
 }
 
 func listPages[T any](ctx context.Context, u upstream, path string) ([]T, error) {
@@ -118,11 +140,7 @@ func listPages[T any](ctx context.Context, u upstream, path string) ([]T, error)
 
 // App CLI 每次请求获取单仓库短期凭据，不把一小时 token 固定在常驻进程中。
 // 不经过 shell，不读取个人 gh 登录；失败时只返回通用错误，避免转发子进程秘密。
-func (u upstream) commandGet(ctx context.Context, path string, result any) (http.Header, error) {
-	return u.commandRequest(ctx, "GET", path, "inspect", nil, result)
-}
-
-func (u upstream) commandRequest(ctx context.Context, method, path, profile string, input []byte, result any) (http.Header, error) {
+func (u upstream) commandResponse(ctx context.Context, method, path, profile, version string, input []byte) (*http.Response, error) {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if len(parts) < 3 || parts[0] != "repos" || !ValidRepository(parts[1]+"/"+parts[2]) {
 		return nil, fmt.Errorf("GitHub command requires a repository API path")
@@ -130,6 +148,9 @@ func (u upstream) commandRequest(ctx context.Context, method, path, profile stri
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	args := []string{"--profile", profile, "-R", parts[1] + "/" + parts[2], "api", "--include", "--method", method, path}
+	if version != "" {
+		args = append(args, "--header", "X-GitHub-Api-Version: "+version)
+	}
 	if input != nil {
 		args = append(args, "--input", "-")
 	}
@@ -139,30 +160,30 @@ func (u upstream) commandRequest(ctx context.Context, method, path, profile stri
 	}
 	output := &boundedOutput{remaining: 32 << 20}
 	cmd.Stdout = output
-	// Stderr 不继承：broker/CLI 的诊断可能包含本机认证上下文。
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("GitHub App command timed out or cancelled")
+	// Stderr may contain broker authentication data. gh also prints the HTTP
+	// response to stdout with --include, even for HTTP errors.
+	runErr := cmd.Run()
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("GitHub App command timed out or cancelled")
+	}
+	res, parseErr := http.ReadResponse(bufio.NewReader(bytes.NewReader(output.Bytes())), nil)
+	if runErr != nil {
+		if parseErr == nil {
+			if res.StatusCode >= 400 {
+				return res, nil
+			}
+			res.Body.Close()
 		}
 		var exit *exec.ExitError
-		if errors.As(err, &exit) {
+		if errors.As(runErr, &exit) {
 			return nil, fmt.Errorf("GitHub App command exited (status %d)", exit.ExitCode())
 		}
 		return nil, fmt.Errorf("GitHub App command could not run")
 	}
-	response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(output.Bytes())), nil)
-	if err != nil {
+	if parseErr != nil {
 		return nil, fmt.Errorf("invalid GitHub command response")
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("upstream HTTP %d", response.StatusCode)
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<20)).Decode(result); err != nil {
-		return nil, fmt.Errorf("invalid upstream response")
-	}
-	u.lastOK.Store(time.Now().Unix())
-	return response.Header, nil
+	return res, nil
 }
 
 type boundedOutput struct {

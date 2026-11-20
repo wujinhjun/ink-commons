@@ -34,6 +34,9 @@ func mergeStatus(w *Work, repo Repository, sha string) *execution.MergeStatus {
 			result.State = "merged"
 			result.MergeSHA = run.MergeSHA
 			return result
+		case "pending":
+			result.State = "waiting"
+			return result
 		case "unknown":
 			result.State = "unknown"
 			return result
@@ -59,7 +62,7 @@ func mergeStatus(w *Work, repo Repository, sha string) *execution.MergeStatus {
 		result.Reason = "current PR observation is not approved"
 		return result
 	}
-	if hasUnknownAutoMerge(w) {
+	if hasInFlightAutoMerge(w) {
 		result.State = "unknown"
 		result.Reason = "an earlier merge outcome is unresolved"
 		return result

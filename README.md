@@ -149,7 +149,9 @@ ink notification status --event '通知中的事件 ID'
 
 实际调用 GitHub merge API 时携带批准的 `sha`，避免 head 变化后误合入新提交；不使用管理员绕过。GitHub 分支保护、必需检查、额外 review 和仓库允许的合并方式仍由服务端执行。批准与 merge 之间无法实现跨 API 的原子校验；对必须严格维持到合并时的审批条件，应使用 GitHub 分支规则约束。没有 CI 的仓库可以在 GitHub 报告 clean 后合入。
 
-读取使用配置的 GitHub App `inspect` profile；仅实际 merge 请求使用同一 CLI 的 `code` profile，并以 JSON stdin 传入 SHA 和方法。App 需要相应仓库的 contents 写权限、PR/checks 读取权限，且 broker 允许 code profile；使用 `INK_GITHUB_TOKEN` 部署时同样需要相应权限。不会回退个人 gh 凭据，不自动扩大 App 权限。
+GitHub 原生 Stack PR 使用异步合入。只有当前目标分支已经是 stack 目标分支的栈底 PR 才能发起请求。GitHub 将下一条推进到栈底后，同砚会按它当时的 head SHA 重新核验批准与检查。合入请求 ID 持久化在 `auto_merges` 的 `request_id` 中，服务重启后继续查询。GitHub 确认合入后才发合入通知。遇到没有可核验请求 ID 的历史 `unknown` 记录，仍按下述对账规则处理。
+
+读取使用配置的 GitHub App `inspect` profile；实际 merge 请求和异步合入结果查询使用同一 CLI 的 `code` profile，并以 JSON stdin 传入 SHA 和方法。App 需要相应仓库的 contents 写权限、PR/checks 读取权限，且 broker 允许 code profile；使用 `INK_GITHUB_TOKEN` 部署时同样需要相应权限。不会回退个人 gh 凭据，不自动扩大 App 权限。
 
 工作项 API 的 `auto_merges` 保存 SHA、reviewer、review ID、方式、状态、merge SHA、更新时间及原因。merge 发出前持久化 `unknown` 预留；同一 PR 的并发轮询和重启不会重复发请求。响应丢失、失败或中断后保留 unknown 并产生诊断，不自动重放；**任何历史 SHA 仍有 unknown 时，都继续告警并阻止该 PR 的新 head 自动合入**，避免后续 push 掩盖未决结果。仍然打开且结果不明的 PR 需人工核查和处理，当前没有自动重放/重置接口。
 
