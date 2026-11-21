@@ -96,15 +96,31 @@ class UpgradeTest(unittest.TestCase):
         self.entry = self.root / 'ink'
         self.entry.symlink_to(self.current / 'ink')
         (self.current / 'config.json').write_text(json.dumps({'github_command': '/test/yuxingyi'}))
+        binary = b'current cc-connect'
+        (self.current / 'cc-connect').write_bytes(binary)
         (self.current / 'deployment.json').write_text(json.dumps({
+            'revision': self.current.name,
             'cc_config': '/test/cc.toml', 'data': '/test/state', 'project': 'existing-project',
-            'environment': {'HTTPS_PROXY': 'http://127.0.0.1:7897'},
+            'environment': {'HTTPS_PROXY': 'http://127.0.0.1:7897', 'NODE_OPTIONS': '--use-env-proxy'},
+            'cc_binary_sha256': hashlib.sha256(binary).hexdigest(),
         }))
         self.calls = []
+
+    def make_staged_target(self):
+        self.target.mkdir()
+        for name in ('config.json', 'cc-connect'):
+            (self.target / name).write_bytes((self.current / name).read_bytes())
+        settings = json.loads((self.current / 'deployment.json').read_text())
+        settings['revision'] = self.target.name
+        (self.target / 'deployment.json').write_text(json.dumps(settings))
 
     def test_downloads_main_and_reuses_current_configuration(self):
         def run(args, **kwargs):
             self.calls.append(args)
+            if args[0] == '/test/yuxingyi':
+                self.assertEqual(kwargs['env']['HTTPS_PROXY'], 'http://127.0.0.1:7897')
+                self.assertEqual(kwargs['env']['NODE_OPTIONS'], '--use-env-proxy')
+                self.assertEqual(kwargs['env']['PATH'], '/usr/bin:/bin')
 
         def stage(args):
             self.assertTrue(Path(args.artifact_dir).is_dir())
@@ -113,9 +129,10 @@ class UpgradeTest(unittest.TestCase):
             self.assertEqual(args.cc_connect_binary, str(self.current / 'cc-connect'))
             self.assertEqual(args.cc_config, '/test/cc.toml')
             self.assertEqual(args.project, 'existing-project')
-            self.assertEqual(args.env, ['HTTPS_PROXY=http://127.0.0.1:7897'])
+            self.assertEqual(args.env, ['HTTPS_PROXY=http://127.0.0.1:7897', 'NODE_OPTIONS=--use-env-proxy'])
 
-        with patch.object(m, 'run', side_effect=run), \
+        with patch.dict(m.os.environ, {'PATH': '/usr/bin:/bin'}, clear=True), \
+             patch.object(m, 'run', side_effect=run), \
              patch.object(m, 'output', return_value=self.target.name), \
              patch.object(m, 'stage', side_effect=stage) as staged:
             m.upgrade_system(self.root, self.entry)
@@ -151,6 +168,50 @@ class UpgradeTest(unittest.TestCase):
 
         run.assert_called_once()
         self.assertEqual(run.call_args.args[0][5:7], ['git', 'fetch'])
+
+
+    def test_missing_health_socket_reactivates_installed_target(self):
+        with patch.object(m, 'run') as run, \
+             patch.object(m, 'output', return_value=self.current.name), \
+             patch.object(m, 'health', side_effect=FileNotFoundError), \
+             patch.object(m, 'verify_revision') as verify:
+            m.upgrade_system(self.root, self.entry)
+
+        verify.assert_called_once_with(self.current / 'ink', self.current.name)
+        self.assertEqual(run.call_args.args[0][2:5],
+                         [self.current / 'manage.py', 'activate', '--system'])
+
+    def test_reuses_matching_stage(self):
+        self.make_staged_target()
+        with patch.object(m, 'run') as run, \
+             patch.object(m, 'output', return_value=self.target.name), \
+             patch.object(m, 'verify_revision') as verify:
+            m.upgrade_system(self.root, self.entry)
+
+        verify.assert_called_once_with(self.target / 'ink', self.target.name)
+        self.assertEqual(run.call_args.args[0][2:5],
+                         [self.target / 'manage.py', 'activate', '--system'])
+
+    def test_rejects_staged_config_environment_and_binary_differences(self):
+        self.make_staged_target()
+        mismatches = (
+            ('config.json', b'{}', 'configuration differs'),
+            ('deployment.json', (self.target / 'deployment.json').read_bytes().replace(
+                b'http://127.0.0.1:7897', b'http://127.0.0.1:9801'), 'configuration differs'),
+            ('cc-connect', b'different cc-connect', 'does not match the current deployment checksum'),
+        )
+        for name, content, diagnostic in mismatches:
+            with self.subTest(file=name):
+                file = self.target / name
+                original = file.read_bytes()
+                file.write_bytes(content)
+                with patch.object(m, 'run') as run, \
+                     patch.object(m, 'output', return_value=self.target.name):
+                    with self.assertRaisesRegex(m.DeploymentError, diagnostic):
+                        m.upgrade_system(self.root, self.entry)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0][5:7], ['git', 'fetch'])
+                file.write_bytes(original)
 
 
 class DeployTest(unittest.TestCase):

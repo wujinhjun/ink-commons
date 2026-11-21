@@ -12,7 +12,7 @@
 ./deploy/macos/upgrade
 ```
 
-命令读取现有部署的 Python 路径、配置、代理和 cc-connect 二进制，用 Yuxingyi App 获取 `main` 最新提交并下载对应 GitHub Release 的产物。校验完成后获取 sudo 授权，再安装 Agent skill、切换并验证系统服务。同砚和 cc-connect 会短暂重启。已经运行目标版本时直接退出。
+命令读取现有部署的 Python 路径、配置、代理和 cc-connect 二进制，用 Yuxingyi App 获取 `main` 最新提交并下载对应 GitHub Release 的产物。校验完成后获取 sudo 授权，再安装 Agent skill、切换并验证系统服务。同砚和 cc-connect 会短暂重启。目标版本健康运行时直接退出。重试可复用配置和 cc-connect 均匹配的暂存目录。若报告与当前部署有差异，可先将该未激活的暂存目录移出 `releases` 再重试。
 
 GitHub Actions 在 `main` 测试通过后发布 `build-<完整提交 SHA>`。如果发布仍在运行，升级命令会在切换前退出，可在发布成功后重试。首次部署和手动指定版本时可使用下面的 `stage` 步骤。
 

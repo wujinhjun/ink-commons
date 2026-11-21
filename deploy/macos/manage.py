@@ -226,6 +226,23 @@ def upgrade():
         upgrade_system(root, entry)
 
 
+def verify_staged_upgrade(current, target, config, settings):
+    try:
+        staged_config = json.loads((target / 'config.json').read_text())
+        staged_settings = json.loads((target / 'deployment.json').read_text())
+    except (OSError, ValueError):
+        raise DeploymentError('staged release configuration is missing or invalid') from None
+    expected_settings = {**settings, 'revision': target.name}
+    if staged_config != config or staged_settings != expected_settings:
+        raise DeploymentError('staged release configuration differs from the current deployment; '
+                              'archive the staged release before retrying')
+    expected_cc = settings.get('cc_binary_sha256')
+    for release in (current, target):
+        binary = release / 'cc-connect'
+        if not binary.is_file() or hashlib.sha256(binary.read_bytes()).hexdigest() != expected_cc:
+            raise DeploymentError('cc-connect binary does not match the current deployment checksum')
+
+
 def upgrade_system(root, entry):
     releases = root / 'releases'
     current = entry.resolve().parent
@@ -234,15 +251,20 @@ def upgrade_system(root, entry):
     settings = json.loads((current / 'deployment.json').read_text())
     config_path = current / 'config.json'
     config = json.loads(config_path.read_text())
+    proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
+    network_env = {**os.environ, **parse_env(proxy_entries)}
     repo = Path(__file__).resolve().parents[2]
     app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
     run([*app, 'git', 'fetch', '--no-tags', f'https://github.com/{REPOSITORY}.git',
-         'refs/heads/main:' + UPGRADE_REF], cwd=repo)
+         'refs/heads/main:' + UPGRADE_REF], cwd=repo, env=network_env)
     revision = output(['git', '-C', repo, 'rev-parse', '--verify', UPGRADE_REF + '^{commit}'])
     target = releases / revision
     if target == current:
-        running = health(settings['data'])
-        if running.get('revision') == revision and running.get('gate') == 'open':
+        try:
+            running = health(settings['data'])
+        except (OSError, ValueError, IndexError, DeploymentError):
+            running = {}
+        if isinstance(running, dict) and running.get('revision') == revision and running.get('gate') == 'open':
             print('Already running:', revision)
             return
 
@@ -250,16 +272,18 @@ def upgrade_system(root, entry):
         with tempfile.TemporaryDirectory() as artifact:
             try:
                 run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact,
-                     '--pattern', 'ink', '--pattern', 'SHA256SUMS'])
+                     '--pattern', 'ink', '--pattern', 'SHA256SUMS'], env=network_env)
             except subprocess.CalledProcessError:
                 raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
             stage(argparse.Namespace(
                 revision=revision, artifact_dir=artifact, config=str(config_path),
                 github_command=config['github_command'], cc_config=settings['cc_config'],
                 project=settings['project'], cc_connect_binary=str(current / 'cc-connect'),
-                env=[key + '=' + value for key, value in settings.get('environment', {}).items()],
+                env=proxy_entries,
             ))
     else:
+        if target != current:
+            verify_staged_upgrade(current, target, config, settings)
         verify_revision(target / 'ink', revision)
 
     # Ask for sudo before changing the skill link. The existing activate command
