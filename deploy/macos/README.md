@@ -21,7 +21,7 @@ yuxingyi --profile inspect -R wujinhjun/ink-commons release download --pattern '
 "$HOME/.local/lib/ink-commons/ink" upgrade
 ```
 
-命令读取现有部署的配置、代理和 cc-connect 二进制，通过 GitHub API 获取 `main` 的提交并下载对应的发布文件。校验后获取 sudo 授权、切换并验证服务。同砚和 cc-connect 会短暂重启。目标版本健康运行时直接退出。重试可复用配置和 cc-connect 均匹配的暂存目录。若报告与当前部署有差异，可先将该未激活的暂存目录移出 `releases` 再重试。
+命令读取现有部署的配置、代理和 cc-connect 二进制，通过 GitHub API 获取 `main` 的提交并下载对应的发布文件。校验后获取 sudo 授权、切换并验证服务。同砚和 cc-connect 会短暂重启。目标版本健康运行时直接退出。重试时会用发布包的 SHA-256 清单再次校验暂存文件，并核对配置和 cc-connect。若报告与当前部署有差异，可先将该未激活的暂存目录移出 `releases` 再重试。
 
 系统已安装但当前 `ink` 版本早于升级命令时，先下载并校验上述发布包，然后运行包中的 `manage.py upgrade`。发布中的目标会在切换前退出，可等 GitHub Actions 发布成功后重试。首次部署和后续升级均无需 checkout、Git 或 Go。
 

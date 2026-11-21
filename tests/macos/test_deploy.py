@@ -112,6 +112,7 @@ class ArtifactStageTest(unittest.TestCase):
             self.assertNotIn(args[0], ('git', 'go', 'sudo'))
             return real_run(args, **kwargs)
 
+        release = self.releases / self.revision
         with patch.object(m, '__file__', str(self.artifact / 'manage.py')), \
              patch.object(m, 'SYSTEM_DIR', system), \
              patch.object(m.Path, 'home', return_value=self.home), \
@@ -121,12 +122,16 @@ class ArtifactStageTest(unittest.TestCase):
              patch.object(sys, 'path', [str(self.artifact), *sys.path]), \
              patch('runtime.environment'):
             m.deploy(self.args)
+            activate.assert_called_once_with(release, cc_agent=cc_agent)
+            self.assertEqual((release / 'manage.py').read_bytes(), (self.artifact / 'manage.py').read_bytes())
+            self.assertEqual((release / 'runtime.py').read_bytes(), (self.artifact / 'runtime.py').read_bytes())
+            self.assertEqual((self.home / '.local/state/ink-commons').stat().st_mode & 0o777, 0o700)
 
-        release = self.releases / self.revision
-        activate.assert_called_once_with(release, cc_agent=cc_agent)
-        self.assertEqual((release / 'manage.py').read_bytes(), (self.artifact / 'manage.py').read_bytes())
-        self.assertEqual((release / 'runtime.py').read_bytes(), (self.artifact / 'runtime.py').read_bytes())
-        self.assertEqual((self.home / '.local/state/ink-commons').stat().st_mode & 0o777, 0o700)
+            activate.reset_mock()
+            (release / 'runtime.py').write_bytes(b'changed after staging')
+            with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: runtime.py'):
+                m.deploy(self.args)
+            activate.assert_not_called()
 
     def test_bundle_rejects_tampered_runtime_script(self):
         self.write_bundle()
@@ -164,6 +169,29 @@ class UpgradeTest(unittest.TestCase):
         settings = json.loads((self.current / 'deployment.json').read_text())
         settings['revision'] = self.target.name
         (self.target / 'deployment.json').write_text(json.dumps(settings))
+
+    def make_published_manifest(self, release):
+        (release / 'ink').write_text(f"#!/bin/sh\nprintf '%s\\n' '{release.name}'\n")
+        (release / 'ink').chmod(0o700)
+        (release / 'REVISION').write_text(release.name + '\n')
+        for name in ('manage.py', 'runtime.py', 'config.example.json'):
+            (release / name).write_text(f'published {name}\n')
+        return ''.join(
+            hashlib.sha256((release / name).read_bytes()).hexdigest() + f'  {name}\n'
+            for name in m.BUNDLE_FILES
+        )
+
+    def mock_manifest_download(self, manifest, revision):
+        real_run = m.run
+
+        def run(args, **kwargs):
+            if args[0] != '/test/yuxingyi':
+                return real_run(args, **kwargs)
+            self.assertEqual(args[5:8], ['release', 'download', 'build-' + revision])
+            self.assertEqual(args[10:], ['--pattern=SHA256SUMS'])
+            (Path(args[9]) / 'SHA256SUMS').write_text(manifest)
+
+        return patch.object(m, 'run', side_effect=run)
 
     def test_downloads_main_and_reuses_current_configuration(self):
         def run(args, **kwargs):
@@ -220,26 +248,40 @@ class UpgradeTest(unittest.TestCase):
         run.assert_not_called()
 
     def test_missing_health_socket_reactivates_installed_target(self):
-        with patch.object(m, 'run') as run, \
+        manifest = self.make_published_manifest(self.current)
+        with self.mock_manifest_download(manifest, self.current.name), \
              patch.object(m, 'output', return_value=self.current.name), \
              patch.object(m, 'health', side_effect=FileNotFoundError), \
-             patch.object(m, 'verify_revision') as verify:
+             patch.object(m, 'activate_staged') as activate:
             m.upgrade_system(self.root, self.entry)
 
-        verify.assert_called_once_with(self.current / 'ink', self.current.name)
-        self.assertEqual(run.call_args.args[0][2:5],
-                         [self.current / 'manage.py', 'activate', '--system'])
+        activate.assert_called_once_with(self.current)
 
     def test_reuses_matching_stage(self):
         self.make_staged_target()
-        with patch.object(m, 'run') as run, \
+        manifest = self.make_published_manifest(self.target)
+        with self.mock_manifest_download(manifest, self.target.name), \
              patch.object(m, 'output', return_value=self.target.name), \
-             patch.object(m, 'verify_revision') as verify:
+             patch.object(m, 'activate_staged') as activate:
             m.upgrade_system(self.root, self.entry)
 
-        verify.assert_called_once_with(self.target / 'ink', self.target.name)
-        self.assertEqual(run.call_args.args[0][2:5],
-                         [self.target / 'manage.py', 'activate', '--system'])
+        activate.assert_called_once_with(self.target)
+
+    def test_rejects_tampered_staged_scripts_using_published_manifest(self):
+        self.make_staged_target()
+        manifest = self.make_published_manifest(self.target)
+        for name in ('manage.py', 'runtime.py'):
+            with self.subTest(file=name):
+                script = self.target / name
+                original = script.read_bytes()
+                script.write_bytes(b'changed after staging')
+                with self.mock_manifest_download(manifest, self.target.name), \
+                     patch.object(m, 'output', return_value=self.target.name), \
+                     patch.object(m, 'activate_staged') as activate:
+                    with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: ' + name):
+                        m.upgrade_system(self.root, self.entry)
+                activate.assert_not_called()
+                script.write_bytes(original)
 
     def test_rejects_staged_config_environment_and_binary_differences(self):
         self.make_staged_target()

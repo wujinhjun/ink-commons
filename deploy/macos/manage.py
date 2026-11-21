@@ -137,7 +137,7 @@ def bundle_revision(artifact):
     return revision
 
 
-def stage_artifact(artifact, candidate, revision, bundled):
+def verify_artifact(artifact, release, revision, bundled):
     names = BUNDLE_FILES if bundled else ('ink',)
     checksums = {}
     for line in (artifact / 'SHA256SUMS').read_text().splitlines():
@@ -148,16 +148,15 @@ def stage_artifact(artifact, candidate, revision, bundled):
     if set(checksums) != set(names):
         raise DeploymentError('incomplete ink artifact checksum file')
     for name in names:
-        target = candidate / name
-        shutil.copyfile(artifact / name, target)
+        target = release / name
+        if not target.is_file() or target.is_symlink():
+            raise DeploymentError('ink artifact file is missing or invalid: ' + name)
         with target.open('rb') as stream:
             if hashlib.file_digest(stream, 'sha256').hexdigest() != checksums[name]:
                 raise DeploymentError('ink artifact checksum mismatch: ' + name)
-    if bundled and bundle_revision(candidate) != revision:
+    if bundled and bundle_revision(release) != revision:
         raise DeploymentError('deployment bundle revision does not match --revision')
-    binary = candidate / 'ink'
-    binary.chmod(0o700)
-    verify_revision(binary, revision)
+    verify_revision(release / 'ink', revision)
 
 
 def verify_revision(binary, revision):
@@ -210,7 +209,7 @@ def stage(args, *, reuse=False):
                 'cc_binary_sha256': hashlib.sha256(cc_source.read_bytes()).hexdigest()}
     if release.exists():
         verify_staged_settings(release, config, settings)
-        verify_revision(release / 'ink', revision)
+        verify_artifact(artifact, release, revision, bundled)
         return release
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(dir=root) as temp:
@@ -218,7 +217,10 @@ def stage(args, *, reuse=False):
         candidate = temp / 'release'
         candidate.mkdir(mode=0o700)
         if artifact is not None:
-            stage_artifact(artifact, candidate, revision, bundled)
+            for name in (BUNDLE_FILES if bundled else ('ink',)):
+                shutil.copyfile(artifact / name, candidate / name)
+            (candidate / 'ink').chmod(0o700)
+            verify_artifact(artifact, candidate, revision, bundled)
             if not bundled:
                 for name in ('runtime.py', 'manage.py'):
                     script = run(['git', '-C', repo, 'show', revision + ':deploy/macos/' + name],
@@ -340,13 +342,21 @@ def upgrade_system(root, entry):
             print('Already running:', revision)
             return
 
-    if not target.exists():
-        with tempfile.TemporaryDirectory() as artifact:
-            try:
-                run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact,
-                     *[f'--pattern={name}' for name in (*BUNDLE_FILES, 'SHA256SUMS')]], env=network_env)
-            except subprocess.CalledProcessError:
-                raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
+    reuse = target.exists()
+    if reuse and target != current:
+        verify_cc_binary(current, settings.get('cc_binary_sha256'))
+        verify_staged_settings(target, config, {**settings, 'revision': revision})
+
+    assets = ('SHA256SUMS',) if reuse else (*BUNDLE_FILES, 'SHA256SUMS')
+    with tempfile.TemporaryDirectory() as artifact:
+        try:
+            run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact,
+                 *[f'--pattern={name}' for name in assets]], env=network_env)
+        except subprocess.CalledProcessError:
+            raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
+        if reuse:
+            verify_artifact(Path(artifact), target, revision, bundled=True)
+        else:
             if bundle_revision(Path(artifact)) != revision:
                 raise DeploymentError('downloaded bundle does not match the main revision')
             stage(argparse.Namespace(
@@ -355,11 +365,6 @@ def upgrade_system(root, entry):
                 project=settings['project'], cc_connect_binary=str(current / 'cc-connect'),
                 env=proxy_entries,
             ))
-    else:
-        if target != current:
-            verify_cc_binary(current, settings.get('cc_binary_sha256'))
-            verify_staged_settings(target, config, {**settings, 'revision': revision})
-        verify_revision(target / 'ink', revision)
 
     try:
         activate_staged(target)
