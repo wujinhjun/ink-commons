@@ -191,6 +191,25 @@ func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T
 			if err := f.s.store.save(st); err != nil {
 				t.Fatal(err)
 			}
+			f.conflictLookupUnavailable = true
+			preflightConflict(t, f)
+			if f.work(t).MergeConflict != nil {
+				t.Fatal("failed GraphQL confirmation retained the expired timer")
+			}
+			f.conflictLookupUnavailable = false
+			preflightConflict(t, f)
+			st, err = f.s.store.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			w = st.Work[key(f.repo.Repo, f.pull.Number)]
+			if w.Task != nil || w.MergeConflict == nil {
+				t.Fatal("first confirmation after recovery must start a new window")
+			}
+			w.MergeConflict.Since = time.Now().Add(-mergeConflictConfirmation)
+			if err := f.s.store.save(st); err != nil {
+				t.Fatal(err)
+			}
 			preflightConflict(t, f)
 			f.observe(t)
 			next := f.work(t).Task
@@ -200,6 +219,20 @@ func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T
 			delivery := f.claim(t, next, claimA, 200)["delivery"].(map[string]any)
 			if delivery["conflict_base_sha"] != f.conflictBaseSHA {
 				t.Fatalf("wrong delivered conflict base: %v", delivery["conflict_base_sha"])
+			}
+			f.submit(t, next, claimA, HandoffSubmission{RequestID: "known-base", Handoff: true,
+				Outcome: "blocked", Reason: "waiting for a clean base"}, 200)
+			mergeable := true
+			f.pull.Mergeable, f.pull.MergeableState = &mergeable, "unstable"
+			f.conflictDetailBaseSHA = f.pull.Base.SHA
+			preflightConflict(t, f)
+			if w := f.work(t); w.Task == nil || w.Task.ID != next.ID {
+				t.Fatal("a clean result for the stale base retired a task on the live base")
+			}
+			f.conflictDetailBaseSHA = f.conflictBaseSHA
+			preflightConflict(t, f)
+			if w := f.work(t); w.Task != nil || w.MergeConflict != nil || w.handoffMergeBlocked() {
+				t.Fatal("a clean result for the confirmed base did not clear the blocked task")
 			}
 		})
 	}

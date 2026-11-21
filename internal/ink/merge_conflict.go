@@ -107,22 +107,25 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 	w := st.Work[key(repoName, number)]
 	repo, ok := s.repo(repoName)
 	if w == nil || w.Version != version || w.Phase != "approved" || !ok || (repo.AutoMerge == nil || !repo.AutoMerge.Enabled) ||
-		w.Pull.Head.SHA != pull.Head.SHA || w.Pull.Base.Ref != pull.Base.Ref ||
-		(!dirty && w.Pull.Base.SHA != pull.Base.SHA) || hasInFlightAutoMerge(w) {
+		w.Pull.Head.SHA != pull.Head.SHA || w.Pull.Base.Ref != pull.Base.Ref || hasInFlightAutoMerge(w) {
 		return nil
 	}
 
 	now := time.Now()
 	if !dirty {
-		changed := w.MergeConflict != nil
-		if pull.Mergeable == nil && w.Task != nil && w.Task.ConflictBase != nil {
+		mergeable := pull.Mergeable != nil && *pull.Mergeable
+		t := w.Task
+		// Keep the verified base mapping for an issued task when a check is
+		// inconclusive. A clean result for a stale SHA cannot retire that task.
+		if mergeable && pull.Base != w.conflictBase() {
 			return nil
 		}
+		if !mergeable && t != nil && t.ConflictBase != nil {
+			return nil
+		}
+		changed := w.MergeConflict != nil
 		w.MergeConflict = nil
-		// Unknown mergeability resets confirmation but does not cancel a
-		// claimable task. A positive result can retire only unowned work.
-		t := w.Task
-		if pull.Mergeable != nil && *pull.Mergeable && t != nil && t.ConflictBase != nil && t.Handoff != nil &&
+		if mergeable && t != nil && t.ConflictBase != nil && t.Handoff != nil &&
 			(t.Handoff.State == "pending" || t.Handoff.State == "blocked") {
 			t.Handoff.State = "superseded"
 			w.replaceTask(nil)
