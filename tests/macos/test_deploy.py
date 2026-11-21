@@ -101,14 +101,13 @@ class ArtifactStageTest(unittest.TestCase):
             for name in m.BUNDLE_FILES
         ))
 
-    def test_deploys_release_bundle_without_a_git_checkout(self):
+    def test_deploys_from_the_published_example_without_local_configuration(self):
         self.write_bundle()
+        self.config.unlink()
+        self.args.config = str(self.artifact / 'config.example.json')
+        self.args.cc_config = None
+        self.args.project = None
         system = self.home / 'LaunchDaemons'
-        gui = self.home / 'Library/LaunchAgents'
-        gui.mkdir(parents=True)
-        cc_agent = gui / (EXTERNAL_CC + '.plist')
-        cc_agent.write_bytes(plistlib.dumps({'ProgramArguments': [str(self.cc_binary)]}))
-        self.args.cc_connect_binary = None
         real_run = m.run
 
         def run(args, **kwargs):
@@ -135,6 +134,24 @@ class ArtifactStageTest(unittest.TestCase):
             with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: runtime.py'):
                 m.deploy(self.args)
             activate.assert_not_called()
+
+    def test_deploy_rejects_unloaded_legacy_plist_before_writing(self):
+        system = self.home / 'LaunchDaemons'
+        system.mkdir()
+        old_plist = system / (m.LABEL + '.plist')
+        old_plist.write_bytes(b'legacy plist')
+        with patch.object(m, 'SYSTEM_DIR', system), \
+             patch.object(m.Path, 'home', return_value=self.home), \
+             patch.object(m, 'loaded', return_value=False), \
+             patch.object(m, 'deployment_lock') as lock, \
+             patch.object(m, 'stage') as stage:
+            with self.assertRaisesRegex(m.DeploymentError, 'legacy system service'):
+                m.deploy(self.args)
+        lock.assert_not_called()
+        stage.assert_not_called()
+        self.assertFalse(self.releases.parent.exists())
+        self.assertFalse((self.home / '.local/state/ink-commons').exists())
+        self.assertEqual(old_plist.read_bytes(), b'legacy plist')
 
     def test_bundle_rejects_tampered_runtime_script(self):
         self.write_bundle()

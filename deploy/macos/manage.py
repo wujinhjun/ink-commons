@@ -219,16 +219,22 @@ def stage(args, *, reuse=False):
     return release
 
 
+def require_login_deployment():
+    if loaded('system', LABEL) or (SYSTEM_DIR / (LABEL + '.plist')).exists():
+        raise DeploymentError('legacy system service detected; migrate it separately')
+
+
 def deploy(args):
     uid = os.geteuid()
     if uid == 0:
         raise DeploymentError('deploy must run as the service user, without sudo')
+    require_login_deployment()
     home = Path.home().resolve()
     root = home / '.local/lib/ink-commons'
     with deployment_lock(root):
         entry = root / 'ink'
         gui = 'gui/' + str(uid)
-        if entry.exists() or entry.is_symlink() or loaded('system', LABEL) or loaded(gui, LABEL):
+        if entry.exists() or entry.is_symlink() or loaded(gui, LABEL):
             raise DeploymentError('an Ink deployment already exists; use upgrade')
         artifact = Path(__file__).resolve().parent
         args.revision = bundle_revision(artifact)
@@ -256,8 +262,7 @@ def upgrade():
         raise DeploymentError('upgrade must run as the service user, without sudo')
     root = Path.home().resolve() / '.local/lib/ink-commons'
     entry = root / 'ink'
-    if loaded('system', LABEL) or (SYSTEM_DIR / (LABEL + '.plist')).exists():
-        raise DeploymentError('legacy system deployment detected; migrate to the login service before upgrading')
+    require_login_deployment()
     if not entry.is_symlink():
         raise DeploymentError('upgrade requires an existing login deployment')
     with deployment_lock(root):
@@ -439,8 +444,7 @@ def activate(args):
         raise DeploymentError('release home or revision differs from the deployment manifest')
     data = Path(settings['data'])
     validate_state_directory(data, home, account.pw_uid)
-    if loaded('system', LABEL) or (SYSTEM_DIR / (LABEL + '.plist')).exists():
-        raise DeploymentError('legacy system service must be migrated separately')
+    require_login_deployment()
     domain = 'gui/' + str(account.pw_uid)
     run(['/bin/launchctl', 'print', domain], stdout=subprocess.DEVNULL)
     path = home / 'Library/LaunchAgents' / (LABEL + '.plist')
