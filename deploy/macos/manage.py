@@ -23,6 +23,8 @@ LABEL = 'com.ink-commons.daemon'
 CC_LABEL = 'com.cc-connect.service'
 WATCHDOG = 'com.personal-infra.discord-watchdog'
 SYSTEM_DIR = Path('/Library/LaunchDaemons')
+REPOSITORY = 'wujinhjun/ink-commons'
+UPGRADE_REF = 'refs/remotes/ink-upgrade/main'
 
 
 class DeploymentError(Exception):
@@ -134,8 +136,12 @@ def stage_artifact(artifact, target, revision):
     if actual != expected[1]:
         raise DeploymentError('ink artifact checksum mismatch')
     target.chmod(0o700)
+    verify_revision(target, revision)
+
+
+def verify_revision(binary, revision):
     try:
-        result = run([target, 'version'], capture_output=True, timeout=10)
+        result = run([binary, 'version'], capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         raise DeploymentError('ink artifact version could not be read on this Mac') from None
     if result.stdout.strip() != revision.encode():
@@ -203,6 +209,74 @@ def stage(args):
         os.rename(candidate, release)
     print('Staged:', release)
     print('No running service was changed.')
+
+
+def upgrade():
+    if os.geteuid() == 0:
+        raise DeploymentError('upgrade must run as the service user, without sudo')
+    root = Path.home().resolve() / '.local/lib/ink-commons'
+    entry = root / 'ink'
+    if not entry.is_symlink() or not loaded('system', LABEL):
+        raise DeploymentError('upgrade requires an existing system deployment')
+    with (root / 'upgrade.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise DeploymentError('another upgrade is running') from None
+        upgrade_system(root, entry)
+
+
+def upgrade_system(root, entry):
+    releases = root / 'releases'
+    current = entry.resolve().parent
+    if current.parent != releases or not (current / 'deployment.json').is_file():
+        raise DeploymentError('installed release is unavailable')
+    settings = json.loads((current / 'deployment.json').read_text())
+    config_path = current / 'config.json'
+    config = json.loads(config_path.read_text())
+    repo = Path(__file__).resolve().parents[2]
+    app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
+    run([*app, 'git', 'fetch', '--no-tags', f'https://github.com/{REPOSITORY}.git',
+         'refs/heads/main:' + UPGRADE_REF], cwd=repo)
+    revision = output(['git', '-C', repo, 'rev-parse', '--verify', UPGRADE_REF + '^{commit}'])
+    target = releases / revision
+    if target == current:
+        running = health(settings['data'])
+        if running.get('revision') == revision and running.get('gate') == 'open':
+            print('Already running:', revision)
+            return
+
+    if not target.exists():
+        with tempfile.TemporaryDirectory() as artifact:
+            try:
+                run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact,
+                     '--pattern', 'ink', '--pattern', 'SHA256SUMS'])
+            except subprocess.CalledProcessError:
+                raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
+            stage(argparse.Namespace(
+                revision=revision, artifact_dir=artifact, config=str(config_path),
+                github_command=config['github_command'], cc_config=settings['cc_config'],
+                project=settings['project'], cc_connect_binary=str(current / 'cc-connect'),
+                env=[key + '=' + value for key, value in settings.get('environment', {}).items()],
+            ))
+    else:
+        verify_revision(target / 'ink', revision)
+
+    # Ask for sudo before changing the skill link. The existing activate command
+    # owns service validation and rollback.
+    run(['sudo', '-v'])
+    try:
+        run([target / 'ink', 'init'])
+        run([target / 'ink', 'init', '--check'])
+        run(['sudo', sys.executable, target / 'manage.py', 'activate', '--system',
+             '--user', pwd.getpwuid(os.geteuid()).pw_name, '--release', target])
+    except (OSError, subprocess.CalledProcessError):
+        if entry.resolve().parent == current:
+            try:
+                run([current / 'ink', 'init'])
+            except (OSError, subprocess.CalledProcessError):
+                print('Unable to restore the previous agent skill', file=sys.stderr)
+        raise
 
 
 def ink_plist(release, settings, user, system):
@@ -550,6 +624,7 @@ def main():
     build.add_argument('--cc-config', default='~/.cc-connect/config.toml')
     build.add_argument('--project', default='yu-xing-yi-codex')
     build.add_argument('--github-command', default='~/.local/bin/yuxingyi')
+    commands.add_parser('upgrade', help='download and activate the verified main build')
     apply = commands.add_parser('activate')
     apply.add_argument('--release', required=True)
     apply.add_argument('--user', required=True)
@@ -563,7 +638,10 @@ def main():
     if sys.platform != 'darwin':
         parser.error('macOS only')
     try:
-        {'stage': stage, 'activate': activate, 'status': status}[args.action](args)
+        if args.action == 'upgrade':
+            upgrade()
+        else:
+            {'stage': stage, 'activate': activate, 'status': status}[args.action](args)
     except DeploymentError as error:
         print('Deployment failed:', str(error), file=sys.stderr)
         return 1
