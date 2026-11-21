@@ -277,7 +277,7 @@ func TestAutoMergeConcurrentReservationAndWaitingCannotOverwrite(t *testing.T) {
 	}
 }
 
-func TestAutoMergeRegistrationDefaultCanBeDisabled(t *testing.T) {
+func TestAutoMergeRegistrationRequiresRepositoryOptIn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), stateDatabase)
 	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "reviewer", AutoMerge: &AutoMergeConfig{Enabled: true, Method: "squash"}}}
 	s, err := NewService(cfg, path, nil)
@@ -290,7 +290,7 @@ func TestAutoMergeRegistrationDefaultCanBeDisabled(t *testing.T) {
 		reply(w, 200, []Pull{})
 		return w.Result(), nil
 	})
-	for _, body := range []string{`{"repo":"acme/inherit"}`, `{"repo":"acme/disabled","auto_merge":{"enabled":false}}`} {
+	for _, body := range []string{`{"repo":"acme/inherit"}`, `{"repo":"acme/disabled","auto_merge":{"enabled":false}}`, `{"repo":"acme/enabled","auto_merge":{"enabled":true}}`} {
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/v1/repositories", strings.NewReader(body)))
 		if w.Code != 201 {
@@ -304,7 +304,7 @@ func TestAutoMergeRegistrationDefaultCanBeDisabled(t *testing.T) {
 	}
 	defer s2.Close()
 	for _, r := range s2.repositories() {
-		if r.AutoMerge == nil || r.AutoMerge.Enabled != (r.Repo == "acme/inherit") {
+		if (r.AutoMerge != nil && r.AutoMerge.Enabled) != (r.Repo == "acme/enabled") {
 			t.Fatal("lost explicit auto merge policy")
 		}
 	}

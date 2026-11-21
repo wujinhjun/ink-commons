@@ -4,12 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -41,21 +45,77 @@ type Repository struct {
 }
 
 type Config struct {
-	RepositoryDefaults Repository
-	Repositories       []Repository
-	PollSeconds        int
-	Reliability        Reliability
-	GitHubToken        string
-	GitHubCommand      string
-	PollGate           string
+	RepositoryDefaults  Repository
+	Repositories        []Repository
+	PollSeconds         int
+	Reliability         Reliability
+	GitHubToken         string
+	GitHubCommand       string
+	GitHubCommandSHA256 string
+	GitHubMergerCommand string
+	GitHubMergerSHA256  string
+	PollGate            string
+}
+
+func (c Config) ValidateGitHubCommands() error {
+	if c.GitHubMergerCommand != "" {
+		if c.GitHubCommand == "" || !filepath.IsAbs(c.GitHubMergerCommand) || c.GitHubMergerSHA256 == "" {
+			return fmt.Errorf("merger requires a dedicated absolute command, checksum and separate reader")
+		}
+		if sameAppCommand(c.GitHubCommand, c.GitHubMergerCommand) {
+			return fmt.Errorf("merger and reader must use separate App commands")
+		}
+	}
+	if err := checkCommandDigest(c.GitHubCommand, c.GitHubCommandSHA256); err != nil {
+		return fmt.Errorf("reader command: %w", err)
+	}
+	if err := checkCommandDigest(c.GitHubMergerCommand, c.GitHubMergerSHA256); err != nil {
+		return fmt.Errorf("merger command: %w", err)
+	}
+	return nil
+}
+
+func sameAppCommand(first, second string) bool {
+	if first == "" || second == "" {
+		return false
+	}
+	if filepath.Clean(first) == filepath.Clean(second) {
+		return true
+	}
+	a, errA := os.Stat(first)
+	b, errB := os.Stat(second)
+	return errA == nil && errB == nil && os.SameFile(a, b)
+}
+
+func checkCommandDigest(command, digest string) error {
+	if digest == "" {
+		return nil // Older installations can adopt a pin at their next deployment.
+	}
+	raw, err := hex.DecodeString(digest)
+	if err != nil || len(raw) != sha256.Size || !filepath.IsAbs(command) {
+		return fmt.Errorf("invalid App command checksum or path")
+	}
+	file, err := os.Open(command)
+	if err != nil {
+		return fmt.Errorf("App command is unavailable")
+	}
+	defer file.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil || !bytes.Equal(h.Sum(nil), raw) {
+		return fmt.Errorf("App command checksum mismatch")
+	}
+	return nil
 }
 
 type upstream struct {
-	lastOK  *atomic.Int64
-	command string
-	token   string
-	http    *http.Client
-	github  string
+	lastOK        *atomic.Int64
+	command       string
+	commandDigest string
+	mergerCommand string
+	mergerDigest  string
+	token         string
+	http          *http.Client
+	github        string
 }
 
 func newUpstream(token string) upstream {
@@ -68,6 +128,19 @@ func newUpstream(token string) upstream {
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
+}
+
+// Only merge requests use the dedicated write identity.
+func (u upstream) merger() (upstream, error) {
+	if u.mergerCommand != "" {
+		u.command, u.commandDigest = u.mergerCommand, u.mergerDigest
+		u.token = ""
+		return u, nil
+	}
+	if u.command != "" || u.token != "" {
+		return upstream{}, fmt.Errorf("automatic merge requires a dedicated GitHub merger App")
+	}
+	return u, nil
 }
 
 func (u upstream) gitHubGet(ctx context.Context, path string, result any) (http.Header, error) {
@@ -153,6 +226,9 @@ func (u upstream) commandResponse(ctx context.Context, method, path, profile, ve
 	}
 	if input != nil {
 		args = append(args, "--input", "-")
+	}
+	if err := checkCommandDigest(u.command, u.commandDigest); err != nil {
+		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, u.command, args...)
 	if input != nil {

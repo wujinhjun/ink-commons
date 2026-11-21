@@ -271,7 +271,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		}
 	}
 	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting"}
-	version, observedPull := w.Version, w.Pull
+	version, observedPull, reviewerCommand := w.Version, w.Pull, w.Reviewer.GitHubCommand
 	confirmingConflict := w.MergeConflict != nil
 	trackingConflict := confirmingConflict || (w.Task != nil && w.Task.ConflictBase != nil)
 	s.mu.Unlock()
@@ -281,6 +281,13 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		run.Reason = reason
 		_, err := s.updateAutoMerge(repo, number, run, false)
 		return err
+	}
+	mergeUpstream, err := s.up.merger()
+	if err != nil {
+		return wait(err.Error())
+	}
+	if sameAppCommand(reviewerCommand, mergeUpstream.command) {
+		return wait("reviewer and merger must use separate GitHub Apps")
 	}
 	var pull Pull
 	if _, _, err := s.up.gitHubJSON(ctx, http.MethodGet, path, "inspect", stackAPIVersion, nil, &pull); err != nil {
@@ -347,9 +354,9 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		return err
 	}
 	if fresh.Stack != nil {
-		return s.startStackMerge(ctx, repo, number, run)
+		return s.startStackMerge(ctx, repo, number, run, mergeUpstream)
 	}
-	mergeSHA, err := s.up.merge(ctx, repo.Repo, number, run.SHA, run.Method)
+	mergeSHA, err := mergeUpstream.merge(ctx, repo.Repo, number, run.SHA, run.Method)
 	if err != nil {
 		run.Reason = "merge request failed or response was lost: " + err.Error() + "; verify GitHub before taking action"
 	} else {

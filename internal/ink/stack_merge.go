@@ -34,12 +34,12 @@ func stackMergePath(repo Repository, number int) string {
 	return fmt.Sprintf("/repos/%s/pulls/%d/merge-async", repo.Repo, number)
 }
 
-func (s *Service) startStackMerge(ctx context.Context, repo Repository, number int, run AutoMergeRun) error {
+func (s *Service) startStackMerge(ctx context.Context, repo Repository, number int, run AutoMergeRun, merger upstream) error {
 	body, _ := json.Marshal(map[string]string{
 		"sha": run.SHA, "merge_method": run.Method, "merge_action": stackMergeAction,
 	})
 	var result stackMergeResult
-	_, status, err := s.up.gitHubJSON(ctx, http.MethodPut, stackMergePath(repo, number), "code", stackAPIVersion, body, &result, http.StatusConflict)
+	_, status, err := merger.gitHubJSON(ctx, http.MethodPut, stackMergePath(repo, number), "code", stackAPIVersion, body, &result, http.StatusConflict)
 	switch {
 	case status == http.StatusBadRequest:
 		run.State = "waiting"
@@ -83,7 +83,10 @@ func (s *Service) pollStackMerge(ctx context.Context, repo Repository, number in
 		return fmt.Errorf("invalid stored stack merge request ID")
 	}
 	var result stackMergeResult
-	_, _, err = s.up.gitHubJSON(ctx, http.MethodGet, stackMergePath(repo, number)+"/"+id.String(), "code", stackAPIVersion, nil, &result)
+	merger, err := s.up.merger()
+	if err == nil {
+		_, _, err = merger.gitHubJSON(ctx, http.MethodGet, stackMergePath(repo, number)+"/"+id.String(), "code", stackAPIVersion, nil, &result)
+	}
 	next := run
 	if err != nil {
 		if ctx.Err() != nil {
