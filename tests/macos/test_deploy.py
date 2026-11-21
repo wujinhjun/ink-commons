@@ -10,6 +10,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch, MagicMock
 
+EXTERNAL_CC = 'org.example.cc'
+EXTERNAL_WATCHDOG = 'org.example.watchdog'
+
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('manage', ROOT / 'deploy/macos/manage.py')
 m = importlib.util.module_from_spec(spec)
@@ -63,7 +66,7 @@ class ArtifactStageTest(unittest.TestCase):
         self.stage()
         release = self.releases / self.revision
         self.assertEqual(m.output([release / 'ink', 'version']), self.revision)
-        self.assertEqual((release / 'cc-connect').read_bytes(), self.cc_binary.read_bytes())
+        self.assertFalse((release / 'cc-connect').exists())
         for script in ('runtime.py', 'manage.py'):
             expected = m.run(['git', '-C', ROOT, 'show', f'{self.revision}:deploy/macos/{script}'],
                              capture_output=True).stdout
@@ -98,14 +101,13 @@ class ArtifactStageTest(unittest.TestCase):
             for name in m.BUNDLE_FILES
         ))
 
-    def test_deploys_release_bundle_without_a_git_checkout(self):
+    def test_deploys_from_the_published_example_without_local_configuration(self):
         self.write_bundle()
+        self.config.unlink()
+        self.args.config = str(self.artifact / 'config.example.json')
+        self.args.cc_config = None
+        self.args.project = None
         system = self.home / 'LaunchDaemons'
-        gui = self.home / 'Library/LaunchAgents'
-        gui.mkdir(parents=True)
-        cc_agent = gui / (m.CC_LABEL + '.plist')
-        cc_agent.write_bytes(plistlib.dumps({'ProgramArguments': [str(self.cc_binary)]}))
-        self.args.cc_connect_binary = None
         real_run = m.run
 
         def run(args, **kwargs):
@@ -122,7 +124,7 @@ class ArtifactStageTest(unittest.TestCase):
              patch.object(sys, 'path', [str(self.artifact), *sys.path]), \
              patch('runtime.environment'):
             m.deploy(self.args)
-            activate.assert_called_once_with(release, cc_agent=cc_agent)
+            activate.assert_called_once_with(release)
             self.assertEqual((release / 'manage.py').read_bytes(), (self.artifact / 'manage.py').read_bytes())
             self.assertEqual((release / 'runtime.py').read_bytes(), (self.artifact / 'runtime.py').read_bytes())
             self.assertEqual((self.home / '.local/state/ink-commons').stat().st_mode & 0o777, 0o700)
@@ -132,6 +134,24 @@ class ArtifactStageTest(unittest.TestCase):
             with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: runtime.py'):
                 m.deploy(self.args)
             activate.assert_not_called()
+
+    def test_deploy_rejects_unloaded_legacy_plist_before_writing(self):
+        system = self.home / 'LaunchDaemons'
+        system.mkdir()
+        old_plist = system / (m.LABEL + '.plist')
+        old_plist.write_bytes(b'legacy plist')
+        with patch.object(m, 'SYSTEM_DIR', system), \
+             patch.object(m.Path, 'home', return_value=self.home), \
+             patch.object(m, 'loaded', return_value=False), \
+             patch.object(m, 'deployment_lock') as lock, \
+             patch.object(m, 'stage') as stage:
+            with self.assertRaisesRegex(m.DeploymentError, 'legacy system service'):
+                m.deploy(self.args)
+        lock.assert_not_called()
+        stage.assert_not_called()
+        self.assertFalse(self.releases.parent.exists())
+        self.assertFalse((self.home / '.local/state/ink-commons').exists())
+        self.assertEqual(old_plist.read_bytes(), b'legacy plist')
 
     def test_bundle_rejects_tampered_runtime_script(self):
         self.write_bundle()
@@ -168,6 +188,7 @@ class UpgradeTest(unittest.TestCase):
             (self.target / name).write_bytes((self.current / name).read_bytes())
         settings = json.loads((self.current / 'deployment.json').read_text())
         settings['revision'] = self.target.name
+        settings.pop('cc_binary_sha256', None)
         (self.target / 'deployment.json').write_text(json.dumps(settings))
 
     def make_published_manifest(self, release):
@@ -209,25 +230,22 @@ class UpgradeTest(unittest.TestCase):
             self.assertTrue(Path(args.artifact_dir).is_dir())
             self.assertEqual(args.revision, self.target.name)
             self.assertEqual(args.config, str(self.current / 'config.json'))
-            self.assertEqual(args.cc_connect_binary, str(self.current / 'cc-connect'))
             self.assertEqual(args.cc_config, '/test/cc.toml')
             self.assertEqual(args.project, 'existing-project')
             self.assertEqual(args.env, ['HTTPS_PROXY=http://127.0.0.1:7897', 'NODE_OPTIONS=--use-env-proxy'])
 
         with patch.dict(m.os.environ, {'PATH': '/usr/bin:/bin'}, clear=True), \
              patch.object(m, 'run', side_effect=run), \
-             patch.object(m, 'stage', side_effect=stage) as staged:
+             patch.object(m, 'stage', side_effect=stage) as staged, \
+             patch.object(m, 'activate_staged') as activate:
             m.upgrade_system(self.root, self.entry)
 
         staged.assert_called_once()
+        activate.assert_called_once_with(self.target)
         self.assertEqual(self.calls[0][:6], ['/test/yuxingyi', '--profile', 'inspect', '-R', m.REPOSITORY, 'api'])
         self.assertEqual(self.calls[1][5:8], ['release', 'download', 'build-' + self.target.name])
         self.assertIn('--pattern=manage.py', self.calls[1])
         self.assertIn('--pattern=runtime.py', self.calls[1])
-        self.assertEqual(self.calls[2:5], [
-            ['sudo', '-v'], [self.target / 'ink', 'init'], [self.target / 'ink', 'init', '--check'],
-        ])
-        self.assertEqual(self.calls[5][2:5], [self.target / 'manage.py', 'activate', '--system'])
 
     def test_unpublished_build_does_not_stage_or_activate(self):
         with patch.object(m, 'run', side_effect=subprocess.CalledProcessError(1, 'release download')) as run, \
@@ -283,13 +301,12 @@ class UpgradeTest(unittest.TestCase):
                 activate.assert_not_called()
                 script.write_bytes(original)
 
-    def test_rejects_staged_config_environment_and_binary_differences(self):
+    def test_rejects_staged_config_and_environment_differences(self):
         self.make_staged_target()
         mismatches = (
             ('config.json', b'{}', 'configuration differs'),
             ('deployment.json', (self.target / 'deployment.json').read_bytes().replace(
                 b'http://127.0.0.1:7897', b'http://127.0.0.1:9801'), 'configuration differs'),
-            ('cc-connect', b'different cc-connect', 'does not match the current deployment checksum'),
         )
         for name, content, diagnostic in mismatches:
             with self.subTest(file=name):
@@ -317,8 +334,6 @@ class DeployTest(unittest.TestCase):
         self.old_state = (self.data / 'state.json').read_bytes()
         self.settings = {'home': str(self.home), 'data': str(self.data),
                          'python': sys.executable, 'revision': 'a' * 40}
-        (self.release / 'cc-connect').write_bytes(b'pinned cc-connect')
-        self.settings['cc_binary_sha256'] = hashlib.sha256(b'pinned cc-connect').hexdigest()
         (self.release / 'deployment.json').write_text(json.dumps(self.settings))
         (self.release / 'ink').write_text('new')
         (self.release / 'config.json').write_text(json.dumps({
@@ -331,13 +346,13 @@ class DeployTest(unittest.TestCase):
         self.old_plist = plistlib.dumps({'Label': m.LABEL, 'ProgramArguments': ['old']})
         (self.agents / (m.LABEL + '.plist')).write_bytes(self.old_plist)
         (self.agents / (m.LABEL + '.plist')).chmod(0o600)
-        (self.agents / (m.WATCHDOG + '.plist')).write_bytes(plistlib.dumps({'Label':m.WATCHDOG,'ProgramArguments':['watchdog']}))
-        cc = {'Label': m.CC_LABEL, 'ProgramArguments': [sys.executable],
+        (self.agents / (EXTERNAL_WATCHDOG + '.plist')).write_bytes(plistlib.dumps({'Label':EXTERNAL_WATCHDOG,'ProgramArguments':['watchdog']}))
+        cc = {'Label': EXTERNAL_CC, 'ProgramArguments': [sys.executable],
               'EnvironmentVariables': {'PATH': '/usr/bin:/bin'}}
-        (self.agents / (m.CC_LABEL + '.plist')).write_bytes(plistlib.dumps(cc))
+        (self.agents / (EXTERNAL_CC + '.plist')).write_bytes(plistlib.dumps(cc))
         self.system = self.home / 'system'
         self.system.mkdir()
-        self.jobs = {('gui/501', m.LABEL), ('gui/501', m.CC_LABEL), ('gui/501',m.WATCHDOG)}
+        self.jobs = {('gui/501', m.LABEL), ('gui/501', EXTERNAL_CC), ('gui/501',EXTERNAL_WATCHDOG)}
         self.account = SimpleNamespace(pw_uid=501, pw_gid=20, pw_dir=str(self.home))
         self.calls = []
         self.fail = False
@@ -351,14 +366,14 @@ class DeployTest(unittest.TestCase):
         self.calls.append(args)
         if args[:2] == ['/bin/launchctl', 'bootout']:
             domain, label = args[2].rsplit('/', 1)
-            if self.fail_stop and domain == 'system' and label == m.LABEL:
+            if self.fail_stop and (self.data / 'state.sqlite3').exists() and label == m.LABEL:
                 raise RuntimeError('new daemon cannot be stopped')
             self.jobs.discard((domain, label))
         if args[:2] == ['/bin/launchctl', 'bootstrap']:
             domain, path = args[2:]
             label = plistlib.loads(Path(path).read_bytes())['Label']
             self.jobs.add((domain, label))
-            if label == m.LABEL and domain == 'system':
+            if label == m.LABEL and plistlib.loads(Path(path).read_bytes())['ProgramArguments'] != ['old']:
                 # 模拟新版迁移，只能在 gate 未打开的条件下启动。
                 self.assertFalse((self.release / 'enabled').exists())
                 (self.data / 'state.sqlite3').write_bytes(b'new database')
@@ -368,19 +383,15 @@ class DeployTest(unittest.TestCase):
             raise RuntimeError('App unavailable')
         return SimpleNamespace(returncode=0)
 
-    def activate(self, migrating=True):
-        args = SimpleNamespace(user='service', release=str(self.release), system=True,
-                               cc_connect_agent=str(self.agents / (m.CC_LABEL + '.plist')) if migrating else None)
+    def activate(self, uid=501):
+        args = SimpleNamespace(user='service', release=str(self.release))
         with patch.object(m, 'SYSTEM_DIR', self.system), \
              patch.object(m.pwd, 'getpwnam', return_value=self.account), \
-             patch.object(m.os, 'geteuid', return_value=0), \
-             patch.object(m.os, 'chown'), patch.object(m.os, 'lchown'), \
-             patch.object(m.os, 'fchown'), \
+             patch.object(m.os, 'geteuid', return_value=uid), \
              patch.object(m, 'loaded', side_effect=lambda d,l: (d,l) in self.jobs), \
              patch.object(m, 'run', side_effect=self.run_fake), \
              patch.object(m, 'validate_state_directory'), \
              patch.object(m, 'disabled', return_value=False), \
-             patch.object(m, 'cc_listener_healthy', return_value=True), \
              patch.object(m, 'local_get', side_effect=self.self_check), \
              patch.object(m.time, 'sleep'), \
              patch.object(m, 'health', return_value={'revision': 'a'*40,'gate':'closed'}), \
@@ -396,22 +407,37 @@ class DeployTest(unittest.TestCase):
             raise m.DeploymentError('daemon App command exited (status 1)')
         return {'status':'ok'}
 
-    def test_system_migration_and_version_gate(self):
+    def test_login_upgrade_preserves_cc_connect_and_watchdog(self):
+        external = {name: (self.agents / (name + '.plist')).read_bytes()
+                    for name in (EXTERNAL_CC, EXTERNAL_WATCHDOG)}
         self.activate()
-        self.assertFalse((self.agents / (m.LABEL + '.plist')).exists())
-        self.assertFalse((self.agents / (m.CC_LABEL + '.plist')).exists())
-        self.assertFalse((self.agents / (m.WATCHDOG+'.plist')).exists())
-        stops=[a[2] for a in self.calls if a[:2]==['/bin/launchctl','bootout']]
-        self.assertLess(stops.index('gui/501/'+m.WATCHDOG),stops.index('gui/501/'+m.CC_LABEL))
+        for name, content in external.items():
+            self.assertEqual((self.agents / (name + '.plist')).read_bytes(), content)
+            self.assertIn(('gui/501', name), self.jobs)
+            self.assertFalse(any(name in ' '.join(call) for call in self.calls))
         self.assertTrue((self.release / 'enabled').exists())
         self.assertEqual(self.link.resolve(), self.release / 'ink')
-        ink = plistlib.loads((self.system / (m.LABEL + '.plist')).read_bytes())
-        self.assertEqual(ink['UserName'], 'service')
-        cc=plistlib.loads((self.system / (m.CC_LABEL+'.plist')).read_bytes())
-        self.assertEqual(cc['ProgramArguments'][0],str(self.release/'cc-connect'))
-        self.assertTrue(ink['KeepAlive'])
-        self.assertEqual(ink['EnvironmentVariables']['HOME'], str(self.home))
-        self.assertEqual({label for domain,label in self.jobs if domain=='system'}, {m.LABEL,m.CC_LABEL})
+        self.assertFalse((self.release / 'cc-connect').exists())
+        self.assertTrue((self.agents / (m.LABEL + '.plist')).is_file())
+
+    def test_root_or_legacy_system_refused_before_launchd_write(self):
+        with self.assertRaisesRegex(m.DeploymentError, 'non-root'):
+            self.activate(uid=0)
+        self.jobs.add(('system', m.LABEL))
+        with self.assertRaisesRegex(m.DeploymentError, 'legacy system service'):
+            self.activate()
+        self.assertEqual(self.calls, [])
+
+    def test_cc_connect_preflight_and_post_check(self):
+        for stop_phase in (1, 2):
+            with self.subTest(stop_phase=stop_phase):
+                self.calls.clear()
+                with patch.object(m, 'check_provider_endpoints',
+                                  side_effect=[None] * (stop_phase - 1) + [m.DeploymentError('offline')]):
+                    with self.assertRaisesRegex(m.DeploymentError, 'offline'):
+                        self.activate()
+                self.assertEqual(any('bootout' in call for call in self.calls), stop_phase == 2)
+                self.assertFalse((self.release / 'enabled').exists())
 
     def test_failed_app_check_restores_state_jobs_and_binary(self):
         self.fail = True
@@ -441,7 +467,7 @@ class DeployTest(unittest.TestCase):
             self.activate()
         self.assertEqual((self.data / 'state.sqlite3').read_bytes(), b'new database')
         self.assertFalse((self.release / 'enabled').exists())
-        self.assertIn(('system', m.LABEL), self.jobs)
+        self.assertIn(('gui/501', m.LABEL), self.jobs)
 
     def test_private_state_permissions_are_required(self):
         m.validate_state_directory(self.data, self.home, self.data.stat().st_uid)
@@ -459,15 +485,15 @@ class DeployTest(unittest.TestCase):
         self.assertTrue(self.link.is_symlink())
         self.assertEqual(self.link.readlink(),target)
 
-    def test_subsequent_system_update_reuses_installed_cc_config(self):
+    def test_repeated_login_update(self):
         self.activate()
-        self.activate(migrating=False)
+        self.activate()
         self.assertTrue((self.release/'enabled').exists())
 
     def test_only_non_secret_proxy_environment_is_allowed(self):
         env=m.parse_env(['HTTPS_PROXY=http://127.0.0.1:7897','NODE_OPTIONS=--use-env-proxy'])
         settings={**self.settings,'environment':env}
-        self.assertEqual(m.ink_plist(self.release,settings,'service',True)['EnvironmentVariables']['HTTPS_PROXY'],env['HTTPS_PROXY'])
+        self.assertEqual(m.ink_plist(self.release, settings)['EnvironmentVariables']['HTTPS_PROXY'],env['HTTPS_PROXY'])
         for entry in ('GH_TOKEN=secret','HTTPS_PROXY=http://user:secret@localhost:7897','NODE_OPTIONS=--require=/tmp/code.js'):
             with self.assertRaises(m.DeploymentError):
                 m.parse_env([entry])
@@ -483,7 +509,6 @@ class DeployTest(unittest.TestCase):
             self.activate()
         self.assertEqual(lock.call_count,2)
         self.assertTrue((self.release/'enabled').exists())
-        self.assertEqual({label for domain,label in self.jobs if domain=='system'},{m.LABEL,m.CC_LABEL})
 
     def test_runtime_credentials_never_inherit_personal_tokens(self):
         cc = self.home / 'config.toml'
@@ -495,6 +520,24 @@ class DeployTest(unittest.TestCase):
         self.assertNotIn('INK_GITHUB_TOKEN', env)
         self.assertEqual(env['INK_CC_CONNECT_TOKEN'], 'webhook')
         self.assertEqual(env['INK_DISCORD_TOKEN'], 'discord')
+
+    def test_runtime_starts_with_independent_http_provider_credentials(self):
+        credentials = self.home / 'providers.json'
+        credentials.write_text(json.dumps({'http_provider_token': 'fixture'}))
+        credentials.chmod(0o600)
+        (self.release / 'deployment.json').write_text(json.dumps({
+            'credentials': str(credentials), 'data': str(self.data),
+        }))
+        with patch.object(runtime, '__file__', str(self.release / 'runtime.py')), \
+             patch.object(runtime.os, 'execve') as start:
+            runtime.main()
+        self.assertEqual(start.call_args.args[2]['INK_HTTP_PROVIDER_TOKEN'], 'fixture')
+
+    def test_no_provider_means_no_external_service_probe(self):
+        with patch.object(m.socket, 'create_connection') as connect:
+            m.check_provider_endpoints({})
+        connect.assert_not_called()
+
 
 class MacOSOutputTest(unittest.TestCase):
     def test_unload_waits_for_asynchronous_bootout(self):
@@ -517,15 +560,10 @@ class MacOSOutputTest(unittest.TestCase):
         sample=b'''disabled services = {\n"com.apple.ManagedClientAgent.enrollagent" => disabled\n"com.cc-connect.service" => enabled\n"legacy.disabled" => true\n"legacy.enabled" => false\n}'''
         with patch.object(m.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=sample)):
             self.assertTrue(m.disabled('gui/501','com.apple.ManagedClientAgent.enrollagent'))
-            self.assertFalse(m.disabled('gui/501',m.CC_LABEL))
+            self.assertFalse(m.disabled('gui/501',EXTERNAL_CC))
             self.assertTrue(m.disabled('gui/501','legacy.disabled'))
             self.assertFalse(m.disabled('gui/501','legacy.enabled'))
             self.assertFalse(m.disabled('gui/501','unknown'))
-
-    def test_ps_finds_absolute_binary_paths_and_duplicate_instances(self):
-        sample=b'''50420 /Users/user/.local/share/cc-connect/builds/current/cc-connect\n60420 /Users/user/.local/lib/ink-commons/releases/abc/cc-connect\n44 /bin/sh\n55 /tmp/cc-connect-helper\n'''
-        with patch.object(m.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=sample)):
-            self.assertEqual(m.cc_process_pids(),[50420,60420])
 
     def test_lock_retries_a_slow_release_and_has_deadline(self):
         stream=MagicMock()
