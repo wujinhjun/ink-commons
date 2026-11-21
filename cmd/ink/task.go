@@ -266,13 +266,17 @@ func newAttemptID() (string, error) {
 }
 
 func lockTaskCredential(path string) (*os.File, error) {
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	// O_NOFOLLOW prevents a custom --claim-file sidecar from redirecting the
+	// lock to an unrelated file. Never chmod an existing lock: only accept a
+	// private regular file that was created with the expected mode.
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, err
 	}
-	if err := lock.Chmod(0600); err != nil {
+	info, err := lock.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
 		lock.Close()
-		return nil, err
+		return nil, errors.New("claim lock must be a private regular file")
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {

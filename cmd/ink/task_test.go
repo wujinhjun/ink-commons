@@ -351,3 +351,47 @@ func TestTaskRejectionIsBoundToTheAttempt(t *testing.T) {
 		t.Fatalf("current rejection was not recorded: %#v %v", credential, err)
 	}
 }
+
+func TestTaskLockRejectsSymlinksAndPublicFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claim.json")
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("target"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path+".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockTaskCredential(path); err == nil {
+		t.Fatal("symlink lock accepted")
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.Mode().Perm() != 0644 {
+		t.Fatalf("symlink target mode changed: %#v %v", info, err)
+	}
+	if err := os.Remove(path + ".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".lock", []byte("public"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockTaskCredential(path); err == nil {
+		t.Fatal("public lock accepted")
+	}
+	info, err = os.Stat(path + ".lock")
+	if err != nil || info.Mode().Perm() != 0644 {
+		t.Fatalf("existing lock mode changed: %#v %v", info, err)
+	}
+	if err := os.Remove(path + ".lock"); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockTaskCredential(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlockTaskCredential(lock)
+	info, err = os.Stat(path + ".lock")
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("new lock is not private: %#v %v", info, err)
+	}
+}
