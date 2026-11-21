@@ -35,14 +35,16 @@ func (e *wakeExecutor) Prepare(ctx context.Context, r execution.Route, d executi
 }
 
 type handoffFixture struct {
-	s           *Service
-	repo        Repository
-	pull        Pull
-	reviews     []Review
-	executor    *wakeExecutor
-	path        string
-	githubError bool
-	beforeRead  func()
+	s                         *Service
+	repo                      Repository
+	pull                      Pull
+	reviews                   []Review
+	executor                  *wakeExecutor
+	path                      string
+	githubError               bool
+	conflictBaseSHA           string
+	conflictLookupUnavailable bool
+	beforeRead                func()
 }
 
 func newHandoffFixture(t *testing.T) *handoffFixture {
@@ -78,6 +80,22 @@ func (f *handoffFixture) upstream() {
 		out := httptest.NewRecorder()
 		if f.githubError {
 			out.WriteHeader(503)
+		} else if r.URL.Path == "/graphql" {
+			if f.conflictLookupUnavailable {
+				out.WriteHeader(503)
+				return out.Result(), nil
+			}
+			base := f.conflictBaseSHA
+			if base == "" {
+				base = f.pull.Base.SHA
+			}
+			reply(out, 200, map[string]any{"data": map[string]any{"repository": map[string]any{
+				"pullRequest": map[string]any{
+					"state": "OPEN", "headRefOid": f.pull.Head.SHA, "baseRefName": f.pull.Base.Ref,
+					"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+					"baseRef": map[string]any{"target": map[string]string{"oid": base}},
+				},
+			}}})
 		} else if strings.HasSuffix(r.URL.Path, "/reviews") {
 			reply(out, 200, f.reviews)
 		} else {

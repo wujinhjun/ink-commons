@@ -1,20 +1,77 @@
 package ink
 
-import "time"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
 
 const mergeConflictConfirmation = 30 * time.Second
 
 type MergeConflict struct {
-	Base     PullBase  `json:"base"`
-	HeadSHA  string    `json:"head_sha"`
-	ReviewID int64     `json:"review_id"`
-	Since    time.Time `json:"since"`
+	Base         PullBase  `json:"base"`
+	ReportedBase *PullBase `json:"reported_base,omitempty"`
+	HeadSHA      string    `json:"head_sha"`
+	ReviewID     int64     `json:"review_id"`
+	Since        time.Time `json:"since"`
+}
+
+// GitHub's PR snapshot can retain the original base oid. Use the current ref
+// target and mergeability from one query, scoped to the already observed PR.
+func (u upstream) confirmedConflictBase(ctx context.Context, repo string, pull Pull) (PullBase, error) {
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || !ValidRepository(repo) || pull.Number <= 0 {
+		return PullBase{}, fmt.Errorf("invalid conflict lookup target")
+	}
+	const query = `query($owner: String!, $name: String!, $number: Int!) {
+		repository(owner: $owner, name: $name) {
+			pullRequest(number: $number) {
+				state isDraft headRefOid baseRefName mergeable mergeStateStatus
+				baseRef { target { oid } }
+			}
+		}
+	}`
+	body, _ := json.Marshal(map[string]any{"query": query,
+		"variables": map[string]any{"owner": owner, "name": name, "number": pull.Number}})
+	var response struct {
+		Errors []json.RawMessage
+		Data   struct {
+			Repository struct {
+				PullRequest struct {
+					State, HeadRefOid, BaseRefName, Mergeable, MergeStateStatus string
+					IsDraft                                                     bool
+					BaseRef                                                     struct{ Target struct{ OID string } }
+				}
+			}
+		}
+	}
+	if _, _, err := u.gitHubScopedJSON(ctx, repo, http.MethodPost, "/graphql", "inspect", "", body, &response); err != nil {
+		return PullBase{}, err
+	}
+	result := response.Data.Repository.PullRequest
+	if len(response.Errors) != 0 || result.State != "OPEN" || result.IsDraft ||
+		result.HeadRefOid != pull.Head.SHA || result.BaseRefName != pull.Base.Ref ||
+		result.Mergeable != "CONFLICTING" || result.MergeStateStatus != "DIRTY" || !validSHA(result.BaseRef.Target.OID) {
+		return PullBase{}, fmt.Errorf("GitHub has not confirmed a conflict for the current PR refs")
+	}
+	return PullBase{Ref: result.BaseRefName, SHA: result.BaseRef.Target.OID}, nil
+}
+
+func (w *Work) conflictBase() PullBase {
+	if observed := w.MergeConflict; observed != nil && observed.HeadSHA == w.Pull.Head.SHA &&
+		observed.ReportedBase != nil && *observed.ReportedBase == w.Pull.Base {
+		return observed.Base
+	}
+	return w.Pull.Base
 }
 
 func (w *Work) matchesConflictTask(t *Task, review *Review) bool {
 	return w.Linked && w.Pull.State == "open" && !w.Pull.Draft &&
 		review != nil && t.ReviewID == review.ID &&
-		t.SHA == w.Pull.Head.SHA && *t.ConflictBase == w.Pull.Base
+		t.SHA == w.Pull.Head.SHA && *t.ConflictBase == w.conflictBase()
 }
 
 func (w *Work) retireStaleConflictTasks() {
@@ -27,7 +84,7 @@ func (w *Work) retireStaleConflictTasks() {
 		}
 	}
 	if c := w.MergeConflict; c != nil && (!w.Linked || w.Pull.State != "open" || w.Pull.Draft ||
-		review == nil || review.ID != c.ReviewID || w.Pull.Head.SHA != c.HeadSHA || w.Pull.Base != c.Base) {
+		review == nil || review.ID != c.ReviewID || w.Pull.Head.SHA != c.HeadSHA || w.conflictBase() != c.Base) {
 		w.MergeConflict = nil
 	}
 }
@@ -39,7 +96,7 @@ func (w *Work) blockedConflictTask() bool {
 
 // Only the individual PR endpoint supplies mergeability. The list observation
 // supplies the version and commit pair that fence this preflight result.
-func (s *Service) observeMergeConflict(repoName string, number int, version uint64, pull Pull, dirty bool) error {
+func (s *Service) observeMergeConflict(repoName string, number int, version uint64, pull Pull, base PullBase, dirty bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.store.load()
@@ -56,6 +113,9 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 	now := time.Now()
 	if !dirty {
 		changed := w.MergeConflict != nil
+		if pull.Mergeable == nil && w.Task != nil && w.Task.ConflictBase != nil {
+			return nil
+		}
 		w.MergeConflict = nil
 		// Unknown mergeability resets confirmation but does not cancel a
 		// claimable task. A positive result can retire only unowned work.
@@ -70,22 +130,33 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 			return nil
 		}
 	} else {
-		if w.Task != nil || w.TaskMode != "cooperative" || repo.TaskMode != "cooperative" ||
-			pull.Base.Ref == "" || !validSHA(pull.Base.SHA) || w.handoffMergeBlocked() {
+		if w.TaskMode != "cooperative" || repo.TaskMode != "cooperative" ||
+			base.Ref == "" || !validSHA(base.SHA) {
 			return nil
 		}
-		review := approvedReview(w.Reviews, pull.Head.SHA, w.Reviewer.GitHubLogin)
+		review := approvedReview(w.Reviews, w.Pull.Head.SHA, w.Reviewer.GitHubLogin)
 		if review == nil {
 			return nil
 		}
+		if t := w.Task; t != nil && t.ConflictBase != nil && *t.ConflictBase != base && t.Handoff != nil &&
+			(t.Handoff.State == "pending" || t.Handoff.State == "blocked") {
+			t.Handoff.State = "superseded"
+			w.replaceTask(nil)
+		}
+		if w.Task != nil || w.handoffMergeBlocked() {
+			return nil
+		}
 		c := w.MergeConflict
-		if c == nil || c.HeadSHA != pull.Head.SHA || c.Base != pull.Base || c.ReviewID != review.ID {
-			w.MergeConflict = &MergeConflict{Base: pull.Base, HeadSHA: pull.Head.SHA, ReviewID: review.ID, Since: now}
+		if c == nil || c.HeadSHA != pull.Head.SHA || c.Base != base || c.ReviewID != review.ID {
+			w.MergeConflict = &MergeConflict{Base: base, HeadSHA: pull.Head.SHA, ReviewID: review.ID, Since: now}
+			if base != pull.Base {
+				w.MergeConflict.ReportedBase = &pull.Base
+			}
 		} else {
 			if now.Sub(c.Since) < mergeConflictConfirmation {
 				return nil
 			}
-			w.setTask(Task{Role: "developer", SHA: pull.Head.SHA, ReviewID: review.ID, ReviewURL: review.URL, ConflictBase: &pull.Base}, w.Developer)
+			w.setTask(Task{Role: "developer", SHA: pull.Head.SHA, ReviewID: review.ID, ReviewURL: review.URL, ConflictBase: &base}, w.Developer)
 			if err := s.freezeTaskConfig(w); err != nil {
 				return err
 			}
