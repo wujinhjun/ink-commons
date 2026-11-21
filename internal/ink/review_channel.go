@@ -13,6 +13,7 @@ type reviewChannelBinding struct {
 	route       execution.Route
 	source      execution.Route
 	reuseThread bool
+	requireSame bool
 }
 
 type reviewChannelCheck struct {
@@ -21,7 +22,7 @@ type reviewChannelCheck struct {
 	err       error
 }
 
-func reviewChannelDestination(w *Work) reviewChannelBinding {
+func (s *Service) reviewChannelDestination(w *Work) reviewChannelBinding {
 	if w.Task == nil || w.Task.Role != "reviewer" {
 		return reviewChannelBinding{}
 	}
@@ -30,10 +31,21 @@ func reviewChannelDestination(w *Work) reviewChannelBinding {
 	if w.Task.Handoff != nil {
 		route = w.Task.Handoff.Assignee.Route
 	}
-	if !delivery.RequireSameChannel || route == nil || delivery.Source == nil {
+	if route == nil {
 		return reviewChannelBinding{}
 	}
-	return reviewChannelBinding{w.Task.ID, *route, *delivery.Source, delivery.ReuseDevelopmentThread}
+	_, recoverable := s.providers[route.Provider].(execution.ConversationAllocator)
+	resolveAllocation := recoverable && w.Task.Handoff != nil && route.Session == ""
+	if !resolveAllocation && (!delivery.RequireSameChannel || delivery.Source == nil) {
+		return reviewChannelBinding{}
+	}
+	binding := reviewChannelBinding{
+		taskID: w.Task.ID, route: *route, reuseThread: delivery.ReuseDevelopmentThread, requireSame: delivery.RequireSameChannel,
+	}
+	if delivery.Source != nil {
+		binding.source = *delivery.Source
+	}
+	return binding
 }
 
 // Resolve Discord channels without holding the state lock. The caller compares
@@ -48,7 +60,7 @@ func (s *Service) checkReviewChannel(ctx context.Context, id string) (reviewChan
 			now := time.Now()
 			if h := t.Handoff; (h == nil && !now.Before(t.RetryAt)) ||
 				(h != nil && h.State == "pending" && h.Wake.Preparation != "preparing" && !now.Before(h.Wake.RetryAt)) {
-				binding = reviewChannelDestination(w)
+				binding = s.reviewChannelDestination(w)
 			}
 		}
 	}
@@ -63,15 +75,17 @@ func (s *Service) checkReviewChannel(ctx context.Context, id string) (reviewChan
 	if !ok {
 		check.err = fmt.Errorf("provider does not support require_same_channel")
 	} else {
-		check.placement, check.err = provider.ResolveReviewPlacement(ctx, binding.route, execution.Delivery{
-			RequireSameChannel: true, ReuseDevelopmentThread: binding.reuseThread, Source: &binding.source,
-		})
+		delivery := execution.Delivery{RequireSameChannel: binding.requireSame, ReuseDevelopmentThread: binding.reuseThread}
+		if binding.source != (execution.Route{}) {
+			delivery.Source = &binding.source
+		}
+		check.placement, check.err = provider.ResolveReviewPlacement(ctx, binding.route, delivery)
 	}
 	return check, nil
 }
 
-func (c reviewChannelCheck) result(w *Work) (bool, error) {
-	binding := reviewChannelDestination(w)
+func (c reviewChannelCheck) result(s *Service, w *Work) (bool, error) {
+	binding := s.reviewChannelDestination(w)
 	if binding == (reviewChannelBinding{}) {
 		return true, nil
 	}

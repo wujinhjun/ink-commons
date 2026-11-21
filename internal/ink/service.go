@@ -377,7 +377,7 @@ func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Wo
 		return nil, s.store.save(st)
 	}
 
-	if current, err := channelCheck.result(work); !current || err != nil {
+	if current, err := channelCheck.result(s, work); !current || err != nil {
 		if err != nil {
 			work.Task.Error = "review preparation: " + err.Error()
 			work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
