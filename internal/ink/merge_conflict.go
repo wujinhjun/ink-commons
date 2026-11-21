@@ -94,8 +94,9 @@ func (w *Work) blockedConflictTask() bool {
 	return t != nil && t.ConflictBase != nil && t.Handoff != nil && t.Handoff.State == "blocked"
 }
 
-// Only the individual PR endpoint supplies mergeability. The list observation
-// supplies the version and commit pair that fence this preflight result.
+// The stored list observation fences concurrent changes to the PR version,
+// head, and target branch. A confirmed dirty observation obtains the base SHA
+// from the live ref, which may differ from either REST snapshot.
 func (s *Service) observeMergeConflict(repoName string, number int, version uint64, pull Pull, base PullBase, dirty bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,7 +107,8 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 	w := st.Work[key(repoName, number)]
 	repo, ok := s.repo(repoName)
 	if w == nil || w.Version != version || w.Phase != "approved" || !ok || (repo.AutoMerge == nil || !repo.AutoMerge.Enabled) ||
-		w.Pull.Head.SHA != pull.Head.SHA || w.Pull.Base != pull.Base || hasInFlightAutoMerge(w) {
+		w.Pull.Head.SHA != pull.Head.SHA || w.Pull.Base.Ref != pull.Base.Ref ||
+		(!dirty && w.Pull.Base.SHA != pull.Base.SHA) || hasInFlightAutoMerge(w) {
 		return nil
 	}
 
@@ -131,7 +133,7 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 		}
 	} else {
 		if w.TaskMode != "cooperative" || repo.TaskMode != "cooperative" ||
-			base.Ref == "" || !validSHA(base.SHA) {
+			base.Ref == "" || base.Ref != pull.Base.Ref || !validSHA(base.SHA) {
 			return nil
 		}
 		review := approvedReview(w.Reviews, w.Pull.Head.SHA, w.Reviewer.GitHubLogin)
@@ -149,8 +151,8 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 		c := w.MergeConflict
 		if c == nil || c.HeadSHA != pull.Head.SHA || c.Base != base || c.ReviewID != review.ID {
 			w.MergeConflict = &MergeConflict{Base: base, HeadSHA: pull.Head.SHA, ReviewID: review.ID, Since: now}
-			if base != pull.Base {
-				w.MergeConflict.ReportedBase = &pull.Base
+			if reported := w.Pull.Base; base != reported {
+				w.MergeConflict.ReportedBase = &reported
 			}
 		} else {
 			if now.Sub(c.Since) < mergeConflictConfirmation {

@@ -43,6 +43,7 @@ type handoffFixture struct {
 	path                      string
 	githubError               bool
 	conflictBaseSHA           string
+	conflictDetailBaseSHA     string
 	conflictLookupUnavailable bool
 	beforeRead                func()
 }
@@ -99,7 +100,11 @@ func (f *handoffFixture) upstream() {
 		} else if strings.HasSuffix(r.URL.Path, "/reviews") {
 			reply(out, 200, f.reviews)
 		} else {
-			reply(out, 200, f.pull)
+			pull := f.pull
+			if r.URL.Path == fmt.Sprintf("/repos/%s/pulls/%d", f.repo.Repo, pull.Number) && f.conflictDetailBaseSHA != "" {
+				pull.Base.SHA = f.conflictDetailBaseSHA
+			}
+			reply(out, 200, pull)
 		}
 		return out.Result(), nil
 	})}
