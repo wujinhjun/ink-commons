@@ -38,7 +38,9 @@ ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PRO
 ink task claim --task TASK_UUID
 ```
 
-cc-connect 使用进程环境中的 `CC_PROJECT` / `CC_SESSION_KEY`，通用路由可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
+wake 会给出带路由的完整命令，例如 `--provider cc-connect --target PROJECT --session discord:THREAD`。ACP 等未注入 `CC_PROJECT` / `CC_SESSION_KEY` 的运行时直接使用这些参数；显式路由必须三项齐全，claim 成功后保存到私有 credential，后续 submit 无需重复。旧格式 wake 或兼容环境仍可使用进程环境中的 `CC_PROJECT` / `CC_SESSION_KEY`，通用路由可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
+
+如果旧版 CLI 在一次已确认的 HTTP 403 后留下了 credential（旧文件没有 `rejected` 或 `attempt_id`），不要删除文件。用同一个 `--task` 和同一个 `--claim-file` 重新 claim，并加 `--replace-route --provider ... --target ... --session ...`；CLI 保留原 token、替换路由，后续 submit 继续使用这个文件。只在确认收到 403 后使用；网络结果不明时保留原 credential 并原样重试，不能删除或重建。
 
 CLI 在发送请求前，先生成私有随机 credential，保存到状态目录 `claims/TASK_UUID.json`（文件 `0600`，目录 `0700`）；daemon 只保存其哈希。可用 `--claim-file /private/path/credential.json` 指定另一个私有文件。不要把这些文件提交到 Git、打印或放入唤醒消息；更换状态目录时应保留仍有未决任务的 credential。
 
