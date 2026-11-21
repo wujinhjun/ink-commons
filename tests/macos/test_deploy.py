@@ -85,6 +85,57 @@ class ArtifactStageTest(unittest.TestCase):
         self.assertEqual(list(self.releases.iterdir()), [])
 
 
+    def write_bundle(self):
+        self.revision = 'c' * 40
+        self.args.revision = self.revision
+        self.write_artifact(self.revision)
+        (self.artifact / 'REVISION').write_text(self.revision + '\n')
+        for name in ('manage.py', 'runtime.py'):
+            (self.artifact / name).write_bytes((ROOT / 'deploy/macos' / name).read_bytes())
+        (self.artifact / 'config.example.json').write_text('{}')
+        (self.artifact / 'SHA256SUMS').write_text(''.join(
+            hashlib.sha256((self.artifact / name).read_bytes()).hexdigest() + f'  {name}\n'
+            for name in m.BUNDLE_FILES
+        ))
+
+    def test_deploys_release_bundle_without_a_git_checkout(self):
+        self.write_bundle()
+        system = self.home / 'LaunchDaemons'
+        gui = self.home / 'Library/LaunchAgents'
+        gui.mkdir(parents=True)
+        cc_agent = gui / (m.CC_LABEL + '.plist')
+        cc_agent.write_bytes(plistlib.dumps({'ProgramArguments': [str(self.cc_binary)]}))
+        self.args.cc_connect_binary = None
+        real_run = m.run
+
+        def run(args, **kwargs):
+            self.assertNotIn(args[0], ('git', 'go', 'sudo'))
+            return real_run(args, **kwargs)
+
+        with patch.object(m, '__file__', str(self.artifact / 'manage.py')), \
+             patch.object(m, 'SYSTEM_DIR', system), \
+             patch.object(m.Path, 'home', return_value=self.home), \
+             patch.object(m, 'loaded', return_value=False), \
+             patch.object(m, 'run', side_effect=run), \
+             patch.object(m, 'activate_staged') as activate, \
+             patch.object(sys, 'path', [str(self.artifact), *sys.path]), \
+             patch('runtime.environment'):
+            m.deploy(self.args)
+
+        release = self.releases / self.revision
+        activate.assert_called_once_with(release, cc_agent=cc_agent)
+        self.assertEqual((release / 'manage.py').read_bytes(), (self.artifact / 'manage.py').read_bytes())
+        self.assertEqual((release / 'runtime.py').read_bytes(), (self.artifact / 'runtime.py').read_bytes())
+        self.assertEqual((self.home / '.local/state/ink-commons').stat().st_mode & 0o777, 0o700)
+
+    def test_bundle_rejects_tampered_runtime_script(self):
+        self.write_bundle()
+        (self.artifact / 'runtime.py').write_bytes(b'tampered')
+        with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: runtime.py'):
+            self.stage()
+        self.assertEqual(list(self.releases.iterdir()), [])
+
+
 class UpgradeTest(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -121,6 +172,10 @@ class UpgradeTest(unittest.TestCase):
                 self.assertEqual(kwargs['env']['HTTPS_PROXY'], 'http://127.0.0.1:7897')
                 self.assertEqual(kwargs['env']['NODE_OPTIONS'], '--use-env-proxy')
                 self.assertEqual(kwargs['env']['PATH'], '/usr/bin:/bin')
+                if args[5] == 'api':
+                    return SimpleNamespace(stdout=self.target.name.encode())
+                directory = Path(args[args.index('--dir') + 1])
+                (directory / 'REVISION').write_text(self.target.name)
 
         def stage(args):
             self.assertTrue(Path(args.artifact_dir).is_dir())
@@ -133,31 +188,27 @@ class UpgradeTest(unittest.TestCase):
 
         with patch.dict(m.os.environ, {'PATH': '/usr/bin:/bin'}, clear=True), \
              patch.object(m, 'run', side_effect=run), \
-             patch.object(m, 'output', return_value=self.target.name), \
              patch.object(m, 'stage', side_effect=stage) as staged:
             m.upgrade_system(self.root, self.entry)
 
         staged.assert_called_once()
-        self.assertEqual(self.calls[0][:6], ['/test/yuxingyi', '--profile', 'inspect', '-R', m.REPOSITORY, 'git'])
+        self.assertEqual(self.calls[0][:6], ['/test/yuxingyi', '--profile', 'inspect', '-R', m.REPOSITORY, 'api'])
         self.assertEqual(self.calls[1][5:8], ['release', 'download', 'build-' + self.target.name])
+        self.assertIn('--pattern=manage.py', self.calls[1])
+        self.assertIn('--pattern=runtime.py', self.calls[1])
         self.assertEqual(self.calls[2:5], [
             ['sudo', '-v'], [self.target / 'ink', 'init'], [self.target / 'ink', 'init', '--check'],
         ])
         self.assertEqual(self.calls[5][2:5], [self.target / 'manage.py', 'activate', '--system'])
 
     def test_unpublished_build_does_not_stage_or_activate(self):
-        def run(args, **kwargs):
-            if args[5] == 'release':
-                raise subprocess.CalledProcessError(1, args)
-            self.calls.append(args)
-
-        with patch.object(m, 'run', side_effect=run), \
+        with patch.object(m, 'run', side_effect=subprocess.CalledProcessError(1, 'release download')) as run, \
              patch.object(m, 'output', return_value=self.target.name), \
              patch.object(m, 'stage') as staged:
             with self.assertRaisesRegex(m.DeploymentError, 'check the GitHub Actions publish job'):
                 m.upgrade_system(self.root, self.entry)
 
-        self.assertEqual(len(self.calls), 1)
+        run.assert_called_once()
         staged.assert_not_called()
 
     def test_healthy_current_version_needs_no_download_or_sudo(self):
@@ -166,9 +217,7 @@ class UpgradeTest(unittest.TestCase):
              patch.object(m, 'health', return_value={'revision': self.current.name, 'gate': 'open'}):
             m.upgrade_system(self.root, self.entry)
 
-        run.assert_called_once()
-        self.assertEqual(run.call_args.args[0][5:7], ['git', 'fetch'])
-
+        run.assert_not_called()
 
     def test_missing_health_socket_reactivates_installed_target(self):
         with patch.object(m, 'run') as run, \
@@ -209,8 +258,7 @@ class UpgradeTest(unittest.TestCase):
                      patch.object(m, 'output', return_value=self.target.name):
                     with self.assertRaisesRegex(m.DeploymentError, diagnostic):
                         m.upgrade_system(self.root, self.entry)
-                run.assert_called_once()
-                self.assertEqual(run.call_args.args[0][5:7], ['git', 'fetch'])
+                run.assert_not_called()
                 file.write_bytes(original)
 
 

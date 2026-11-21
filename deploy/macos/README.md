@@ -2,35 +2,38 @@
 
 本目录管理同砚的运行版本，以及从登录服务迁移到开机服务。`stage` 为指定 Git 提交准备部署目录。`activate` 停止旧进程、备份状态和 plist、切换二进制并验证实际运行 SHA。
 
-部署需要 Git、Python **3.11.8+** 和已安装且可用的 Yuxingyi App CLI。本机源码构建还需要 Go 1.23+。以下 `PYTHON` 应替换为本机 Python 的绝对路径，`REVISION` 是待部署的完整提交 SHA，`USER` 是已有服务用户。路径包含空格时保持引号。
+## 从 GitHub Release 首次部署
 
-## 一条命令升级系统服务
-
-在包含本脚本的同砚 checkout 根目录，以服务用户在 Agent 空闲时执行：
+Apple Silicon Mac 需要 Python **3.11.8+**、有权限读取本仓库的 Yuxingyi App CLI，以及已配置的 cc-connect 系统服务或 LaunchAgent。安装包路径可以在任意目录。准备同砚配置时，可参考发布包里的 `config.example.json`，把配置保存到 `~/.config/ink-commons/config.json`，或用 `--config` 指定路径。配置中的 cc-connect URL 应指向本机服务。
 
 ```sh
-./deploy/macos/upgrade
+yuxingyi --profile inspect -R wujinhjun/ink-commons release download --pattern '*' --dir ink-deploy
+(cd ink-deploy && shasum -a 256 -c SHA256SUMS && python3.12 manage.py deploy)
 ```
 
-命令读取现有部署的 Python 路径、配置、代理和 cc-connect 二进制，用 Yuxingyi App 获取 `main` 最新提交并下载对应 GitHub Release 的产物。校验完成后获取 sudo 授权，再安装 Agent skill、切换并验证系统服务。同砚和 cc-connect 会短暂重启。目标版本健康运行时直接退出。重试可复用配置和 cc-connect 均匹配的暂存目录。若报告与当前部署有差异，可先将该未激活的暂存目录移出 `releases` 再重试。
+使用机器上可用的 Python 3.11.8+ 路径代替 `python3.12`。部署会校验二进制和脚本、初始化私有状态及 Agent skill，取得 sudo 授权后激活并检查服务。若 cc-connect 原来是 LaunchAgent，部署会将它一并迁移到系统服务。首次安装需要本机的 cc-connect 凭据和 GitHub App 权限。发布包不含机器配置和凭据。
 
-GitHub Actions 在 `main` 测试通过后发布 `build-<完整提交 SHA>`。如果发布仍在运行，升级命令会在切换前退出，可在发布成功后重试。首次部署和手动指定版本时可使用下面的 `stage` 步骤。
+## 升级系统服务
 
-## 下载 CI 产物并准备部署
-
-PR 和 `main` 都在 GitHub 托管的 macOS runner 上运行 Go 测试、`go vet`、部署脚本测试和编译检查。`main` 的成功运行提供 Apple Silicon 产物，保留 30 天。
-
-在 [Ink Commons CI](https://github.com/wujinhjun/ink-commons/actions/workflows/ci.yml?query=branch%3Amain) 选择要部署的 `main` 运行，下载并解压同一提交的 `ink-darwin-arm64-<完整提交 SHA>`。以服务用户在含该提交的仓库内执行：
+在任意目录，以服务用户在 Agent 空闲时执行：
 
 ```sh
-PYTHON=/absolute/path/to/python3.12
-REVISION=<full-commit-sha>
-ARTIFACT_DIR=/absolute/path/to/extracted-artifact
-"$PYTHON" deploy/macos/manage.py stage --revision "$REVISION" --artifact-dir "$ARTIFACT_DIR"
-"$PYTHON" deploy/macos/manage.py status --user "$(id -un)"
+"$HOME/.local/lib/ink-commons/ink" upgrade
 ```
 
-`stage` 校验产物内的 SHA-256 和二进制报告的提交 SHA，从同一 Git 提交取出部署脚本。这条路径无需在部署机安装 Go。下面的 skill 安装和显式激活步骤适用于两种构建方式。
+命令读取现有部署的配置、代理和 cc-connect 二进制，通过 GitHub API 获取 `main` 的提交并下载对应的发布文件。校验后获取 sudo 授权、切换并验证服务。同砚和 cc-connect 会短暂重启。目标版本健康运行时直接退出。重试可复用配置和 cc-connect 均匹配的暂存目录。若报告与当前部署有差异，可先将该未激活的暂存目录移出 `releases` 再重试。
+
+系统已安装但当前 `ink` 版本早于升级命令时，先下载并校验上述发布包，然后运行包中的 `manage.py upgrade`。发布中的目标会在切换前退出，可等 GitHub Actions 发布成功后重试。首次部署和后续升级均无需 checkout、Git 或 Go。
+
+## 手动暂存 CI 产物
+
+PR 和 `main` 会运行 Go 测试、`go vet`、部署脚本测试和编译检查。可从 GitHub Release 或 [Ink Commons CI](https://github.com/wujinhjun/ink-commons/actions/workflows/ci.yml?query=branch%3Amain) 取出同一版本的全套文件。需要拆开暂存和激活时，可在发布包目录运行：
+
+```sh
+python3.12 manage.py stage --revision "$(cat REVISION)" --artifact-dir .
+```
+
+早期 CI 只提供二进制和校验文件时，使用含对应提交的 checkout 运行 `stage`，由 Git 补齐部署脚本。以下手动命令中的 `PYTHON` 表示 Python 的绝对路径，`REVISION` 表示目标完整提交 SHA。
 
 ## 本机源码构建
 
