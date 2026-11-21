@@ -398,7 +398,23 @@ def loaded(domain, label):
 
 
 def run_as_admin(args):
-    return run(['/usr/bin/sudo', '-n', *args])
+    # A snapshot or a health check can outlast the sudo timestamp.
+    return run(['/usr/bin/sudo', '--', *args])
+
+
+@contextmanager
+def system_activation_lock():
+    # The root-owned directory has a shared inode across service accounts.
+    # Locking it avoids a user-writable or replaceable lock file.
+    descriptor = os.open(SYSTEM_DIR, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise DeploymentError('another system Ink activation is running') from None
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def install_system_plist(path, source):
@@ -442,6 +458,11 @@ def activate(args):
     account = pwd.getpwnam(args.user)
     if os.geteuid() == 0 or os.geteuid() != account.pw_uid:
         raise DeploymentError('activate must run as the service user, without sudo')
+    with system_activation_lock():
+        activate_system(args, account)
+
+
+def activate_system(args, account):
     home = Path(account.pw_dir).resolve()
     root = home / '.local/lib/ink-commons'
     release = Path(args.release).resolve()

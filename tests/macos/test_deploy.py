@@ -1,4 +1,6 @@
 import importlib.util
+import fcntl
+import os
 import hashlib
 import json
 from pathlib import Path
@@ -383,7 +385,7 @@ class DeployTest(unittest.TestCase):
             if self.fail_sudo:
                 raise subprocess.CalledProcessError(1, args)
             return
-        admin = args[:2] == ['/usr/bin/sudo', '-n']
+        admin = args[:2] == ['/usr/bin/sudo', '--']
         if admin:
             args = args[2:]
         if args[0] == '/usr/bin/install':
@@ -456,7 +458,7 @@ class DeployTest(unittest.TestCase):
         self.assertIn(('system', m.LABEL), self.jobs)
         self.assertEqual(plistlib.loads(self.plist.read_bytes())['UserName'], 'service')
         stop = self.calls.index(['/bin/launchctl', 'bootout', 'gui/501/' + m.LABEL])
-        start = self.calls.index(['/usr/bin/sudo', '-n', '/bin/launchctl', 'bootstrap', 'system', str(self.plist)])
+        start = self.calls.index(['/usr/bin/sudo', '--', '/bin/launchctl', 'bootstrap', 'system', str(self.plist)])
         self.assertLess(stop, start)
 
     def test_first_activation_needs_no_login_service_or_plist(self):
@@ -485,6 +487,63 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(self.calls, [['/usr/bin/sudo', '-v']])
         self.assertEqual(self.agent_plist.read_bytes(), self.old_plist)
         self.assertIn(('gui/501', m.LABEL), self.jobs)
+
+    def test_contended_system_lock_leaves_both_services_untouched(self):
+        descriptor = os.open(self.system, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(m.DeploymentError, 'another system Ink activation'):
+                self.activate()
+            self.assertEqual(self.calls, [])
+            self.assertFalse(self.plist.exists())
+            self.assertEqual(self.agent_plist.read_bytes(), self.old_plist)
+        finally:
+            os.close(descriptor)
+        self.activate()
+        self.assertIn(('system', m.LABEL), self.jobs)
+
+    def test_expired_sudo_after_snapshot_can_reauthorize_during_rollback(self):
+        self.agent_plist.unlink()
+        self.jobs.remove(('gui/501', m.LABEL))
+        self.jobs.add(('system', m.LABEL))
+        old_daemon = plistlib.dumps({'Label': m.LABEL, 'ProgramArguments': ['old'], 'UserName': 'service'})
+        self.plist.write_bytes(old_daemon)
+        copytree = shutil.copytree
+        run = self.run_fake
+        expired = False
+        prompts = []
+
+        def slow_snapshot(source, dest, **kwargs):
+            nonlocal expired
+            result = copytree(source, dest, **kwargs)
+            if Path(source) == self.data:
+                self.assertNotIn(('system', m.LABEL), self.jobs)
+                expired = True
+            return result
+
+        def run_with_expired_sudo(args, **kwargs):
+            nonlocal expired
+            if expired and str(args[0]) == '/usr/bin/sudo':
+                self.assertEqual(args[1], '--')
+                prompts.append(str(args[2]))
+                if len(prompts) == 1:
+                    raise subprocess.CalledProcessError(1, args)
+                expired = False
+                with self.assertRaisesRegex(m.DeploymentError, 'another system Ink activation'):
+                    with m.system_activation_lock():
+                        self.fail('rollback must still hold the system lock')
+            return run(args, **kwargs)
+
+        with patch.object(shutil, 'copytree', side_effect=slow_snapshot), \
+             patch.object(self, 'run_fake', side_effect=run_with_expired_sudo):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.activate()
+
+        self.assertEqual(prompts, ['/usr/bin/install', '/usr/bin/install'])
+        self.assertEqual(self.plist.read_bytes(), old_daemon)
+        self.assertIn(('system', m.LABEL), self.jobs)
+        self.assertEqual(self.link.read_text(), 'old')
+        self.assertEqual((self.data / 'state.json').read_bytes(), self.old_state)
 
     def test_cc_connect_preflight_and_post_check(self):
         for stop_phase in (1, 2):
@@ -580,9 +639,9 @@ class DeployTest(unittest.TestCase):
         self.assertTrue((self.release/'enabled').exists())
 
     def test_activation_waits_for_the_old_daemon_state_lock(self):
-        with patch.object(m.fcntl,'flock',side_effect=[BlockingIOError(),None]) as lock:
+        with patch.object(m.fcntl, 'flock', side_effect=[None, BlockingIOError(), None]) as lock:
             self.activate()
-        self.assertEqual(lock.call_count,2)
+        self.assertEqual(lock.call_count, 3)
         self.assertTrue((self.release/'enabled').exists())
 
     def test_runtime_credentials_never_inherit_personal_tokens(self):
