@@ -4,6 +4,18 @@
 
 部署需要 Git、Python **3.11.8+** 和已安装且可用的 Yuxingyi App CLI。本机源码构建还需要 Go 1.23+。以下 `PYTHON` 应替换为本机 Python 的绝对路径，`REVISION` 是待部署的完整提交 SHA，`USER` 是已有服务用户。路径包含空格时保持引号。
 
+## 一条命令升级系统服务
+
+在包含本脚本的同砚 checkout 根目录，以服务用户在 Agent 空闲时执行：
+
+```sh
+./deploy/macos/upgrade
+```
+
+命令读取现有部署的 Python 路径、配置、代理和 cc-connect 二进制，用 Yuxingyi App 获取 `main` 最新提交并下载对应 GitHub Release 的产物。校验完成后获取 sudo 授权，再安装 Agent skill、切换并验证系统服务。同砚和 cc-connect 会短暂重启。目标版本健康运行时直接退出。重试可复用配置和 cc-connect 均匹配的暂存目录。若报告与当前部署有差异，可先将该未激活的暂存目录移出 `releases` 再重试。
+
+GitHub Actions 在 `main` 测试通过后发布 `build-<完整提交 SHA>`。如果发布仍在运行，升级命令会在切换前退出，可在发布成功后重试。首次部署和手动指定版本时可使用下面的 `stage` 步骤。
+
 ## 下载 CI 产物并准备部署
 
 PR 和 `main` 都在 GitHub 托管的 macOS runner 上运行 Go 测试、`go vet`、部署脚本测试和编译检查。`main` 的成功运行提供 Apple Silicon 产物，保留 30 天。

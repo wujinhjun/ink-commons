@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+deploy_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ink=$(readlink "$HOME/.local/lib/ink-commons/ink")
+current=$(dirname -- "$ink")
+python=$(/usr/bin/plutil -extract python raw -o - "$current/deployment.json")
+exec "$python" "$deploy_dir/manage.py" upgrade "$@"

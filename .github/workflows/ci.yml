@@ -45,3 +45,39 @@ jobs:
           path: ${{ runner.temp }}/ink-artifact
           if-no-files-found: error
           retention-days: 30
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ink-release-${{ github.sha }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ink-darwin-arm64-${{ github.sha }}
+          path: ink-artifact
+      - name: Publish deployment release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tip=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$tip" != "$GITHUB_SHA" ]]; then
+            echo "A newer main commit superseded this build."
+            exit 0
+          fi
+          tag="build-$GITHUB_SHA"
+          draft=$(gh release view "$tag" --json isDraft --jq '.isDraft' 2>/dev/null) || draft=missing
+          case "$draft" in
+            false) exit 0 ;;
+            missing)
+              gh release create "$tag" --target "$GITHUB_SHA" --draft \
+                --title "macOS build ${GITHUB_SHA:0:12}" --notes "Apple Silicon build of $GITHUB_SHA."
+              ;;
+          esac
+          gh release upload "$tag" ink-artifact/ink ink-artifact/SHA256SUMS --clobber
+          gh release edit "$tag" --draft=false --latest=false
