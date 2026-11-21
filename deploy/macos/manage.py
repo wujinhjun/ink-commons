@@ -440,6 +440,21 @@ def unload(domain, label, timeout=45):
         time.sleep(0.1)
 
 
+def restore_launchd_service(domain, path, was_loaded, was_disabled, *, settings_changed=False):
+    restart = was_loaded and not loaded(domain, LABEL)
+    launchctl = run_as_admin if domain == 'system' else run
+    target = domain + '/' + LABEL
+    try:
+        if restart:
+            if was_disabled:
+                launchctl(['/bin/launchctl', 'enable', target])
+            launchctl(['/bin/launchctl', 'bootstrap', domain, path])
+    finally:
+        # A loaded service can be disabled, but a disabled service cannot be bootstrapped.
+        if was_disabled and (restart or settings_changed):
+            launchctl(['/bin/launchctl', 'disable', target])
+
+
 def validate_state_directory(data, home, uid):
     if data != home / '.local/state/ink-commons' or not data.is_dir() or data.is_symlink():
         raise DeploymentError('existing private state directory required')
@@ -495,6 +510,7 @@ def activate_system(args, account):
         raise DeploymentError('both system and login Ink services are loaded')
     agent_mode = stat.S_IMODE(agent_path.stat().st_mode) if agent_plist is not None else 0o600
     old_disabled = disabled('system', LABEL)
+    agent_disabled = agent_loaded and disabled(gui, LABEL)
     try:
         run(['/usr/bin/sudo', '-v'])
     except subprocess.CalledProcessError:
@@ -588,15 +604,13 @@ def activate_system(args, account):
                     run_as_admin(['/bin/rm', '-f', path])
                 else:
                     install_system_plist(path, system_backup)
-                run_as_admin(['/bin/launchctl', 'disable' if old_disabled else 'enable', 'system/' + LABEL])
             if gate_was_enabled:
                 atomic(gate, b'ready\n')
             if agent_removed:
                 atomic(agent_path, agent_plist, agent_mode)
-            if old_loaded and not loaded('system', LABEL):
-                run_as_admin(['/bin/launchctl', 'bootstrap', 'system', path])
-            if agent_loaded and not loaded(gui, LABEL):
-                run(['/bin/launchctl', 'bootstrap', gui, agent_path])
+            restore_launchd_service('system', path, old_loaded, old_disabled,
+                                    settings_changed=system_changed)
+            restore_launchd_service(gui, agent_path, agent_loaded, agent_disabled)
         except Exception as recovery_error:
             print(json.dumps({'deployment': 'rollback_incomplete', 'phase': phase,
                               'revision': release.name, 'backup': str(backup)}), flush=True)

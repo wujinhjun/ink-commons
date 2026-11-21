@@ -369,6 +369,7 @@ class DeployTest(unittest.TestCase):
         self.plist = self.system / (m.LABEL + '.plist')
         self.agent_plist = self.agents / self.plist.name
         self.jobs = {('gui/501', m.LABEL), ('gui/501', EXTERNAL_CC), ('gui/501',EXTERNAL_WATCHDOG)}
+        self.disabled_jobs = set()
         self.account = SimpleNamespace(pw_uid=501, pw_gid=20, pw_dir=str(self.home))
         self.calls = []
         self.fail = False
@@ -403,10 +404,19 @@ class DeployTest(unittest.TestCase):
             if self.fail_stop and (self.data / 'state.sqlite3').exists() and label == m.LABEL:
                 raise RuntimeError('new daemon cannot be stopped')
             self.jobs.discard((domain, label))
+        if args[0] == '/bin/launchctl' and args[1] in ('enable', 'disable'):
+            domain, label = args[2].rsplit('/', 1)
+            self.assertEqual(admin, domain == 'system')
+            if args[1] == 'enable':
+                self.disabled_jobs.discard((domain, label))
+            else:
+                self.disabled_jobs.add((domain, label))
         if args[:2] == ['/bin/launchctl', 'bootstrap']:
             domain, path = args[2:]
             self.assertEqual(admin, domain == 'system')
             label = plistlib.loads(Path(path).read_bytes())['Label']
+            if (domain, label) in self.disabled_jobs:
+                raise subprocess.CalledProcessError(1, args)
             self.jobs.add((domain, label))
             if label == m.LABEL and plistlib.loads(Path(path).read_bytes())['ProgramArguments'] != ['old']:
                 # 模拟新版迁移，只能在 gate 未打开的条件下启动。
@@ -426,7 +436,7 @@ class DeployTest(unittest.TestCase):
              patch.object(m, 'loaded', side_effect=lambda d,l: (d,l) in self.jobs), \
              patch.object(m, 'run', side_effect=self.run_fake), \
              patch.object(m, 'validate_state_directory'), \
-             patch.object(m, 'disabled', return_value=False), \
+             patch.object(m, 'disabled', side_effect=lambda d,l: (d,l) in self.disabled_jobs), \
              patch.object(m, 'local_get', side_effect=self.self_check), \
              patch.object(m.time, 'sleep'), \
              patch.object(m, 'health', return_value={'revision': 'a'*40,'gate':'closed'}), \
@@ -623,6 +633,34 @@ class DeployTest(unittest.TestCase):
         self.assertNotIn(('gui/501', m.LABEL), self.jobs)
         self.assertIn(('system', m.LABEL), self.jobs)
         self.assertFalse((self.data / 'state.sqlite3').exists())
+
+    def test_rollback_reloads_disabled_system_daemon_before_disabling(self):
+        self.jobs.remove(('gui/501', m.LABEL))
+        job = ('system', m.LABEL)
+        self.jobs.add(job)
+        self.disabled_jobs.add(job)
+        old_daemon = plistlib.dumps({'Label': m.LABEL, 'ProgramArguments': ['old'], 'UserName': 'service'})
+        self.plist.write_bytes(old_daemon)
+        self.fail = True
+
+        with self.assertRaisesRegex(m.DeploymentError, 'daemon App command exited'):
+            self.activate()
+
+        self.assertEqual(self.plist.read_bytes(), old_daemon)
+        self.assertIn(job, self.jobs)
+        self.assertIn(job, self.disabled_jobs)
+
+    def test_rollback_reloads_disabled_legacy_agent_before_disabling(self):
+        job = ('gui/501', m.LABEL)
+        self.disabled_jobs.add(job)
+        self.fail = True
+
+        with self.assertRaisesRegex(m.DeploymentError, 'daemon App command exited'):
+            self.activate()
+
+        self.assertEqual(self.agent_plist.read_bytes(), self.old_plist)
+        self.assertIn(job, self.jobs)
+        self.assertIn(job, self.disabled_jobs)
 
     def test_only_non_secret_proxy_environment_is_allowed(self):
         env=m.parse_env(['HTTPS_PROXY=http://127.0.0.1:7897','NODE_OPTIONS=--use-env-proxy'])
