@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """launchd 的非交互入口；凭据只从本机配置读入子进程环境。"""
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path

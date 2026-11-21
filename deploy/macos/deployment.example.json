@@ -1,0 +1,13 @@
+{
+  "repository": "wujinhjun/ink-commons",
+  "cc_label": "com.cc-connect.service",
+  "watchdog_label": "com.personal-infra.discord-watchdog",
+  "service_user": "ink-service",
+  "python": "/opt/homebrew/bin/python3.12",
+  "github_command": "/Users/ink-service/.local/bin/yuxingyi",
+  "path": ["/opt/homebrew/bin", "/usr/bin", "/bin"],
+  "credentials": "/Users/ink-service/.config/ink-commons/credentials.json",
+  "cc_version_file": "/Users/ink-service/.local/state/cc-connect/version.json",
+  "environment": {},
+  "retention": {"releases": 5, "backups": 5, "logs": 5, "stderr_bytes": 8388608}
+}

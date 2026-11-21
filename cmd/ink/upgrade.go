@@ -9,6 +9,9 @@ import (
 )
 
 func upgradeServices(args []string) error {
+	if os.Geteuid() == 0 {
+		return errors.New("deployment commands require a non-root login user")
+	}
 	binary, err := os.Executable()
 	if err != nil {
 		return err

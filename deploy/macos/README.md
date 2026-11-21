@@ -46,6 +46,19 @@ ink rollback --tag build-<previous-SHA> --dry-run
 
 `status --checkout OWNER/REPO=DIR` 可多次传入。每个运行期仓库显示指定 checkout 的受管 hook 状态和是否已有已关联工作项。未提供 checkout 或无法匹配 remote 时显示 unknown。已关联工作项只表示既有证据。
 
+## 设备 profile 与目录保留
+
+在新设备上复制 `deployment.example.json`，填写部署用户、发布仓库、Python、GitHub App CLI、PATH、cc-connect 和 watchdog label。用 `deploy --profile FILE` 或 `stage --profile FILE` 暂存。PATH 可加入设备的 Node 目录。GitHub App 安装器内置绝对 Node 路径时，由其独立管理。profile 保存获准的代理环境及凭据文件路径。旧安装仍识别历史默认值。使用独立的非 root 登录服务用户可隔离日常账户；跨账户直接访问当前同砚私有 Unix socket 需要单独的执行端设计。
+
+`status` 显示生效静态配置 SHA-256、凭据读取时间、配置漂移和运行期仓库。凭据读取时间来自 runtime 成功装载文件的时间，GitHub 连接验证时间仍使用 `last_github_ok`。外部 cc-connect 管理器若提供含 `version` 与 `commit` 的 JSON 文件，可在 profile 设置 `cc_version_file`。
+
+```sh
+python3.12 manage.py maintain
+python3.12 manage.py maintain --include-legacy
+```
+
+默认列出将归档的路径。明确加 `--apply` 才归档到安装目录下的 `archive/`。保留最近的 release、备份和轮转日志，以及所有仍被入口或 launchd 引用的版本。遇到无法检查的 plist 时停止归档。历史 `start`、`activate-*.command`、`staging-archive.*` 和旧 `deploy/<SHA>` 需用 `--include-legacy` 纳入计划。当前 stderr 在同砚停机切换期间按阈值轮转。归档不占用活跃保留额度，可在恢复窗口过后另外处置。
+
 ## 验收与恢复
 
 - 暂存、激活和失败恢复均不复制 cc-connect，不修改其 plist，不停止或删除 watchdog。对本机 endpoint 的前后检查均为只读。

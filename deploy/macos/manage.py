@@ -110,6 +110,42 @@ def cc_process_pids():
     return sorted(set(pids))
 
 
+def read_profile(path):
+    if not path:
+        return {}
+    profile = json.loads(Path(path).expanduser().read_text())
+    fields = {'repository', 'cc_label', 'watchdog_label', 'service_user', 'python',
+              'github_command', 'path', 'credentials', 'cc_version_file',
+              'environment', 'retention', 'project'}
+    if not isinstance(profile, dict) or profile.keys() - fields:
+        raise DeploymentError('unknown deployment profile setting')
+    for key in fields - {'path', 'environment', 'retention'}:
+        if key in profile and (not isinstance(profile[key], str) or not profile[key]):
+            raise DeploymentError('invalid deployment profile field: ' + key)
+    if 'repository' in profile and not re.fullmatch(r'[\w.-]+/[\w.-]+', profile['repository'], re.ASCII):
+        raise DeploymentError('deployment repository must be owner/repo')
+    for key in ('cc_label', 'watchdog_label', 'service_user'):
+        if key in profile and not re.fullmatch(r'[a-zA-Z0-9_.-]+', profile[key]):
+            raise DeploymentError('invalid deployment profile identifier: ' + key)
+    for key in ('python', 'github_command', 'credentials', 'cc_version_file'):
+        if key in profile and not Path(profile[key]).is_absolute():
+            raise DeploymentError('deployment profile paths must be absolute: ' + key)
+    if 'path' in profile and (not isinstance(profile['path'], list) or not profile['path'] or
+                             any(not isinstance(item, str) or ':' in item or not Path(item).is_absolute()
+                                 for item in profile['path'])):
+        raise DeploymentError('deployment profile path must be a list of absolute directories')
+    environment = profile.get('environment', {})
+    if not isinstance(environment, dict) or any(not isinstance(value, str) for value in environment.values()):
+        raise DeploymentError('invalid deployment profile environment')
+    parse_env([key + '=' + value for key, value in environment.items()])
+    retention = profile.get('retention', {})
+    if not isinstance(retention, dict) or retention.keys() - {'releases', 'backups', 'logs', 'stderr_bytes'}:
+        raise DeploymentError('invalid retention settings')
+    if any(type(value) is not int or value < 1 for value in retention.values()):
+        raise DeploymentError('retention values must be positive integers')
+    return profile
+
+
 def bundle_revision(artifact):
     try:
         revision = (artifact / 'REVISION').read_text().strip()
@@ -206,7 +242,11 @@ def stage(args, *, reuse=False):
         repo = Path(__file__).resolve().parents[2]
         revision = output(['git', '-C', repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{commit}'])
     home = Path.home().resolve()
-    extra_env = parse_env(args.env)
+    profile_path = getattr(args, 'profile', None)
+    profile = read_profile(profile_path)
+    if 'service_user' in profile and profile['service_user'] != pwd.getpwuid(os.geteuid()).pw_name:
+        raise DeploymentError('profile service_user must match the deployment user')
+    extra_env = {**profile.get('environment', {}), **parse_env(args.env)}
     root = home / '.local/lib/ink-commons/releases'
     release = root / revision
     if release.exists() and not reuse:
@@ -216,7 +256,7 @@ def stage(args, *, reuse=False):
     legacy = sorted(config.keys() & {'repositories', 'repository_defaults', 'execution'})
     if legacy:
         print('Legacy SQLite first-import fields:', ', '.join(legacy))
-    command = Path(args.github_command).expanduser().resolve()
+    command = Path(args.github_command or profile.get('github_command', '~/.local/bin/yuxingyi')).expanduser().resolve()
     if not command.is_file() or not os.access(command, os.X_OK):
         raise DeploymentError('App CLI is unavailable')
     config['github_command'] = str(command)
@@ -224,16 +264,23 @@ def stage(args, *, reuse=False):
     cc_config = Path(args.cc_config).expanduser().resolve()
     sys.path.insert(0, str(Path(__file__).parent))
     from runtime import credential_environment
-    settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
+    python = profile.get('python', sys.executable)
+    if not Path(python).is_file() or not os.access(python, os.X_OK):
+        raise DeploymentError('deployment Python is unavailable')
+    settings = {'revision': revision, 'home': str(home), 'python': python,
                 'data': str(home / '.local/state/ink-commons'),
-                'cc_config': str(cc_config), 'project': args.project, 'environment': extra_env,
+                'cc_config': str(cc_config), 'project': args.project or profile.get('project', 'yu-xing-yi-codex'), 'environment': extra_env,
                 'config_source': str(config_source)}
+    if profile_path:
+        settings['profile_path'] = str(Path(profile_path).expanduser().resolve())
+        settings['profile'] = profile
     declaration = getattr(args, 'runtime_declaration', None)
     if declaration:
         settings['runtime_declaration'] = str(Path(declaration).expanduser().resolve())
         print(json.dumps({'config_drift': config_drift(settings['data'], settings['runtime_declaration'])}))
-    if getattr(args, 'credentials', None):
-        settings['credentials'] = str(Path(args.credentials).expanduser().resolve())
+    credentials = getattr(args, 'credentials', None) or profile.get('credentials')
+    if credentials:
+        settings['credentials'] = str(Path(credentials).expanduser().resolve())
         del settings['cc_config'], settings['project']
     if allowed_signers:
         settings['allowed_signers'] = allowed_signers
@@ -335,14 +382,14 @@ def verify_staged_settings(target, config, expected_settings):
                               'archive the staged release before retrying')
 
 
-def select_release(app, network_env, tag, channel):
+def select_release(app, network_env, tag, channel, repository=REPOSITORY):
     if tag is None:
         if channel == 'preview':
-            tag = output([*app, 'api', f'repos/{REPOSITORY}/releases',
+            tag = output([*app, 'api', f'repos/{repository}/releases',
                           '--jq', '[.[] | select(.prerelease and (.draft | not))][0].tag_name // ""'],
                          env=network_env)
         else:
-            tag = output([*app, 'api', f'repos/{REPOSITORY}/releases/latest',
+            tag = output([*app, 'api', f'repos/{repository}/releases/latest',
                           '--jq', '.tag_name'], env=network_env)
     match = re.fullmatch(r'build-([0-9a-f]{40})', tag)
     if match is None:
@@ -361,8 +408,12 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
     config_path = Path(settings.get('config_source') or active_config_path)
     proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
     network_env = {**os.environ, **parse_env(proxy_entries)}
-    app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
-    tag, revision = select_release(app, network_env, tag, channel)
+    profile = settings.get('profile', {})
+    repository = profile.get('repository', REPOSITORY)
+    if profile.get('path'):
+        network_env['PATH'] = ':'.join(profile['path'])
+    app = [config['github_command'], '--profile', 'inspect', '-R', repository]
+    tag, revision = select_release(app, network_env, tag, channel, repository)
     if dry_run:
         print(json.dumps({'current': current.name, 'tag': tag, 'revision': revision,
                           'staged': (releases / revision).is_dir()}))
@@ -408,7 +459,7 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
                 github_command=config['github_command'], cc_config=settings.get('cc_config', '~/.cc-connect/config.toml'),
                 project=settings.get('project'), credentials=settings.get('credentials'),
                 env=proxy_entries, allowed_signers=allowed_signers,
-                runtime_declaration=settings.get('runtime_declaration'),
+                runtime_declaration=settings.get('runtime_declaration'), profile=settings.get('profile_path'),
             ))
 
     if not apply:
@@ -433,6 +484,8 @@ def ink_plist(release, settings):
     data = Path(settings['data'])
     env = {'HOME': settings['home'],
            'PATH': str(Path(settings['home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'}
+    if settings.get('profile', {}).get('path'):
+        env['PATH'] = ':'.join(settings['profile']['path'])
     env.update(parse_env([key + '=' + value for key, value in settings.get('environment', {}).items()]))
     return {'Label': LABEL, 'ProgramArguments': [settings['python'], str(release / 'runtime.py')],
             'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30,
@@ -562,6 +615,7 @@ def activate(args):
     phase = 'stop_old_service'
     try:
         unload(domain, LABEL)
+        rotate_stderr(data, settings.get('profile', {}).get('retention', {}).get('stderr_bytes', 8 << 20))
         phase = 'snapshot'
         with open(data / 'state.json.lock', 'a') as lock:
             os.fchmod(lock.fileno(), 0o600)
@@ -658,17 +712,83 @@ def repository_status(data, entry, checkouts):
     return result
 
 
+def rotate_stderr(data, limit):
+    log = data / 'stderr.log'
+    if log.is_file() and not log.is_symlink() and log.stat().st_size >= limit:
+        log.rename(data / ('stderr.log.' + str(time.time_ns())))
+
+
+def retention_plan(home, root, retention, include_legacy):
+    protected = set()
+    entry = root / 'ink'
+    if entry.is_symlink():
+        protected.add(entry.resolve())
+    for directory in (SYSTEM_DIR, home / 'Library/LaunchAgents'):
+        for path in directory.glob('*.plist'):
+            # Read structured paths only, and exclude any release referenced by a service.
+            try:
+                job = plistlib.loads(path.read_bytes())
+                paths = [job.get('Program'), *job.get('ProgramArguments', [])]
+            except (OSError, ValueError, plistlib.InvalidFileException):
+                raise DeploymentError('cannot inspect a launchd plist for retention: ' + path.name) from None
+            protected.update(Path(item).resolve() for item in paths
+                             if isinstance(item, str) and Path(item).is_absolute())
+
+    def eligible(entries, pattern, keep):
+        candidates = sorted((path for path in entries if re.fullmatch(pattern, path.name)
+                             and not path.is_symlink()),
+                            key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
+        return [path for path in candidates[keep:]
+                if not any(path.resolve() == protected_path or path.resolve() in protected_path.parents
+                           for protected_path in protected)]
+
+    plan = eligible((root / 'releases').glob('*'), r'[0-9a-f]{40}', retention.get('releases', 5))
+    plan += eligible((root / 'backups').glob('*'), r'[0-9]+', retention.get('backups', 5))
+    plan += eligible((home / '.local/state/ink-commons').glob('stderr.log.*'),
+                     r'stderr\.log\.[0-9]+', retention.get('logs', 5))
+    if include_legacy:
+        plan += eligible(root.glob('*'), r'start|activate-[a-zA-Z0-9._-]+\.command|staging-archive\..+', 0)
+        plan += eligible((root / 'deploy').glob('*'), r'[0-9a-f]{40}', 0)
+    return plan
+
+
+def maintain(args):
+    if os.geteuid() == 0:
+        raise DeploymentError('maintenance must run as the deployment user')
+    home = Path.home().resolve()
+    root = home / '.local/lib/ink-commons'
+    profile = read_profile(args.profile)
+    if not profile and (root / 'ink').is_symlink():
+        settings_path = (root / 'ink').resolve().parent / 'deployment.json'
+        profile = json.loads(settings_path.read_text()).get('profile', {})
+    retention = profile.get('retention', {})
+    if not args.apply:
+        print(json.dumps({'archive': list(map(str, retention_plan(home, root, retention, args.include_legacy)))}, indent=2))
+        return
+    with deployment_lock(root):
+        plan = retention_plan(home, root, retention, args.include_legacy)
+        if plan:
+            archive = root / 'archive' / str(time.time_ns())
+            for source in plan:
+                target = archive / source.relative_to(home)
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                source.rename(target)
+            print('Archived:', archive)
+
+
 def status(args):
     account = pwd.getpwnam(args.user)
     home = Path(account.pw_dir).resolve()
     data = home / '.local/state/ink-commons'
+    active_settings = {}
     for path in (SYSTEM_DIR / (LABEL+'.plist'),home/'Library/LaunchAgents'/(LABEL+'.plist')):
         if path.is_file():
             args_list = plistlib.loads(path.read_bytes()).get('ProgramArguments',[])
             if args_list and args_list[-1].endswith('/runtime.py'):
                 manifest = Path(args_list[-1]).parent/'deployment.json'
                 if manifest.is_file():
-                    data = Path(json.loads(manifest.read_text())['data'])
+                    active_settings = json.loads(manifest.read_text())
+                    data = Path(active_settings['data'])
                     break
     config_path=home/'.config/ink-commons/config.json'
     if 'manifest' in locals() and manifest.is_file():
@@ -676,8 +796,11 @@ def status(args):
     from urllib.parse import urlparse
     endpoint=json.loads(config_path.read_text()).get('cc_connect_url','') if config_path.is_file() else ''
     port=urlparse(endpoint).port or 9111
+    profile = read_profile(getattr(args, 'profile', None)) or active_settings.get('profile', {})
+    cc_label = profile.get('cc_label', CC_LABEL)
+    watchdog = profile.get('watchdog_label', WATCHDOG)
     binaries={}
-    for name,path in [('system',SYSTEM_DIR/(CC_LABEL+'.plist')),('login',home/'Library/LaunchAgents'/(CC_LABEL+'.plist'))]:
+    for name,path in [('system',SYSTEM_DIR/(cc_label+'.plist')),('login',home/'Library/LaunchAgents'/(cc_label+'.plist'))]:
         if path.is_file():
             binary=Path(plistlib.loads(path.read_bytes())['ProgramArguments'][0])
             binaries[name]={'path':str(binary),'exists':binary.is_file()}
@@ -689,7 +812,7 @@ def status(args):
             raise DeploymentError('checkout must have the form OWNER/REPO=DIR')
         checkouts[repo.lower()] = str(Path(checkout).expanduser().resolve())
     report['repositories'] = repository_status(data, home / '.local/lib/ink-commons/ink', checkouts)
-    for label in (LABEL, CC_LABEL, WATCHDOG):
+    for label in (LABEL, cc_label, watchdog):
         report['services'][label] = {
             'system': loaded('system', label),
             'login': loaded('gui/' + str(account.pw_uid), label)}
@@ -703,8 +826,18 @@ def status(args):
             report['config_drift'] = config_drift(data, active_settings.get('runtime_declaration'))
         except (OSError, ValueError, DeploymentError):
             report['config_drift'] = {'status': 'invalid_declaration'}
+    report['config_sha256'] = hashlib.sha256(config_path.read_bytes()).hexdigest() if config_path.is_file() else None
+    cc_version = None
+    if profile.get('cc_version_file'):
+        try:
+            meta = json.loads(Path(profile['cc_version_file']).read_text())
+            if isinstance(meta, dict):
+                cc_version = {key: meta[key] for key in ('version', 'commit')
+                              if isinstance(meta.get(key), str) and re.fullmatch(r'[a-zA-Z0-9.+_-]{1,100}', meta[key])}
+        except (OSError, ValueError):
+            pass
     report['cc_connect']={'process_pids':cc_process_pids(),'port':port,
-                          'listener_pids':listener_pids(port),'binaries':binaries}
+                          'listener_pids':listener_pids(port),'binaries':binaries, 'version': cc_version}
     print(json.dumps(report, indent=2))
 
 
@@ -719,11 +852,12 @@ def main():
         prepare.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
         prepare.add_argument('--runtime-declaration', help='SQLite policy declaration for read-only drift reporting')
         prepare.add_argument('--config', default='~/.config/ink-commons/config.json')
+        prepare.add_argument('--profile', help='validated deployment profile JSON')
         prepare.add_argument('--allowed-signers', help='OpenSSH allowed_signers trust file for release signatures')
         prepare.add_argument('--credentials', help='private JSON file with cc_connect_token and discord_token')
         prepare.add_argument('--cc-config', default='~/.cc-connect/config.toml')
-        prepare.add_argument('--project', default='yu-xing-yi-codex')
-        prepare.add_argument('--github-command', default='~/.local/bin/yuxingyi')
+        prepare.add_argument('--project', default=None)
+        prepare.add_argument('--github-command', default=None)
     update = commands.add_parser('upgrade', help='prepare a published release')
     selection = update.add_mutually_exclusive_group()
     selection.add_argument('--tag', help='published build-<SHA> tag')
@@ -739,6 +873,11 @@ def main():
     apply.add_argument('--user', required=True)
     inspect = commands.add_parser('status')
     inspect.add_argument('--user', required=True)
+    inspect.add_argument('--profile')
+    maintenance = commands.add_parser('maintain', help='plan or archive expired deployment files')
+    maintenance.add_argument('--profile')
+    maintenance.add_argument('--include-legacy', action='store_true')
+    maintenance.add_argument('--apply', action='store_true')
     inspect.add_argument('--checkout', action='append', default=[], help='OWNER/REPO=DIR for managed hook inspection')
     args = parser.parse_args()
     if sys.version_info < (3,11,8):
@@ -749,7 +888,7 @@ def main():
         if args.action in ('upgrade', 'rollback'):
             upgrade(args)
         else:
-            {'stage': stage, 'deploy': deploy, 'activate': activate, 'status': status}[args.action](args)
+            {'stage': stage, 'deploy': deploy, 'activate': activate, 'status': status, 'maintain': maintain}[args.action](args)
     except DeploymentError as error:
         print('Deployment failed:', str(error), file=sys.stderr)
         return 1

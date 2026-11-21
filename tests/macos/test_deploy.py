@@ -147,6 +147,48 @@ class ArtifactStageTest(unittest.TestCase):
                 m.deploy(self.args)
             activate.assert_not_called()
 
+    def test_fresh_deploy_runs_full_login_activation_in_temporary_home(self):
+        self.write_bundle()
+        release = self.releases / self.revision
+        self.config.write_text(json.dumps({'cc_connect_url': 'http://127.0.0.1:9111/hook'}))
+        profile = self.home / 'profile.json'
+        profile.write_text(json.dumps({'repository': 'other/ink', 'cc_label': 'example.cc',
+                                      'path': ['/usr/bin', '/bin']}))
+        self.args.profile = str(profile)
+        self.args.cc_config = str(self.home / 'cc.toml')
+        Path(self.args.cc_config).write_text(
+            '[webhook]\ntoken="fixture"\n[[projects]]\nname="test"\n'
+            '[[projects.platforms]]\ntype="discord"\n[projects.platforms.options]\ntoken="fixture"\n')
+        launched = []
+        actual_run = m.run
+        account = SimpleNamespace(pw_uid=m.os.geteuid(), pw_dir=str(self.home), pw_name='test-user')
+
+        def run(args, **kwargs):
+            self.assertNotIn(args[0], ('git', 'go', 'sudo'))
+            if args[0] == '/bin/launchctl':
+                launched.append(args)
+                return SimpleNamespace(returncode=0)
+            return actual_run(args, **kwargs)
+
+        with patch.object(m, '__file__', str(self.artifact / 'manage.py')), \
+             patch.object(m, 'SYSTEM_DIR', self.home / 'LaunchDaemons'), \
+             patch.object(m.pwd, 'getpwuid', return_value=account), \
+             patch.object(m.pwd, 'getpwnam', return_value=account), \
+             patch.object(m.Path, 'home', return_value=self.home), \
+             patch.object(m, 'loaded', return_value=False), \
+             patch.object(m, 'disabled', return_value=False), \
+             patch.object(m, 'run', side_effect=run), \
+             patch.object(m, 'check_cc_endpoint') as endpoint, \
+             patch.object(m, 'health', return_value={'revision': self.revision, 'gate': 'closed'}), \
+             patch.object(m, 'local_get', return_value={'status': 'ok'}), \
+             patch.object(sys, 'path', [str(self.artifact), *sys.path]):
+            m.deploy(self.args)
+        self.assertEqual(endpoint.call_count, 2)
+        self.assertTrue(any(call[1:3] == ['bootstrap', 'gui/' + str(account.pw_uid)] for call in launched))
+        self.assertTrue((release / 'enabled').exists())
+        self.assertEqual(json.loads((release / 'deployment.json').read_text())['profile']['repository'],
+                         'other/ink')
+
     def test_bundle_rejects_tampered_runtime_script(self):
         self.write_bundle()
         (self.artifact / 'runtime.py').write_bytes(b'tampered')
@@ -582,6 +624,37 @@ class MacOSOutputTest(unittest.TestCase):
                         'repositories': {'acme/demo': {'reviewer_login': 'new'}}}):
                 self.assertEqual(m.config_drift(tmp, declaration),
                                  {'status': 'changed', 'scopes': ['acme/demo']})
+
+    def test_retention_protects_service_and_active_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            root = home / '.local/lib/ink-commons'
+            releases = root / 'releases'
+            paths = [releases / (letter * 40) for letter in ('a', 'b', 'c', 'd')]
+            for stamp, path in enumerate(paths, 1):
+                path.mkdir(parents=True)
+                m.os.utime(path, (stamp, stamp))
+            (root / 'ink').symlink_to(paths[0] / 'ink')
+            system = home / 'LaunchDaemons'
+            system.mkdir()
+            (system / 'cc.plist').write_bytes(plistlib.dumps({'ProgramArguments': [str(paths[1] / 'cc')]}))
+            legacy = root / 'start'
+            legacy.write_text('legacy')
+            with patch.object(m, 'SYSTEM_DIR', system):
+                plan = m.retention_plan(home, root, {'releases': 1}, include_legacy=True)
+            self.assertEqual(set(plan), {paths[2], legacy})
+            self.assertTrue(all(path.is_dir() for path in paths))
+
+    def test_rotate_stderr_leaves_small_logs_and_preserves_old_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            log = data / 'stderr.log'
+            log.write_bytes(b'test')
+            m.rotate_stderr(data, 5)
+            self.assertTrue(log.is_file())
+            m.rotate_stderr(data, 4)
+            self.assertFalse(log.exists())
+            self.assertEqual(next(data.glob('stderr.log.*')).read_bytes(), b'test')
 
     def test_no_proxy_rejects_non_host_text(self):
         self.assertEqual(m.parse_env(['NO_PROXY=localhost,127.0.0.1,.example.com,[::1]'])['NO_PROXY'],'localhost,127.0.0.1,.example.com,[::1]')

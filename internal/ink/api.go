@@ -46,7 +46,8 @@ func (s *Service) Handler() http.Handler {
 			gate = "open"
 		}
 		reply(w, 200, map[string]string{"status": "ok", "revision": BuildRevision, "gate": gate,
-			"last_poll": timestamp(s.lastPoll.Load()), "last_github_ok": timestamp(s.up.lastOK.Load())})
+			"last_poll": timestamp(s.lastPoll.Load()), "last_github_ok": timestamp(s.up.lastOK.Load()),
+			"credentials_read_at": os.Getenv("INK_CREDENTIALS_READ_AT")})
 	})
 	mux.HandleFunc("GET /v1/self-check", s.selfCheck)
 	mux.HandleFunc("GET /v1/config", s.configuration)
