@@ -40,6 +40,8 @@ ink task claim --task TASK_UUID
 
 wake 会给出带路由的完整命令，例如 `--provider cc-connect --target PROJECT --session discord:THREAD`。ACP 等未注入 `CC_PROJECT` / `CC_SESSION_KEY` 的运行时直接使用这些参数；显式路由必须三项齐全，claim 成功后保存到私有 credential，后续 submit 无需重复。旧格式 wake 或兼容环境仍可使用进程环境中的 `CC_PROJECT` / `CC_SESSION_KEY`，通用路由可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
 
+如果旧版 CLI 在一次已确认的 HTTP 403 后留下了 credential（旧文件没有 `rejected` 或 `attempt_id`），不要删除文件。用同一个 `--task` 和同一个 `--claim-file` 重新 claim，并加 `--replace-route --provider ... --target ... --session ...`；CLI 保留原 token、替换路由，后续 submit 继续使用这个文件。只在确认收到 403 后使用；网络结果不明时保留原 credential 并原样重试，不能删除或重建。
+
 CLI 在发送请求前，先生成私有随机 credential，保存到状态目录 `claims/TASK_UUID.json`（文件 `0600`，目录 `0700`）；daemon 只保存其哈希。可用 `--claim-file /private/path/credential.json` 指定另一个私有文件。不要把这些文件提交到 Git、打印或放入唤醒消息；更换状态目录时应保留仍有未决任务的 credential。
 
 响应包含任务、`delivery`、`first` 和 `eligible`。cooperative 任务的 GitHub 登录名/命令始终来自领取任务时保存的负责人快照，改派不会改写旧领取者的指令。**只有领取成功且 `first:true` 才开始执行。** `first:false` 表示这个 credential 已领取过，或任务已交接：不要因重复唤醒再次执行。其他 credential 争抢返回 409。首次领取响应丢失时，相同文件重试会返回 `first:false`；先核对当前 owner/工作记录，由原领取者恢复，不能将其视作一份新授权。

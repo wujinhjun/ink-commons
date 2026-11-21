@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,11 +22,12 @@ import (
 )
 
 type taskCredential struct {
-	TaskID   string           `json:"task_id"`
-	Token    string           `json:"token"`
-	Route    *execution.Route `json:"route,omitempty"`
-	Login    string           `json:"github_login,omitempty"`
-	Rejected bool             `json:"rejected,omitempty"`
+	TaskID    string           `json:"task_id"`
+	Token     string           `json:"token"`
+	Route     *execution.Route `json:"route,omitempty"`
+	Login     string           `json:"github_login,omitempty"`
+	Rejected  bool             `json:"rejected,omitempty"`
+	AttemptID string           `json:"attempt_id,omitempty"`
 }
 
 func taskCommand(args []string) error {
@@ -49,6 +51,7 @@ func taskCommand(args []string) error {
 	routeProvider := flags.String("provider", "", "explicit executor provider for the assigned task route")
 	routeTarget := flags.String("target", "", "explicit executor target/project for the assigned task route")
 	routeSession := flags.String("session", "", "explicit executor session for the assigned task route")
+	replaceRoute := flags.Bool("replace-route", false, "replace a saved route after a confirmed rejected claim; requires --provider/--target/--session")
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -70,6 +73,8 @@ func taskCommand(args []string) error {
 	method := http.MethodGet
 	var body io.Reader
 	credentialPath := ""
+	claimToken := ""
+	claimAttemptID := ""
 	if action != "status" {
 		file := *claimFile
 		if file == "" {
@@ -83,6 +88,11 @@ func taskCommand(args []string) error {
 			}
 			file = filepath.Join(folder, *taskID+".json")
 		}
+		lock, err := lockTaskCredential(file)
+		if err != nil {
+			return err
+		}
+		defer unlockTaskCredential(lock)
 		credentialPath = file
 		credential, err := readTaskCredential(file)
 		if errors.Is(err, os.ErrNotExist) && action == "claim" {
@@ -124,7 +134,15 @@ func taskCommand(args []string) error {
 			if explicitRoute != nil {
 				current = *explicitRoute
 			}
-			if credential.Rejected {
+			switch {
+			case *replaceRoute:
+				if explicitRoute == nil {
+					return errors.New("--replace-route requires --provider, --target and --session")
+				}
+				credential.Route = explicitRoute
+				credential.Login = ""
+				credential.Rejected = false
+			case credential.Rejected:
 				switch {
 				case explicitRoute != nil:
 					credential.Route = explicitRoute
@@ -139,12 +157,19 @@ func taskCommand(args []string) error {
 					return errors.New("previous claim was rejected; supply the assigned route with --provider/--target/--session or --github-login")
 				}
 				credential.Rejected = false
-				if err := replaceTaskCredential(file, credential); err != nil {
-					return fmt.Errorf("record corrected claim route: %w", err)
-				}
-			} else if credential.Route != nil && (current.Provider != credential.Route.Provider || current.Target != credential.Route.Target || current.Session != credential.Route.Session) {
-				return errors.New("claim file belongs to another agent route")
+			case credential.Route != nil && (current.Provider != credential.Route.Provider || current.Target != credential.Route.Target || current.Session != credential.Route.Session):
+				return errors.New("claim file belongs to another agent route; after a confirmed 403 retry with --replace-route and the assigned route")
 			}
+			attemptID, err := newAttemptID()
+			if err != nil {
+				return err
+			}
+			credential.AttemptID = attemptID
+			if err := replaceTaskCredential(file, credential); err != nil {
+				return fmt.Errorf("record claim attempt: %w", err)
+			}
+			claimToken = credential.Token
+			claimAttemptID = credential.AttemptID
 		}
 		input := struct {
 			Token      string                 `json:"token"`
@@ -187,7 +212,7 @@ func taskCommand(args []string) error {
 		_ = json.Unmarshal(data, &problem)
 		if action == "claim" && res.StatusCode == http.StatusForbidden {
 			if credentialPath != "" {
-				if err := markTaskCredentialRejected(credentialPath, *taskID); err != nil {
+				if err := markTaskCredentialRejected(credentialPath, *taskID, claimToken, claimAttemptID); err != nil {
 					return fmt.Errorf("daemon HTTP %d: %s; failed to record rejected claim: %w", res.StatusCode, problem.Error, err)
 				}
 			}
@@ -215,7 +240,7 @@ func explicitTaskRoute(provider, target, session string) (*execution.Route, erro
 	return &route, nil
 }
 
-func markTaskCredentialRejected(path, taskID string) error {
+func markTaskCredentialRejected(path, taskID, token, attemptID string) error {
 	credential, err := readTaskCredential(path)
 	if err != nil {
 		return err
@@ -223,8 +248,53 @@ func markTaskCredentialRejected(path, taskID string) error {
 	if credential.TaskID != taskID || len(credential.Token) < 32 {
 		return errors.New("claim file does not belong to this task")
 	}
+	if token == "" || credential.Token != token || attemptID == "" || credential.AttemptID != attemptID {
+		// A delayed rejection belongs to an older attempt; a newer route may
+		// already own this credential. Never let it overwrite the newer state.
+		return nil
+	}
 	credential.Rejected = true
 	return replaceTaskCredential(path, credential)
+}
+
+func newAttemptID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func lockTaskCredential(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := lock.Chmod(0600); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			lock.Close()
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			lock.Close()
+			return nil, errors.New("claim credential is locked by another attempt")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func unlockTaskCredential(lock *os.File) {
+	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	_ = lock.Close()
 }
 
 func replaceTaskCredential(path string, credential taskCredential) error {

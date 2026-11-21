@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"ink-commons/internal/execution"
 )
 
 func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T) {
@@ -255,5 +256,98 @@ func TestExplicitTaskRoutePreservesExactValues(t *testing.T) {
 	}
 	if route.Provider != " cc-connect " || route.Target != " target " || route.Session != " discord:123 " {
 		t.Fatalf("explicit route was normalized: %#v", route)
+	}
+}
+
+func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
+	dir, err := os.MkdirTemp("/private/tmp", "ink-task-legacy-route-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	t.Setenv("INK_DATA_DIR", dir)
+	t.Setenv("INK_PROVIDER", "")
+	t.Setenv("CC_PROJECT", "")
+	t.Setenv("CC_SESSION_KEY", "")
+	claims := filepath.Join(dir, "claims")
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan map[string]any, 2)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		input := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		requests <- input
+		io.WriteString(w, `{"first":true,"task":{"handoff":{"state":"claimed"}}}`)
+	})}
+	go server.Serve(ln)
+	defer server.Close()
+
+	id := uuid.NewString()
+	token := strings.Repeat("a", 64)
+	credential := taskCredential{
+		TaskID: id,
+		Token:  token,
+		Route:  &execution.Route{Provider: "cc-connect", Target: "old-target", Session: "discord:999"},
+	}
+	data, _ := json.Marshal(credential)
+	path := filepath.Join(claims, id+".json")
+	if err := writeTaskCredential(path, append(data, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err := taskCommand([]string{
+		"claim", "--task", id, "--replace-route",
+		"--provider", "cc-connect", "--target", "new-target", "--session", "discord:123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := <-requests
+	route, _ := request["route"].(map[string]any)
+	if request["token"] != token || route["target"] != "new-target" || route["session"] != "discord:123" {
+		t.Fatalf("legacy credential was not replaced: %#v", request)
+	}
+	credential, err = readTaskCredential(path)
+	if err != nil || credential.Rejected || credential.AttemptID == "" || credential.Route == nil || credential.Route.Target != "new-target" {
+		t.Fatalf("replacement not persisted: %#v %v", credential, err)
+	}
+
+	if err := taskCommand([]string{"claim", "--task", id, "--replace-route"}); err == nil || !strings.Contains(err.Error(), "--replace-route requires") {
+		t.Fatalf("missing explicit route was not rejected: %v", err)
+	}
+}
+
+func TestTaskRejectionIsBoundToTheAttempt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claim.json")
+	id := uuid.NewString()
+	token := strings.Repeat("b", 64)
+	credential := taskCredential{
+		TaskID:    id,
+		Token:     token,
+		Route:     &execution.Route{Provider: "cc-connect", Target: "target", Session: "discord:123"},
+		AttemptID: "current",
+	}
+	data, _ := json.Marshal(credential)
+	if err := writeTaskCredential(path, append(data, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err := markTaskCredentialRejected(path, id, token, "older"); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := readTaskCredential(path)
+	if err != nil || credential.Rejected {
+		t.Fatalf("stale rejection changed the credential: %#v %v", credential, err)
+	}
+	if err := markTaskCredentialRejected(path, id, token, "current"); err != nil {
+		t.Fatal(err)
+	}
+	credential, err = readTaskCredential(path)
+	if err != nil || !credential.Rejected {
+		t.Fatalf("current rejection was not recorded: %#v %v", credential, err)
 	}
 }
