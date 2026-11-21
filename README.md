@@ -343,4 +343,4 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 
 ## macOS 服务与版本部署
 
-安装、更新和从登录启动迁移到开机启动，见 [macOS 部署与恢复](deploy/macos/README.md)。已有 Apple Silicon 系统服务可用 `./deploy/macos/upgrade` 从 GitHub Actions 产物升级。通过 `/healthz` 返回的 `revision` 核对实际运行版本，使用 App CLI 按仓库刷新短期凭据。系统迁移同时处理 cc-connect 登录依赖，不需要 cc-connect 新协议。FileVault 冷启动仍需先解锁磁盘。
+安装、更新和从登录启动迁移到开机启动，见 [macOS 部署与恢复](deploy/macos/README.md)。Apple Silicon Mac 可直接从 GitHub Release 安装，已部署的系统服务可用 `ink upgrade` 更新。通过 `/healthz` 返回的 `revision` 核对实际运行版本，使用 App CLI 按仓库刷新短期凭据。系统迁移同时处理 cc-connect 登录依赖，不需要 cc-connect 新协议。FileVault 冷启动仍需先解锁磁盘。

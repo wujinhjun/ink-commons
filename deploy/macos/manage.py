@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """版本化构建与 launchd 迁移。stage 不改服务；activate 才停止、备份和切换。"""
 import argparse
+from contextlib import contextmanager
 import fcntl
 import io
 import hashlib
@@ -24,7 +25,7 @@ CC_LABEL = 'com.cc-connect.service'
 WATCHDOG = 'com.personal-infra.discord-watchdog'
 SYSTEM_DIR = Path('/Library/LaunchDaemons')
 REPOSITORY = 'wujinhjun/ink-commons'
-UPGRADE_REF = 'refs/remotes/ink-upgrade/main'
+BUNDLE_FILES = ('ink', 'manage.py', 'runtime.py', 'config.example.json', 'REVISION')
 
 
 class DeploymentError(Exception):
@@ -35,8 +36,8 @@ def run(args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
 
 
-def output(args):
-    return run(args, stdout=subprocess.PIPE).stdout.decode().strip()
+def output(args, **kwargs):
+    return run(args, stdout=subprocess.PIPE, **kwargs).stdout.decode().strip()
 
 
 def atomic(path, content, mode=0o600):
@@ -74,8 +75,9 @@ def parse_env(entries):
     return result
 
 
-def existing_cc_binary(home):
-    for path in (home / 'Library/LaunchAgents' / (CC_LABEL+'.plist'), SYSTEM_DIR / (CC_LABEL+'.plist')):
+def existing_cc_binary(home, system_first=False):
+    paths = (home / 'Library/LaunchAgents' / (CC_LABEL+'.plist'), SYSTEM_DIR / (CC_LABEL+'.plist'))
+    for path in (reversed(paths) if system_first else paths):
         if path.is_file():
             binary=Path(plistlib.loads(path.read_bytes())['ProgramArguments'][0])
             if not binary.is_file():
@@ -125,18 +127,36 @@ def cc_process_pids():
     return sorted(set(pids))
 
 
-def stage_artifact(artifact, target, revision):
-    checksum = (artifact / 'SHA256SUMS').read_text()
-    expected = re.fullmatch(r'([0-9a-f]{64})  ink\n?', checksum)
-    if expected is None:
-        raise DeploymentError('invalid ink artifact checksum file')
-    shutil.copyfile(artifact / 'ink', target)
-    with target.open('rb') as binary:
-        actual = hashlib.file_digest(binary, 'sha256').hexdigest()
-    if actual != expected[1]:
-        raise DeploymentError('ink artifact checksum mismatch')
-    target.chmod(0o700)
-    verify_revision(target, revision)
+def bundle_revision(artifact):
+    try:
+        revision = (artifact / 'REVISION').read_text().strip()
+    except (OSError, ValueError):
+        raise DeploymentError('deployment bundle is missing a valid REVISION file') from None
+    if not re.fullmatch(r'[0-9a-f]{40}', revision):
+        raise DeploymentError('deployment bundle has an invalid revision')
+    return revision
+
+
+def verify_artifact(artifact, release, revision, bundled):
+    names = BUNDLE_FILES if bundled else ('ink',)
+    checksums = {}
+    for line in (artifact / 'SHA256SUMS').read_text().splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64})  (.+)', line)
+        if match is None or match[2] not in names or match[2] in checksums:
+            raise DeploymentError('invalid ink artifact checksum file')
+        checksums[match[2]] = match[1]
+    if set(checksums) != set(names):
+        raise DeploymentError('incomplete ink artifact checksum file')
+    for name in names:
+        target = release / name
+        if not target.is_file() or target.is_symlink():
+            raise DeploymentError('ink artifact file is missing or invalid: ' + name)
+        with target.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != checksums[name]:
+                raise DeploymentError('ink artifact checksum mismatch: ' + name)
+    if bundled and bundle_revision(release) != revision:
+        raise DeploymentError('deployment bundle revision does not match --revision')
+    verify_revision(release / 'ink', revision)
 
 
 def verify_revision(binary, revision):
@@ -148,18 +168,25 @@ def verify_revision(binary, revision):
         raise DeploymentError('ink artifact revision does not match --revision')
 
 
-def stage(args):
+def stage(args, *, reuse=False):
     if os.geteuid() == 0:
         raise DeploymentError('stage must run as the service user, without sudo')
     if sys.version_info < (3, 11, 8):
         raise DeploymentError('Python 3.11.8+ required')
-    repo = Path(__file__).resolve().parents[2]
-    revision = output(['git', '-C', repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{commit}'])
+    artifact = Path(args.artifact_dir).expanduser() if args.artifact_dir else None
+    bundled = artifact is not None and (artifact / 'REVISION').is_file()
+    if bundled:
+        revision = bundle_revision(artifact)
+        if revision != args.revision:
+            raise DeploymentError('deployment bundle revision does not match --revision')
+    else:
+        repo = Path(__file__).resolve().parents[2]
+        revision = output(['git', '-C', repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{commit}'])
     home = Path.home().resolve()
     extra_env = parse_env(args.env)
     root = home / '.local/lib/ink-commons/releases'
     release = root / revision
-    if release.exists():
+    if release.exists() and not reuse:
         raise DeploymentError('release already exists; reuse it or explicitly archive it before restaging')
     config = json.loads(Path(args.config).expanduser().read_text())
     command = Path(args.github_command).expanduser().resolve()
@@ -171,17 +198,34 @@ def stage(args):
     sys.path.insert(0, str(Path(__file__).parent))
     from runtime import environment
     environment(cc_config, args.project)
+    cc_source = Path(args.cc_connect_binary).expanduser().resolve() if args.cc_connect_binary else existing_cc_binary(home)
+    if not cc_source.is_file():
+        raise DeploymentError('cc-connect source binary is missing')
+    if 'releases' in cc_source.parts and not args.cc_connect_binary:
+        raise DeploymentError('cc-connect is already release-pinned; explicitly select --cc-connect-binary to reuse or upgrade it')
+    settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
+                'data': str(home / '.local/state/ink-commons'),
+                'cc_config': str(cc_config), 'project': args.project, 'environment': extra_env,
+                'cc_binary_sha256': hashlib.sha256(cc_source.read_bytes()).hexdigest()}
+    if release.exists():
+        verify_staged_settings(release, config, settings)
+        verify_artifact(artifact, release, revision, bundled)
+        return release
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(dir=root) as temp:
         temp = Path(temp)
         candidate = temp / 'release'
         candidate.mkdir(mode=0o700)
-        if args.artifact_dir:
-            stage_artifact(Path(args.artifact_dir).expanduser(), candidate / 'ink', revision)
-            for name in ('runtime.py', 'manage.py'):
-                script = run(['git', '-C', repo, 'show', revision + ':deploy/macos/' + name],
-                             stdout=subprocess.PIPE).stdout
-                (candidate / name).write_bytes(script)
+        if artifact is not None:
+            for name in (BUNDLE_FILES if bundled else ('ink',)):
+                shutil.copyfile(artifact / name, candidate / name)
+            (candidate / 'ink').chmod(0o700)
+            verify_artifact(artifact, candidate, revision, bundled)
+            if not bundled:
+                for name in ('runtime.py', 'manage.py'):
+                    script = run(['git', '-C', repo, 'show', revision + ':deploy/macos/' + name],
+                                 stdout=subprocess.PIPE).stdout
+                    (candidate / name).write_bytes(script)
         else:
             source = temp / 'source'
             source.mkdir()
@@ -193,22 +237,55 @@ def stage(args):
                  '-o', candidate / 'ink', './cmd/ink'], cwd=source)
             for name in ('runtime.py', 'manage.py'):
                 shutil.copy2(source / 'deploy/macos' / name, candidate / name)
-        cc_source = Path(args.cc_connect_binary).expanduser().resolve() if args.cc_connect_binary else existing_cc_binary(home)
-        if not cc_source.is_file():
-            raise DeploymentError('cc-connect source binary is missing')
-        if 'releases' in cc_source.parts and not args.cc_connect_binary:
-            raise DeploymentError('cc-connect is already release-pinned; explicitly select --cc-connect-binary to reuse or upgrade it')
-        print('cc-connect source:',cc_source,'sha256:',hashlib.sha256(cc_source.read_bytes()).hexdigest()[:16])
+        print('cc-connect source:', cc_source, 'sha256:', settings['cc_binary_sha256'][:16])
         shutil.copy2(cc_source, candidate / 'cc-connect')
+        if hashlib.sha256((candidate / 'cc-connect').read_bytes()).hexdigest() != settings['cc_binary_sha256']:
+            raise DeploymentError('cc-connect source changed during staging; retry')
         atomic(candidate / 'config.json', json.dumps(config).encode())
-        settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
-                    'data': str(home / '.local/state/ink-commons'),
-                    'cc_config': str(cc_config), 'project': args.project, 'environment': extra_env,
-                    'cc_binary_sha256': hashlib.sha256((candidate / 'cc-connect').read_bytes()).hexdigest()}
         atomic(candidate / 'deployment.json', json.dumps(settings).encode())
         os.rename(candidate, release)
     print('Staged:', release)
     print('No running service was changed.')
+    return release
+
+
+def deploy(args):
+    uid = os.geteuid()
+    if uid == 0:
+        raise DeploymentError('deploy must run as the service user, without sudo')
+    home = Path.home().resolve()
+    root = home / '.local/lib/ink-commons'
+    with deployment_lock(root):
+        entry = root / 'ink'
+        gui = 'gui/' + str(uid)
+        if entry.exists() or entry.is_symlink() or loaded('system', LABEL) or loaded(gui, LABEL):
+            raise DeploymentError('an Ink deployment already exists; use upgrade')
+        cc_agent = None
+        if not (SYSTEM_DIR / (CC_LABEL + '.plist')).is_file():
+            cc_agent = home / 'Library/LaunchAgents' / (CC_LABEL + '.plist')
+            if not cc_agent.is_file():
+                raise DeploymentError('install the cc-connect system service or LaunchAgent before deploying Ink')
+        if not args.cc_connect_binary:
+            args.cc_connect_binary = str(existing_cc_binary(home, system_first=True))
+        artifact = Path(__file__).resolve().parent
+        args.revision = bundle_revision(artifact)
+        args.artifact_dir = str(artifact)
+        data = home / '.local/state/ink-commons'
+        data.mkdir(parents=True, exist_ok=True, mode=0o700)
+        validate_state_directory(data, home, uid)
+        release = stage(args, reuse=True)
+        activate_staged(release, cc_agent=cc_agent)
+
+
+@contextmanager
+def deployment_lock(root):
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (root / 'upgrade.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise DeploymentError('another deployment is running') from None
+        yield
 
 
 def upgrade():
@@ -218,29 +295,26 @@ def upgrade():
     entry = root / 'ink'
     if not entry.is_symlink() or not loaded('system', LABEL):
         raise DeploymentError('upgrade requires an existing system deployment')
-    with (root / 'upgrade.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise DeploymentError('another upgrade is running') from None
+    with deployment_lock(root):
         upgrade_system(root, entry)
 
 
-def verify_staged_upgrade(current, target, config, settings):
+def verify_staged_settings(target, config, expected_settings):
     try:
         staged_config = json.loads((target / 'config.json').read_text())
         staged_settings = json.loads((target / 'deployment.json').read_text())
     except (OSError, ValueError):
         raise DeploymentError('staged release configuration is missing or invalid') from None
-    expected_settings = {**settings, 'revision': target.name}
     if staged_config != config or staged_settings != expected_settings:
         raise DeploymentError('staged release configuration differs from the current deployment; '
                               'archive the staged release before retrying')
-    expected_cc = settings.get('cc_binary_sha256')
-    for release in (current, target):
-        binary = release / 'cc-connect'
-        if not binary.is_file() or hashlib.sha256(binary.read_bytes()).hexdigest() != expected_cc:
-            raise DeploymentError('cc-connect binary does not match the current deployment checksum')
+    verify_cc_binary(target, expected_settings.get('cc_binary_sha256'))
+
+
+def verify_cc_binary(release, expected):
+    binary = release / 'cc-connect'
+    if not binary.is_file() or hashlib.sha256(binary.read_bytes()).hexdigest() != expected:
+        raise DeploymentError('cc-connect binary does not match the current deployment checksum')
 
 
 def upgrade_system(root, entry):
@@ -253,11 +327,11 @@ def upgrade_system(root, entry):
     config = json.loads(config_path.read_text())
     proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
     network_env = {**os.environ, **parse_env(proxy_entries)}
-    repo = Path(__file__).resolve().parents[2]
     app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
-    run([*app, 'git', 'fetch', '--no-tags', f'https://github.com/{REPOSITORY}.git',
-         'refs/heads/main:' + UPGRADE_REF], cwd=repo, env=network_env)
-    revision = output(['git', '-C', repo, 'rev-parse', '--verify', UPGRADE_REF + '^{commit}'])
+    revision = output([*app, 'api', f'repos/{REPOSITORY}/git/ref/heads/main',
+                       '--jq', '.object.sha'], env=network_env)
+    if not re.fullmatch(r'[0-9a-f]{40}', revision):
+        raise DeploymentError('GitHub did not return a valid main revision')
     target = releases / revision
     if target == current:
         try:
@@ -268,32 +342,32 @@ def upgrade_system(root, entry):
             print('Already running:', revision)
             return
 
-    if not target.exists():
-        with tempfile.TemporaryDirectory() as artifact:
-            try:
-                run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact,
-                     '--pattern', 'ink', '--pattern', 'SHA256SUMS'], env=network_env)
-            except subprocess.CalledProcessError:
-                raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
+    reuse = target.exists()
+    if reuse and target != current:
+        verify_cc_binary(current, settings.get('cc_binary_sha256'))
+        verify_staged_settings(target, config, {**settings, 'revision': revision})
+
+    assets = ('SHA256SUMS',) if reuse else (*BUNDLE_FILES, 'SHA256SUMS')
+    with tempfile.TemporaryDirectory() as artifact:
+        try:
+            run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact,
+                 *[f'--pattern={name}' for name in assets]], env=network_env)
+        except subprocess.CalledProcessError:
+            raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
+        if reuse:
+            verify_artifact(Path(artifact), target, revision, bundled=True)
+        else:
+            if bundle_revision(Path(artifact)) != revision:
+                raise DeploymentError('downloaded bundle does not match the main revision')
             stage(argparse.Namespace(
                 revision=revision, artifact_dir=artifact, config=str(config_path),
                 github_command=config['github_command'], cc_config=settings['cc_config'],
                 project=settings['project'], cc_connect_binary=str(current / 'cc-connect'),
                 env=proxy_entries,
             ))
-    else:
-        if target != current:
-            verify_staged_upgrade(current, target, config, settings)
-        verify_revision(target / 'ink', revision)
 
-    # Ask for sudo before changing the skill link. The existing activate command
-    # owns service validation and rollback.
-    run(['sudo', '-v'])
     try:
-        run([target / 'ink', 'init'])
-        run([target / 'ink', 'init', '--check'])
-        run(['sudo', sys.executable, target / 'manage.py', 'activate', '--system',
-             '--user', pwd.getpwuid(os.geteuid()).pw_name, '--release', target])
+        activate_staged(target)
     except (OSError, subprocess.CalledProcessError):
         if entry.resolve().parent == current:
             try:
@@ -301,6 +375,18 @@ def upgrade_system(root, entry):
             except (OSError, subprocess.CalledProcessError):
                 print('Unable to restore the previous agent skill', file=sys.stderr)
         raise
+
+
+def activate_staged(release, cc_agent=None):
+    # Ask for sudo before changing the skill link.
+    run(['sudo', '-v'])
+    run([release / 'ink', 'init'])
+    run([release / 'ink', 'init', '--check'])
+    command = ['sudo', sys.executable, release / 'manage.py', 'activate', '--system',
+               '--user', pwd.getpwuid(os.geteuid()).pw_name, '--release', release]
+    if cc_agent is not None:
+        command.extend(['--cc-connect-agent', cc_agent])
+    run(command)
 
 
 def ink_plist(release, settings, user, system):
@@ -642,12 +728,14 @@ def main():
     build = commands.add_parser('stage')
     build.add_argument('--revision', required=True)
     build.add_argument('--artifact-dir', help='extracted GitHub Actions artifact directory')
-    build.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
-    build.add_argument('--cc-connect-binary')
-    build.add_argument('--config', default='~/.config/ink-commons/config.json')
-    build.add_argument('--cc-config', default='~/.cc-connect/config.toml')
-    build.add_argument('--project', default='yu-xing-yi-codex')
-    build.add_argument('--github-command', default='~/.local/bin/yuxingyi')
+    install = commands.add_parser('deploy', help='install from a GitHub Release bundle')
+    for prepare in (build, install):
+        prepare.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
+        prepare.add_argument('--cc-connect-binary')
+        prepare.add_argument('--config', default='~/.config/ink-commons/config.json')
+        prepare.add_argument('--cc-config', default='~/.cc-connect/config.toml')
+        prepare.add_argument('--project', default='yu-xing-yi-codex')
+        prepare.add_argument('--github-command', default='~/.local/bin/yuxingyi')
     commands.add_parser('upgrade', help='download and activate the verified main build')
     apply = commands.add_parser('activate')
     apply.add_argument('--release', required=True)
@@ -665,7 +753,7 @@ def main():
         if args.action == 'upgrade':
             upgrade()
         else:
-            {'stage': stage, 'activate': activate, 'status': status}[args.action](args)
+            {'stage': stage, 'deploy': deploy, 'activate': activate, 'status': status}[args.action](args)
     except DeploymentError as error:
         print('Deployment failed:', str(error), file=sys.stderr)
         return 1
