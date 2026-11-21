@@ -124,6 +124,8 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 	}
 	up := newUpstream(config.GitHubToken)
 	up.command = config.GitHubCommand
+	up.commandDigest = config.GitHubCommandSHA256
+	up.mergerCommand, up.mergerDigest = config.GitHubMergerCommand, config.GitHubMergerSHA256
 	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool)}, nil
 }
 

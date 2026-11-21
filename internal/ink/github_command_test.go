@@ -2,7 +2,9 @@ package ink
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,5 +138,29 @@ exit 1
 	_, status, err := up.gitHubJSON(context.Background(), "PUT", "/repos/acme/project/pulls/42/merge-async", "code", stackAPIVersion, []byte("{}"), &response, 409)
 	if err != nil || status != 409 || response.Details.ID != testStackRequestID {
 		t.Fatalf("HTTP %d, result %+v, error %v", status, response, err)
+	}
+}
+
+func TestMergerRequiresDedicatedPinnedCommand(t *testing.T) {
+	up := newUpstream("reader-token")
+	up.command = "/unused-reader"
+	if _, err := up.merger(); err == nil {
+		t.Fatal("reader used as merger")
+	}
+	script := filepath.Join(t.TempDir(), "merger")
+	body := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(script, body, 0700); err != nil {
+		t.Fatal(err)
+	}
+	up.mergerCommand, up.mergerDigest = script, fmt.Sprintf("%x", sha256.Sum256(body))
+	merger, err := up.merger()
+	if err != nil || merger.command != script || merger.token != "" {
+		t.Fatalf("incorrect merger routing: %v", err)
+	}
+	if err := os.WriteFile(script, []byte("changed"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := merger.merge(context.Background(), "acme/project", 42, strings.Repeat("a", 40), "merge"); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected modified command to be rejected before use, got %v", err)
 	}
 }
