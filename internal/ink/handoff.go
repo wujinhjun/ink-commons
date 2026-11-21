@@ -28,10 +28,16 @@ type TaskHandoff struct {
 }
 
 type TaskWake struct {
-	Preparation string    `json:"preparation,omitempty"`
-	Attempts    int       `json:"attempts"`
-	RetryAt     time.Time `json:"retry_at,omitempty"`
-	Error       string    `json:"error,omitempty"`
+	Preparation         string                            `json:"preparation,omitempty"`
+	PreparationAttempts int                               `json:"preparation_attempts,omitempty"`
+	Allocation          *execution.ConversationAllocation `json:"allocation,omitempty"`
+	AllocationError     string                            `json:"allocation_error,omitempty"`
+	RecoveryAttempts    int                               `json:"recovery_attempts,omitempty"`
+	RecoveryStopped     bool                              `json:"recovery_stopped,omitempty"`
+	Attempts            int                               `json:"attempts"`
+	RetryAt             time.Time                         `json:"retry_at,omitempty"`
+	AcceptedAt          *time.Time                        `json:"accepted_at,omitempty"`
+	Error               string                            `json:"error,omitempty"`
 }
 
 type HandoffSubmission struct {
@@ -391,11 +397,32 @@ func (w *Work) refreshHandoffWorkflow(now time.Time, c Reliability) {
 					state = "waiting_previous_handoff"
 				}
 				w.Workflow = Workflow{State: state}
+				if state == "waiting_claim" {
+					switch {
+					case h.Wake.AcceptedAt != nil:
+						w.Workflow.Reason = "Wake accepted by the execution provider. Waiting for the " + t.Role + " to claim."
+					case h.Assignee.Route.Session != "" && !reviewChannelUnverified(w, t):
+						w.Workflow.Reason = "Conversation assigned to " + h.Assignee.Route.Session + ". Waiting for wake acceptance."
+					case h.Wake.Preparation == "preparing":
+						w.Workflow.Reason = "Waiting for conversation allocation to be confirmed"
+					default:
+						w.Workflow.Reason = "Waiting for conversation allocation"
+					}
+				}
 				if h.Wake.Error != "" {
 					w.raiseAlert("task_wake_unresolved", t.ID, h.Wake.Error, now)
 				}
 				if h.Wake.Preparation == "preparing" {
-					w.raiseAlert("task_preparation_unknown", t.ID, "Conversation allocation is unresolved; automatic allocation is fenced", now)
+					message := "Conversation allocation is unresolved. Verify and bind an existing session."
+					if t.Role == "reviewer" {
+						message = "Conversation allocation is unresolved. Verify the thread, then bind it with ink review --session."
+					}
+					if h.Wake.RecoveryStopped {
+						message = "Discord rejected conversation creation. Correct the reported error and assign a verified session."
+					} else if h.Wake.canRecover() {
+						message = "Conversation allocation is unresolved. Same-channel thread lookup will retry."
+					}
+					w.raiseAlert("task_preparation_unknown", t.ID, message, now)
 				}
 			}
 		}

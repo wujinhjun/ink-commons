@@ -22,6 +22,7 @@ type Executor struct {
 }
 
 var _ execution.Executor = (*Executor)(nil)
+var _ execution.ConversationAllocator = (*Executor)(nil)
 var _ execution.PreparationValidator = (*Executor)(nil)
 var _ execution.Notifier = (*Executor)(nil)
 
@@ -78,35 +79,7 @@ func (e *Executor) Prepare(ctx context.Context, route execution.Route, task exec
 	if placement.Session != "" {
 		return placement.Session, nil
 	}
-	parent := placement.Parent
-	name := fmt.Sprintf("Review %s #%d", task.Repository, task.Number)
-	if placement.DevelopmentName != "" {
-		// Keep the PR identifier even when a long Unicode title must be truncated.
-		prefix := fmt.Sprintf("Review %s #%d · ", task.Repository, task.Number)
-		if len([]rune(prefix)) > 90 {
-			prefix = fmt.Sprintf("Review #%d · ", task.Number)
-		}
-		title := []rune(placement.DevelopmentName)
-		name = prefix + string(title[:min(len(title), 100-len([]rune(prefix)))])
-	}
-	if !snowflake(parent) {
-		return "", fmt.Errorf("new review session needs a Discord development conversation or an explicit parent")
-	}
-	if len([]rune(name)) > 100 {
-		name = string([]rune(name)[:100])
-	}
-	body := map[string]any{"name": name, "type": 11}
-	var thread struct {
-		ID string `json:"id"`
-	}
-	err := execution.PostJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+parent+"/threads", "Bot "+e.discordToken, body, &thread)
-	if err != nil {
-		return "", err
-	}
-	if !snowflake(thread.ID) {
-		return "", fmt.Errorf("Discord returned an invalid thread ID")
-	}
-	return "discord:" + thread.ID, nil
+	return e.CreateConversation(ctx, threadAllocation(*placement, task, ""))
 }
 
 // ValidatePreparation performs the local checks that can be reported immediately
@@ -145,8 +118,8 @@ func (e *Executor) ValidatePreparation(route execution.Route, task execution.Del
 	return nil
 }
 
-// ResolveReviewPlacement performs Discord reads before reserving an execution or
-// an allocation. Prepare uses the result directly when the constraint is enabled.
+// ResolveReviewPlacement performs Discord reads before reserving an execution
+// or sending a thread creation request.
 func (e *Executor) ResolveReviewPlacement(ctx context.Context, route execution.Route, task execution.Delivery) (*execution.ReviewPlacement, error) {
 	if err := e.ValidatePreparation(route, task); err != nil {
 		return nil, err
@@ -220,6 +193,7 @@ func (e *Executor) reviewSessionChannel(ctx context.Context, session string) (st
 }
 
 type discordConversation struct {
+	Guild  string `json:"guild_id"`
 	ID     string `json:"id"`
 	Type   int    `json:"type"`
 	Parent string `json:"parent_id"`
@@ -242,7 +216,7 @@ func (e *Executor) developmentConversation(ctx context.Context, session string) 
 	}
 	channel, err := e.readDiscordChannel(ctx, channelID)
 	if err != nil {
-		return "", "", fmt.Errorf("read development conversation: %w", err)
+		return "", "", fmt.Errorf("read development conversation %s: %w", channelID, err)
 	}
 	if strings.TrimSpace(channel.Name) == "" {
 		return "", "", fmt.Errorf("Discord returned an invalid development conversation")
@@ -265,7 +239,7 @@ func (e *Executor) developmentConversation(ctx context.Context, session string) 
 	if channel.Type == 11 {
 		parentChannel, err := e.readDiscordChannel(ctx, parent)
 		if err != nil {
-			return "", "", fmt.Errorf("read development parent channel: %w", err)
+			return "", "", fmt.Errorf("read development parent channel %s: %w", parent, err)
 		}
 		if parentChannel.Type != 0 {
 			return "", "", fmt.Errorf("automatic review placement requires a text-channel parent; forum, media and announcement parents are unsupported")

@@ -27,7 +27,7 @@ func (e *Executor) publicDevelopmentThread(ctx context.Context, source execution
 		Parent string `json:"parent_id"`
 	}
 	if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+id, "Bot "+e.discordToken, &thread); err != nil {
-		return "", err
+		return "", fmt.Errorf("read development thread %s: %w", id, err)
 	}
 	if thread.ID != id || thread.Type != 11 || !snowflake(thread.Parent) {
 		return "", fmt.Errorf("development source must be a public Discord thread")
@@ -37,7 +37,7 @@ func (e *Executor) publicDevelopmentThread(ctx context.Context, source execution
 		Type int    `json:"type"`
 	}
 	if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+thread.Parent, "Bot "+e.discordToken, &parent); err != nil {
-		return "", err
+		return "", fmt.Errorf("read development parent channel %s: %w", thread.Parent, err)
 	}
 	if parent.ID != thread.Parent || parent.Type != 0 {
 		return "", fmt.Errorf("development thread requires a normal text-channel parent")

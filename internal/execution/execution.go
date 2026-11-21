@@ -53,6 +53,21 @@ type ReviewPlacement struct {
 	Session         string
 }
 
+// ConversationAllocation identifies a thread across ambiguous creation results.
+type ConversationAllocation struct {
+	Parent     string     `json:"parent"`
+	Name       string     `json:"name"`
+	ReservedAt *time.Time `json:"reserved_at,omitempty"`
+}
+
+// ConversationAllocator separates the single creation request from read-only recovery.
+type ConversationAllocator interface {
+	ResolveReviewPlacement(context.Context, Route, Delivery) (*ReviewPlacement, error)
+	PlanConversation(ReviewPlacement, Delivery) ConversationAllocation
+	CreateConversation(context.Context, ConversationAllocation) (string, error)
+	FindConversation(context.Context, ConversationAllocation) (string, error)
+}
+
 // Delivery is the work description shared by execution providers.
 type Delivery struct {
 	RequireSameChannel     bool   `json:"require_same_channel,omitempty"`
