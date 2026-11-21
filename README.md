@@ -344,3 +344,7 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 ## macOS 服务与版本部署
 
 Apple Silicon Mac 可从 GitHub Release 安装登录服务，已安装的登录版可用 `ink upgrade` 更新。旧 LaunchDaemon 的迁移从校验过的新版发布包运行 `manage.py upgrade`，沿用已有部署配置。通过 `/healthz` 的 `revision` 核对实际运行版本。见 [macOS 部署与恢复](deploy/macos/README.md)。
+
+### 自动合入身份
+
+自动合入需要在具体仓库显式启用 `auto_merge.enabled`。全局值不能为仓库启用自动合入。线上启用前，分别检查读取 App、reviewer App 与 merger App 的实际身份和仓库授权。静态启动配置中的 `github_merger_command` 指向专用 merger App 的绝对 CLI 路径，`github_merger_command_sha256` 为其批准的 SHA-256。设置 `github_command_sha256` 可同样固定 reader CLI。升级任一 CLI 时更新其预期摘要。App CLI 每次调用前会检查配置的摘要。缺少专用 merger 时保留审查状态并报告等待原因。

@@ -126,6 +126,9 @@ func resolveConfig(name string, global GlobalConfig, override RepositoryOverride
 			return effective, err
 		}
 		for key, value := range layer.values {
+			if key == "auto_merge" && name != "" && layer.source == "global" {
+				continue
+			}
 			effective.Values[key] = append(json.RawMessage(nil), value...)
 			effective.Sources[key] = layer.source
 		}
