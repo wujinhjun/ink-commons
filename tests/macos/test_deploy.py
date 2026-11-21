@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -135,7 +136,7 @@ class ArtifactStageTest(unittest.TestCase):
                 m.deploy(self.args)
             activate.assert_not_called()
 
-    def test_deploy_rejects_unloaded_legacy_plist_before_writing(self):
+    def test_deploy_rejects_unloaded_system_plist_before_writing(self):
         system = self.home / 'LaunchDaemons'
         system.mkdir()
         old_plist = system / (m.LABEL + '.plist')
@@ -143,13 +144,10 @@ class ArtifactStageTest(unittest.TestCase):
         with patch.object(m, 'SYSTEM_DIR', system), \
              patch.object(m.Path, 'home', return_value=self.home), \
              patch.object(m, 'loaded', return_value=False), \
-             patch.object(m, 'deployment_lock') as lock, \
              patch.object(m, 'stage') as stage:
-            with self.assertRaisesRegex(m.DeploymentError, 'legacy system service'):
+            with self.assertRaisesRegex(m.DeploymentError, 'already exists'):
                 m.deploy(self.args)
-        lock.assert_not_called()
         stage.assert_not_called()
-        self.assertFalse(self.releases.parent.exists())
         self.assertFalse((self.home / '.local/state/ink-commons').exists())
         self.assertEqual(old_plist.read_bytes(), b'legacy plist')
 
@@ -175,7 +173,7 @@ class UpgradeTest(unittest.TestCase):
         binary = b'current cc-connect'
         (self.current / 'cc-connect').write_bytes(binary)
         (self.current / 'deployment.json').write_text(json.dumps({
-            'revision': self.current.name,
+            'revision': self.current.name, 'home': str(self.root),
             'cc_config': '/test/cc.toml', 'data': '/test/state', 'project': 'existing-project',
             'environment': {'HTTPS_PROXY': 'http://127.0.0.1:7897', 'NODE_OPTIONS': '--use-env-proxy'},
             'cc_binary_sha256': hashlib.sha256(binary).hexdigest(),
@@ -257,13 +255,27 @@ class UpgradeTest(unittest.TestCase):
         run.assert_called_once()
         staged.assert_not_called()
 
-    def test_healthy_current_version_needs_no_download_or_sudo(self):
-        with patch.object(m, 'run') as run, \
+    def test_healthy_current_system_version_needs_no_download_or_sudo(self):
+        (self.root / (m.LABEL + '.plist')).touch()
+        with patch.object(m, 'SYSTEM_DIR', self.root), \
+             patch.object(m, 'loaded', side_effect=lambda domain, label: domain == 'system'), \
+             patch.object(m, 'run') as run, \
              patch.object(m, 'output', return_value=self.current.name), \
              patch.object(m, 'health', return_value={'revision': self.current.name, 'gate': 'open'}):
             m.upgrade_system(self.root, self.entry)
 
         run.assert_not_called()
+
+    def test_healthy_current_login_version_still_migrates(self):
+        manifest = self.make_published_manifest(self.current)
+        with self.mock_manifest_download(manifest, self.current.name), \
+             patch.object(m, 'loaded', side_effect=lambda domain, label: domain != 'system'), \
+             patch.object(m, 'output', return_value=self.current.name), \
+             patch.object(m, 'health', return_value={'revision': self.current.name, 'gate': 'open'}), \
+             patch.object(m, 'activate_staged') as activate:
+            m.upgrade_system(self.root, self.entry)
+
+        activate.assert_called_once_with(self.current)
 
     def test_missing_health_socket_reactivates_installed_target(self):
         manifest = self.make_published_manifest(self.current)
@@ -352,10 +364,13 @@ class DeployTest(unittest.TestCase):
         (self.agents / (EXTERNAL_CC + '.plist')).write_bytes(plistlib.dumps(cc))
         self.system = self.home / 'system'
         self.system.mkdir()
+        self.plist = self.system / (m.LABEL + '.plist')
+        self.agent_plist = self.agents / self.plist.name
         self.jobs = {('gui/501', m.LABEL), ('gui/501', EXTERNAL_CC), ('gui/501',EXTERNAL_WATCHDOG)}
         self.account = SimpleNamespace(pw_uid=501, pw_gid=20, pw_dir=str(self.home))
         self.calls = []
         self.fail = False
+        self.fail_sudo = False
         self.fail_bootstrap = False
         self.fail_stop = False
         self.transient_failures = 0
@@ -364,13 +379,31 @@ class DeployTest(unittest.TestCase):
     def run_fake(self, args, **kwargs):
         args = [str(x) for x in args]
         self.calls.append(args)
+        if args == ['/usr/bin/sudo', '-v']:
+            if self.fail_sudo:
+                raise subprocess.CalledProcessError(1, args)
+            return
+        admin = args[:2] == ['/usr/bin/sudo', '-n']
+        if admin:
+            args = args[2:]
+        if args[0] == '/usr/bin/install':
+            self.assertTrue(admin)
+            self.assertEqual(args[1:-2], ['-S', '-o', 'root', '-g', 'wheel', '-m', '0644'])
+            shutil.copyfile(args[-2], args[-1])
+            return
+        if args[0] == '/bin/rm':
+            self.assertTrue(admin)
+            Path(args[-1]).unlink(missing_ok=True)
+            return
         if args[:2] == ['/bin/launchctl', 'bootout']:
+            self.assertEqual(admin, args[2].startswith('system/'))
             domain, label = args[2].rsplit('/', 1)
             if self.fail_stop and (self.data / 'state.sqlite3').exists() and label == m.LABEL:
                 raise RuntimeError('new daemon cannot be stopped')
             self.jobs.discard((domain, label))
         if args[:2] == ['/bin/launchctl', 'bootstrap']:
             domain, path = args[2:]
+            self.assertEqual(admin, domain == 'system')
             label = plistlib.loads(Path(path).read_bytes())['Label']
             self.jobs.add((domain, label))
             if label == m.LABEL and plistlib.loads(Path(path).read_bytes())['ProgramArguments'] != ['old']:
@@ -407,7 +440,7 @@ class DeployTest(unittest.TestCase):
             raise m.DeploymentError('daemon App command exited (status 1)')
         return {'status':'ok'}
 
-    def test_login_upgrade_preserves_cc_connect_and_watchdog(self):
+    def test_login_migration_preserves_cc_connect_and_watchdog(self):
         external = {name: (self.agents / (name + '.plist')).read_bytes()
                     for name in (EXTERNAL_CC, EXTERNAL_WATCHDOG)}
         self.activate()
@@ -418,15 +451,40 @@ class DeployTest(unittest.TestCase):
         self.assertTrue((self.release / 'enabled').exists())
         self.assertEqual(self.link.resolve(), self.release / 'ink')
         self.assertFalse((self.release / 'cc-connect').exists())
-        self.assertTrue((self.agents / (m.LABEL + '.plist')).is_file())
+        self.assertFalse(self.agent_plist.exists())
+        self.assertNotIn(('gui/501', m.LABEL), self.jobs)
+        self.assertIn(('system', m.LABEL), self.jobs)
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())['UserName'], 'service')
+        stop = self.calls.index(['/bin/launchctl', 'bootout', 'gui/501/' + m.LABEL])
+        start = self.calls.index(['/usr/bin/sudo', '-n', '/bin/launchctl', 'bootstrap', 'system', str(self.plist)])
+        self.assertLess(stop, start)
 
-    def test_root_or_legacy_system_refused_before_launchd_write(self):
-        with self.assertRaisesRegex(m.DeploymentError, 'non-root'):
+    def test_first_activation_needs_no_login_service_or_plist(self):
+        self.agent_plist.unlink()
+        self.jobs.clear()
+        self.link.unlink()
+        self.activate()
+        self.assertEqual(self.jobs, {('system', m.LABEL)})
+        plist = plistlib.loads(self.plist.read_bytes())
+        self.assertEqual(plist['UserName'], 'service')
+        self.assertTrue(plist['RunAtLoad'])
+        self.assertTrue(plist['KeepAlive'])
+
+    def test_root_or_a_different_service_account_is_refused(self):
+        with self.assertRaisesRegex(m.DeploymentError, 'without sudo'):
             self.activate(uid=0)
-        self.jobs.add(('system', m.LABEL))
-        with self.assertRaisesRegex(m.DeploymentError, 'legacy system service'):
+        self.plist.write_bytes(plistlib.dumps({'UserName': 'another-user'}))
+        with self.assertRaisesRegex(m.DeploymentError, 'belongs to a different user'):
             self.activate()
         self.assertEqual(self.calls, [])
+
+    def test_missing_admin_authorization_keeps_legacy_service(self):
+        self.fail_sudo = True
+        with self.assertRaisesRegex(m.DeploymentError, 'administrator authorization'):
+            self.activate()
+        self.assertEqual(self.calls, [['/usr/bin/sudo', '-v']])
+        self.assertEqual(self.agent_plist.read_bytes(), self.old_plist)
+        self.assertIn(('gui/501', m.LABEL), self.jobs)
 
     def test_cc_connect_preflight_and_post_check(self):
         for stop_phase in (1, 2):
@@ -450,6 +508,7 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(self.link.read_text(), 'old')
         self.assertFalse(any(domain=='system' for domain,label in self.jobs))
         self.assertEqual(len(self.jobs), 3)
+        self.assertFalse(self.plist.exists())
         self.assertEqual((self.agents / (m.LABEL+'.plist')).stat().st_mode & 0o777,0o600)
 
     def test_partial_bootstrap_is_unloaded_before_rollback(self):
@@ -467,7 +526,8 @@ class DeployTest(unittest.TestCase):
             self.activate()
         self.assertEqual((self.data / 'state.sqlite3').read_bytes(), b'new database')
         self.assertFalse((self.release / 'enabled').exists())
-        self.assertIn(('gui/501', m.LABEL), self.jobs)
+        self.assertIn(('system', m.LABEL), self.jobs)
+        self.assertFalse(self.agent_plist.exists())
 
     def test_private_state_permissions_are_required(self):
         m.validate_state_directory(self.data, self.home, self.data.stat().st_uid)
@@ -485,15 +545,30 @@ class DeployTest(unittest.TestCase):
         self.assertTrue(self.link.is_symlink())
         self.assertEqual(self.link.readlink(),target)
 
-    def test_repeated_login_update(self):
+    def test_repeated_system_update(self):
         self.activate()
         self.activate()
+        self.assertIn(('system', m.LABEL), self.jobs)
         self.assertTrue((self.release/'enabled').exists())
+
+    def test_failed_system_update_restores_old_daemon_and_keeps_dormant_agent(self):
+        self.jobs.discard(('gui/501', m.LABEL))
+        self.jobs.add(('system', m.LABEL))
+        old_daemon = plistlib.dumps({'Label': m.LABEL, 'ProgramArguments': ['old'], 'UserName': 'service'})
+        self.plist.write_bytes(old_daemon)
+        self.fail = True
+        with self.assertRaises(m.DeploymentError):
+            self.activate()
+        self.assertEqual(self.plist.read_bytes(), old_daemon)
+        self.assertEqual(self.agent_plist.read_bytes(), self.old_plist)
+        self.assertNotIn(('gui/501', m.LABEL), self.jobs)
+        self.assertIn(('system', m.LABEL), self.jobs)
+        self.assertFalse((self.data / 'state.sqlite3').exists())
 
     def test_only_non_secret_proxy_environment_is_allowed(self):
         env=m.parse_env(['HTTPS_PROXY=http://127.0.0.1:7897','NODE_OPTIONS=--use-env-proxy'])
         settings={**self.settings,'environment':env}
-        self.assertEqual(m.ink_plist(self.release, settings)['EnvironmentVariables']['HTTPS_PROXY'],env['HTTPS_PROXY'])
+        self.assertEqual(m.ink_plist(self.release, settings, 'service')['EnvironmentVariables']['HTTPS_PROXY'],env['HTTPS_PROXY'])
         for entry in ('GH_TOKEN=secret','HTTPS_PROXY=http://user:secret@localhost:7897','NODE_OPTIONS=--require=/tmp/code.js'):
             with self.assertRaises(m.DeploymentError):
                 m.parse_env([entry])
