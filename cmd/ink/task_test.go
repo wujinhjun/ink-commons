@@ -124,3 +124,62 @@ func TestTaskModeConfigurationIsValidated(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
+	dir, err := os.MkdirTemp("/private/tmp", "ink-task-route-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	t.Setenv("INK_DATA_DIR", dir)
+	t.Setenv("INK_PROVIDER", "")
+	t.Setenv("CC_PROJECT", "")
+	t.Setenv("CC_SESSION_KEY", "")
+	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan map[string]any, 4)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		input := map[string]any{}
+		if r.Method == http.MethodPost {
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+			}
+		}
+		input["path"] = r.URL.Path
+		requests <- input
+		io.WriteString(w, `{"first":true,"task":{"handoff":{"state":"claimed"}}}`)
+	})}
+	go server.Serve(ln)
+	defer server.Close()
+
+	id := uuid.NewString()
+	if err := taskCommand([]string{
+		"claim", "--task", id,
+		"--provider", "cc-connect", "--target", "yu-bingtao-codex-acp", "--session", "discord:123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claim := <-requests
+	route, ok := claim["route"].(map[string]any)
+	if !ok || route["provider"] != "cc-connect" || route["target"] != "yu-bingtao-codex-acp" || route["session"] != "discord:123" {
+		t.Fatalf("explicit claim route not sent: %#v", claim["route"])
+	}
+
+	// The private credential keeps the route, so submit does not need the
+	// original environment or repeated route flags.
+	args := []string{"submit", "--task", id, "--handoff", "--request-id", "fixed", "--new-sha", strings.Repeat("b", 40)}
+	if err := taskCommand(args); err != nil {
+		t.Fatal(err)
+	}
+	submitted := <-requests
+	route, ok = submitted["route"].(map[string]any)
+	if !ok || route["target"] != "yu-bingtao-codex-acp" || route["session"] != "discord:123" {
+		t.Fatalf("submit lost the explicit claim route: %#v", submitted["route"])
+	}
+
+	if err := taskCommand([]string{"claim", "--task", uuid.NewString(), "--target", "yu-bingtao-codex-acp"}); err == nil {
+		t.Fatal("partial explicit route accepted")
+	}
+}

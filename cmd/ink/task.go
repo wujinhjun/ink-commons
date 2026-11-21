@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,6 +45,9 @@ func taskCommand(args []string) error {
 	reviewID := flags.Int64("review-id", 0, "formal GitHub review ID")
 	outcome := flags.String("outcome", "", "APPROVED, CHANGES_REQUESTED or blocked")
 	reason := flags.String("reason", "", "reason for a blocked handoff")
+	routeProvider := flags.String("provider", "", "explicit executor provider for the assigned task route")
+	routeTarget := flags.String("target", "", "explicit executor target/project for the assigned task route")
+	routeSession := flags.String("session", "", "explicit executor session for the assigned task route")
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -52,6 +56,10 @@ func taskCommand(args []string) error {
 	}
 	if _, err := uuid.Parse(*taskID); err != nil || flags.NArg() != 0 {
 		return errors.New("--task must be a task UUID, with no positional arguments")
+	}
+	explicitRoute, err := explicitTaskRoute(*routeProvider, *routeTarget, *routeSession)
+	if err != nil {
+		return err
 	}
 	dir, err := directory()
 	if err != nil {
@@ -76,6 +84,9 @@ func taskCommand(args []string) error {
 		credential, err := readTaskCredential(file)
 		if errors.Is(err, os.ErrNotExist) && action == "claim" {
 			route := routeFromEnv(os.Getenv)
+			if explicitRoute != nil {
+				route = *explicitRoute
+			}
 			credential = taskCredential{TaskID: *taskID, Login: *login}
 			if route.Valid(false) {
 				credential.Route = &route
@@ -107,6 +118,9 @@ func taskCommand(args []string) error {
 		}
 		if action == "claim" {
 			current := routeFromEnv(os.Getenv)
+			if explicitRoute != nil {
+				current = *explicitRoute
+			}
 			if credential.Route != nil && (current.Provider != credential.Route.Provider || current.Target != credential.Route.Target || current.Session != credential.Route.Session) {
 				return errors.New("claim file belongs to another agent route")
 			}
@@ -154,6 +168,25 @@ func taskCommand(args []string) error {
 	}
 	_, err = os.Stdout.Write(data)
 	return err
+}
+
+// explicitTaskRoute lets runtimes that do not inject CC_PROJECT/CC_SESSION_KEY
+// bind a claim to the route carried by the wake prompt.
+func explicitTaskRoute(provider, target, session string) (*execution.Route, error) {
+	provider = strings.TrimSpace(provider)
+	target = strings.TrimSpace(target)
+	session = strings.TrimSpace(session)
+	if provider == "" && target == "" && session == "" {
+		return nil, nil
+	}
+	if provider == "" || target == "" || session == "" {
+		return nil, errors.New("--provider, --target and --session must be provided together")
+	}
+	route := execution.Route{Provider: provider, Target: target, Session: session}
+	if !route.Valid(false) {
+		return nil, errors.New("explicit task route is invalid")
+	}
+	return &route, nil
 }
 
 func readTaskCredential(path string) (taskCredential, error) {

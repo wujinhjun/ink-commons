@@ -269,6 +269,20 @@ func discordChannel(session string) (string, error) {
 	return channel, nil
 }
 
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+// taskClaimCommand carries the assigned route explicitly so ACP runtimes that
+// do not inject CC_PROJECT/CC_SESSION_KEY can still claim their task.
+func taskClaimCommand(taskID string, route execution.Route) string {
+	command := "ink task claim --task " + taskID
+	if route.Provider != "" && route.Target != "" && route.Session != "" {
+		command += " --provider " + shellQuote(route.Provider) + " --target " + shellQuote(route.Target) + " --session " + shellQuote(route.Session)
+	}
+	return command
+}
+
 func (e *Executor) WakeTask(ctx context.Context, route execution.Route, task execution.Delivery) error {
 	if err := e.ValidateDelivery(); err != nil {
 		return err
@@ -282,7 +296,7 @@ func (e *Executor) WakeTask(ctx context.Context, route execution.Route, task exe
 		header = fmt.Sprintf("Ink Commons: GitHub reports a merge conflict after approval.\nPR: %s\nTarget branch: %s\n", task.URL, task.ConflictBaseRef)
 		developerInstructions = "Developer: Read conflict_base_ref and conflict_base_sha from the claimed delivery. Verify that both PR refs still match the delivered SHAs and try merging the two commits locally. If there is an actual conflict, resolve it on the PR branch, run the relevant checks, and push a new head for review. If the refs changed or the local merge succeeds, submit a blocked handoff describing what you observed."
 	}
-	prompt := header + fmt.Sprintf("First run: ink task claim --task %s\nUse the installed Ink Commons executable if ink is not on PATH. The command binds to CC_PROJECT and CC_SESSION_KEY. Do not edit, run checks, submit reviews or push before a successful claim with first=true. On first=false or conflict, do not execute again; report the status if needed. Read the returned delivery for the exact SHA, role, GitHub identity/command, review URL and context cutoff. Reviewer: inspect that exact SHA, verify the configured identity, and submit a formal APPROVED or CHANGES_REQUESTED review. %s Read enabled history with ink context before reviewing. After all task tools and writes have finished, explicitly hand off using ink task submit --task %s --handoff --request-id <stable-id> with --new-sha <pushed-sha> for a developer, or --review-id <id> --outcome APPROVED|CHANGES_REQUESTED for a reviewer. If blocked, submit --outcome blocked --reason <reason> --handoff. After handoff, perform no more work for this task. Check ink task status --task %s; if verification is pending, Ink retries it. Then report the result and end this turn. Do not sleep, poll in a loop, start background waiters, or immediately claim successor tasks to wait for review or CI. Retry a lost submit response with the same request ID and evidence; never repeat code work solely because the PR still says changes_requested.\n", task.TaskID, developerInstructions, task.TaskID, task.TaskID)
+	prompt := header + fmt.Sprintf("First run: %s\nUse the installed Ink Commons executable if ink is not on PATH. The command carries the assigned route flags and does not depend on CC_PROJECT/CC_SESSION_KEY. If the installed CLI is older and rejects these flags, set CC_PROJECT and CC_SESSION_KEY from the same route before running the claim. Do not edit, run checks, submit reviews or push before a successful claim with first=true. On first=false or conflict, do not execute again; report the status if needed. Read the returned delivery for the exact SHA, role, GitHub identity/command, review URL and context cutoff. Reviewer: inspect that exact SHA, verify the configured identity, and submit a formal APPROVED or CHANGES_REQUESTED review. %s Read enabled history with ink context before reviewing. After all task tools and writes have finished, explicitly hand off using ink task submit --task %s --handoff --request-id <stable-id> with --new-sha <pushed-sha> for a developer, or --review-id <id> --outcome APPROVED|CHANGES_REQUESTED for a reviewer. If blocked, submit --outcome blocked --reason <reason> --handoff. After handoff, perform no more work for this task. Check ink task status --task %s; if verification is pending, Ink retries it. Then report the result and end this turn. Do not sleep, poll in a loop, start background waiters, or immediately claim successor tasks to wait for review or CI. Retry a lost submit response with the same request ID and evidence; never repeat code work solely because the PR still says changes_requested.\n", taskClaimCommand(task.TaskID, route), developerInstructions, task.TaskID, task.TaskID)
 	return e.sendPrompt(ctx, route, "ink-commons:task-wake", prompt)
 }
 
