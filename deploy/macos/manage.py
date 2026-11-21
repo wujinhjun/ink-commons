@@ -476,8 +476,7 @@ def activate_staged(release):
 
 def ink_plist(release, settings):
     data = Path(settings['data'])
-    env = {'HOME': settings['home'],
-           'PATH': str(Path(settings['home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'}
+    env = {'HOME': settings['home'], 'PATH': os.defpath}
     if settings.get('profile', {}).get('path'):
         env['PATH'] = ':'.join(settings['profile']['path'])
     env.update(parse_env([key + '=' + value for key, value in settings.get('environment', {}).items()]))

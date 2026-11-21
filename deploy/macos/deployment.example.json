@@ -1,10 +1,10 @@
 {
-  "repository": "wujinhjun/ink-commons",
+  "repository": "owner/repository",
   "service_user": "ink-service",
-  "python": "/opt/homebrew/bin/python3.12",
+  "python": "/absolute/path/to/python3.12",
   "github_command": "/absolute/path/to/github-reader",
-  "path": ["/opt/homebrew/bin", "/usr/bin", "/bin"],
-  "credentials": "/Users/ink-service/.config/ink-commons/credentials.json",
+  "path": ["/absolute/path/to/tools/bin", "/usr/bin", "/bin"],
+  "credentials": "/absolute/path/to/provider-credentials.json",
   "environment": {},
   "retention": {"releases": 5, "backups": 5, "logs": 5, "stderr_bytes": 8388608}
 }

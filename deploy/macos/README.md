@@ -50,7 +50,7 @@ ink rollback --tag build-<previous-SHA> --dry-run
 
 ## 设备 profile 与目录保留
 
-在新设备上复制 `deployment.example.json`，填写部署用户、发布仓库、Python、GitHub App CLI和 PATH。用 `deploy --profile FILE` 或 `stage --profile FILE` 暂存。PATH 可加入设备的 Node 目录。GitHub App 安装器内置绝对 Node 路径时，由其独立管理。profile 保存获准的代理环境及凭据文件路径。旧安装仍识别历史默认值。使用独立的非 root 登录服务用户可隔离日常账户；跨账户直接访问当前同砚私有 Unix socket 需要单独的执行端设计。
+在新设备上复制 `deployment.example.json`，填写部署用户、发布仓库、Python、GitHub App CLI和 PATH。用 `deploy --profile FILE` 或 `stage --profile FILE` 暂存。LaunchAgent 默认使用系统 PATH。需要 Node 或其他工具时，在本机 profile 的 PATH 中提供其目录。GitHub App 安装器内置绝对 Node 路径时，由其独立管理。profile 保存获准的代理环境及凭据文件路径。旧安装仍识别历史默认值。使用独立的非 root 登录服务用户可隔离日常账户；跨账户直接访问当前同砚私有 Unix socket 需要单独的执行端设计。
 
 `status` 显示生效静态配置 SHA-256、凭据读取时间、配置漂移和运行期仓库。凭据读取时间来自 runtime 成功装载文件的时间，GitHub 连接验证时间仍使用 `last_github_ok`。外部 cc-connect 管理器若提供含 `version` 与 `commit` 的 JSON 文件，可在 profile 设置 `cc_version_file`。
 

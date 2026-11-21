@@ -208,13 +208,13 @@ class UpgradeTest(unittest.TestCase):
         self.current.mkdir(parents=True)
         self.entry = self.root / 'ink'
         self.entry.symlink_to(self.current / 'ink')
-        (self.current / 'config.json').write_text(json.dumps({'github_command': '/test/yuxingyi'}))
+        (self.current / 'config.json').write_text(json.dumps({'github_command': '/test/github-reader'}))
         binary = b'current cc-connect'
         (self.current / 'cc-connect').write_bytes(binary)
         (self.current / 'deployment.json').write_text(json.dumps({
             'revision': self.current.name,
             'cc_config': '/test/cc.toml', 'data': '/test/state', 'project': 'existing-project',
-            'environment': {'HTTPS_PROXY': 'http://127.0.0.1:7897', 'NODE_OPTIONS': '--use-env-proxy'},
+            'environment': {'HTTPS_PROXY': 'http://127.0.0.1:18080', 'NODE_OPTIONS': '--use-env-proxy'},
             'cc_binary_sha256': hashlib.sha256(binary).hexdigest(),
         }))
         self.calls = []
@@ -244,7 +244,7 @@ class UpgradeTest(unittest.TestCase):
         real_run = m.run
 
         def run(args, **kwargs):
-            if args[0] != '/test/yuxingyi':
+            if args[0] != '/test/github-reader':
                 return real_run(args, **kwargs)
             self.assertEqual(args[5:8], ['release', 'download', 'build-' + revision])
             self.assertEqual(args[10:], ['--pattern=SHA256SUMS'])
@@ -255,8 +255,8 @@ class UpgradeTest(unittest.TestCase):
     def test_downloads_main_and_reuses_current_configuration(self):
         def run(args, **kwargs):
             self.calls.append(args)
-            if args[0] == '/test/yuxingyi':
-                self.assertEqual(kwargs['env']['HTTPS_PROXY'], 'http://127.0.0.1:7897')
+            if args[0] == '/test/github-reader':
+                self.assertEqual(kwargs['env']['HTTPS_PROXY'], 'http://127.0.0.1:18080')
                 self.assertEqual(kwargs['env']['NODE_OPTIONS'], '--use-env-proxy')
                 self.assertEqual(kwargs['env']['PATH'], '/usr/bin:/bin')
                 if args[5] == 'api':
@@ -270,7 +270,7 @@ class UpgradeTest(unittest.TestCase):
             self.assertEqual(args.config, str(self.current / 'config.json'))
             self.assertEqual(args.cc_config, '/test/cc.toml')
             self.assertEqual(args.project, 'existing-project')
-            self.assertEqual(args.env, ['HTTPS_PROXY=http://127.0.0.1:7897', 'NODE_OPTIONS=--use-env-proxy'])
+            self.assertEqual(args.env, ['HTTPS_PROXY=http://127.0.0.1:18080', 'NODE_OPTIONS=--use-env-proxy'])
 
         with patch.dict(m.os.environ, {'PATH': '/usr/bin:/bin'}, clear=True), \
              patch.object(m, 'run', side_effect=run), \
@@ -280,7 +280,7 @@ class UpgradeTest(unittest.TestCase):
 
         staged.assert_called_once()
         activate.assert_called_once_with(self.target)
-        self.assertEqual(self.calls[0][:6], ['/test/yuxingyi', '--profile', 'inspect', '-R', m.REPOSITORY, 'api'])
+        self.assertEqual(self.calls[0][:6], ['/test/github-reader', '--profile', 'inspect', '-R', m.REPOSITORY, 'api'])
         self.assertEqual(self.calls[1][5:8], ['release', 'download', 'build-' + self.target.name])
         self.assertIn('--pattern=manage.py', self.calls[1])
         self.assertIn('--pattern=runtime.py', self.calls[1])
@@ -361,7 +361,7 @@ class UpgradeTest(unittest.TestCase):
         mismatches = (
             ('config.json', b'{}', 'configuration differs'),
             ('deployment.json', (self.target / 'deployment.json').read_bytes().replace(
-                b'http://127.0.0.1:7897', b'http://127.0.0.1:9801'), 'configuration differs'),
+                b'http://127.0.0.1:18080', b'http://127.0.0.1:9801'), 'configuration differs'),
         )
         for name, content, diagnostic in mismatches:
             with self.subTest(file=name):
@@ -545,11 +545,19 @@ class DeployTest(unittest.TestCase):
         self.activate()
         self.assertTrue((self.release/'enabled').exists())
 
+    def test_launchagent_path_comes_from_system_defaults_or_explicit_profile(self):
+        with patch.dict(m.os.environ, {'PATH': '/example/interactive-only/bin'}):
+            definition = m.ink_plist(self.release, self.settings)
+        self.assertEqual(definition['EnvironmentVariables']['PATH'], m.os.defpath)
+        profile = {'path': ['/example/provider/bin', '/usr/bin', '/bin']}
+        definition = m.ink_plist(self.release, {**self.settings, 'profile': profile})
+        self.assertEqual(definition['EnvironmentVariables']['PATH'], ':'.join(profile['path']))
+
     def test_only_non_secret_proxy_environment_is_allowed(self):
-        env=m.parse_env(['HTTPS_PROXY=http://127.0.0.1:7897','NODE_OPTIONS=--use-env-proxy'])
+        env=m.parse_env(['HTTPS_PROXY=http://127.0.0.1:18080','NODE_OPTIONS=--use-env-proxy'])
         settings={**self.settings,'environment':env}
         self.assertEqual(m.ink_plist(self.release, settings)['EnvironmentVariables']['HTTPS_PROXY'],env['HTTPS_PROXY'])
-        for entry in ('GH_TOKEN=secret','HTTPS_PROXY=http://user:secret@localhost:7897','NODE_OPTIONS=--require=/tmp/code.js'):
+        for entry in ('GH_TOKEN=secret','HTTPS_PROXY=http://user:secret@localhost:18080','NODE_OPTIONS=--require=/tmp/code.js'):
             with self.assertRaises(m.DeploymentError):
                 m.parse_env([entry])
 

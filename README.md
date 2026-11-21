@@ -253,11 +253,11 @@ GitHub 的当前 PR 快照是状态来源。轮询间隔默认 60 秒。hook 路
 
 ## 为单条 PR 指定 reviewer
 
-GitHub 上开 Draft PR，等同砚发现并关联后，在 Mini 上执行：
+GitHub 上开 Draft PR，等同砚发现并关联后，在能访问同砚 daemon 的环境中执行：
 
 ```sh
-ink review --github-login 'yanshi-reviewer[bot]' --github-command yanshi-reviewer \
-  --target mo-cangli-pi \
+ink review --github-login 'example-reviewer[bot]' --github-command /absolute/path/to/review-cli \
+  --target example-review-project \
   https://github.com/owner/repository/pull/42
 ```
 
