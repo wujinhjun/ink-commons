@@ -40,6 +40,12 @@ ink rollback --tag build-<previous-SHA> --dry-run
 
 执行 `(umask 077; ink config export > runtime-policy.json)` 可导出声明。部署时传 `--runtime-declaration runtime-policy.json`，暂存、升级及 status 会比对并报告有变化的范围。声明仅用于比对，首次安装尚无运行中 daemon 时报告 unavailable。声明可能包含本机路由和命令配置，应按私有文件保存。
 
+## 关联开发会话
+
+在每个开发 checkout 运行 `ink hook install`，或用 `--checkout DIR` 指定目录。安装器遵循 Git 的 hook 路径。已有自定义 hook 时，保留原脚本，可将 `"$HOME/.local/lib/ink-commons/ink" pre-push "$2"` 接入现有 hook，或在同砚用工作项 `link` 明确关联 PR。
+
+`status --checkout OWNER/REPO=DIR` 可多次传入。每个运行期仓库显示指定 checkout 的受管 hook 状态和是否已有已关联工作项。未提供 checkout 或无法匹配 remote 时显示 unknown。已关联工作项只表示既有证据。
+
 ## 验收与恢复
 
 - 暂存、激活和失败恢复均不复制 cc-connect，不修改其 plist，不停止或删除 watchdog。对本机 endpoint 的前后检查均为只读。

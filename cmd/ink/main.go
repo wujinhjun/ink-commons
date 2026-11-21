@@ -27,7 +27,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ink version | ink upgrade [flags] | ink rollback --tag TAG | ink config get|set|unset|list [flags] | ink init [--check] [--skills-dir DIR] | ink serve [-config FILE] [-data DIR] | ink pre-push REMOTE_URL | ink register [flags] [OWNER/REPO] | ink review [flags] PR_URL | ink context --sha SHA [--before MESSAGE_ID] PR_URL | ink notification ack|status --event EVENT_ID | ink task claim|status|submit|retry --task TASK_ID [flags] | ink state backup|export [flags]")
+		return errors.New("usage: ink version | ink upgrade [flags] | ink rollback --tag TAG | ink config get|set|unset|list [flags] | ink init [--check] [--skills-dir DIR] | ink serve [-config FILE] [-data DIR] | ink hook install|status [--checkout DIR] | ink pre-push REMOTE_URL | ink register [flags] [OWNER/REPO] | ink review [flags] PR_URL | ink context --sha SHA [--before MESSAGE_ID] PR_URL | ink notification ack|status --event EVENT_ID | ink task claim|status|submit|retry --task TASK_ID [flags] | ink state backup|export [flags]")
 	}
 	switch args[0] {
 	case "version":
@@ -56,6 +56,8 @@ func run(args []string) error {
 		return review(args[1:])
 	case "context":
 		return readContext(args[1:])
+	case "hook":
+		return hookCommand(args[1:])
 	case "pre-push":
 		if len(args) != 2 {
 			return errors.New("usage: ink pre-push REMOTE_URL")
@@ -66,7 +68,7 @@ func run(args []string) error {
 		}
 		return nil
 	default:
-		return errors.New("expected version, upgrade, rollback, config, init, serve, register, pre-push, review, context, notification, task, or state")
+		return errors.New("expected version, upgrade, rollback, config, init, serve, register, hook, pre-push, review, context, notification, task, or state")
 	}
 }
 

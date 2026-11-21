@@ -635,6 +635,29 @@ def activate(args):
     print('Activated revision:', release.name, 'gate: open')
 
 
+def repository_status(data, entry, checkouts):
+    try:
+        repos = local_get(data, '/v1/repositories', timeout=2)
+        work = local_get(data, '/v1/work', timeout=2)
+    except (OSError, ValueError, IndexError, DeploymentError):
+        return None
+    linked = {item['repo'] for item in work if item.get('linked')}
+    result = []
+    for repo in sorted(item['repo'] for item in repos):
+        hook = 'unknown'
+        if repo in checkouts and entry.is_file():
+            try:
+                checkout = checkouts[repo]
+                origin = output(['git', '-C', checkout, 'remote', 'get-url', 'origin'], stderr=subprocess.DEVNULL)
+                if re.fullmatch(r'(?:https://github\.com/|git@github\.com:)' + re.escape(repo)
+                                + r'(?:\.git)?/?', origin, re.IGNORECASE):
+                    hook = output([entry, 'hook', 'status', '--checkout', checkout], stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.CalledProcessError):
+                pass
+        result.append({'repo': repo, 'hook': hook, 'linked_work': repo in linked})
+    return result
+
+
 def status(args):
     account = pwd.getpwnam(args.user)
     home = Path(account.pw_dir).resolve()
@@ -659,6 +682,13 @@ def status(args):
             binary=Path(plistlib.loads(path.read_bytes())['ProgramArguments'][0])
             binaries[name]={'path':str(binary),'exists':binary.is_file()}
     report = {'user': args.user, 'services': {}}
+    checkouts = {}
+    for mapping in getattr(args, 'checkout', []):
+        repo, separator, checkout = mapping.partition('=')
+        if not separator or not repo or not checkout:
+            raise DeploymentError('checkout must have the form OWNER/REPO=DIR')
+        checkouts[repo.lower()] = str(Path(checkout).expanduser().resolve())
+    report['repositories'] = repository_status(data, home / '.local/lib/ink-commons/ink', checkouts)
     for label in (LABEL, CC_LABEL, WATCHDOG):
         report['services'][label] = {
             'system': loaded('system', label),
@@ -709,6 +739,7 @@ def main():
     apply.add_argument('--user', required=True)
     inspect = commands.add_parser('status')
     inspect.add_argument('--user', required=True)
+    inspect.add_argument('--checkout', action='append', default=[], help='OWNER/REPO=DIR for managed hook inspection')
     args = parser.parse_args()
     if sys.version_info < (3,11,8):
         parser.error('Python 3.11.8+ required for all commands')
