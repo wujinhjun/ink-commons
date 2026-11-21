@@ -250,7 +250,10 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if action == "assign" && change.Role == "reviewer" && change.Route != nil {
+		route := *change.Route
+		preparation := execution.Delivery{Role: "reviewer", Source: reviewSource(work)}
 		if repository, ok := s.repo(repo); ok {
+			route = allocationRoute(repository, route)
 			repository.ReviewerRoute = change.Route
 			if err := repository.ValidateReviewFeatures(); err != nil {
 				fail(w, apiError{400, err.Error()})
@@ -260,20 +263,16 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 				fail(w, apiError{400, "thread history requires a Discord development source"})
 				return
 			}
+			if repository.Review != nil {
+				preparation.RequireSameChannel = repository.Review.RequireSameChannel
+				preparation.ReuseDevelopmentThread = repository.Review.ReuseDevelopmentThread
+			}
 		}
-	}
-	if action == "assign" && change.Role == "reviewer" && change.Route != nil && change.Route.Session == "" {
-		route := *change.Route
-		if repository, ok := s.repo(repo); ok {
-			route = allocationRoute(repository, route)
-		}
-		preparation := execution.Delivery{Role: "reviewer", Source: reviewSource(work)}
-		if repository, ok := s.repo(repo); ok && repository.Review != nil {
-			preparation.ReuseDevelopmentThread = repository.Review.ReuseDevelopmentThread
-		}
-		if err := execution.ValidatePreparation(s.providers, route, preparation); err != nil {
-			fail(w, apiError{400, err.Error()})
-			return
+		if route.Session == "" || preparation.RequireSameChannel {
+			if err := execution.ValidatePreparation(s.providers, route, preparation); err != nil {
+				fail(w, apiError{400, err.Error()})
+				return
+			}
 		}
 	}
 	if err := applyChange(work, action, change); err != nil {

@@ -120,6 +120,17 @@ func (e *Executor) Prepare(ctx context.Context, route execution.Route, task exec
 // ValidatePreparation performs the local checks that can be reported immediately
 // by assignment, without a Discord request or allocating a session.
 func (e *Executor) ValidatePreparation(route execution.Route, task execution.Delivery) error {
+	if task.RequireSameChannel {
+		if e.discordToken == "" {
+			return fmt.Errorf("require_same_channel needs INK_DISCORD_TOKEN")
+		}
+		if task.Source == nil || task.Source.Provider != Name {
+			return fmt.Errorf("require_same_channel needs a Discord development conversation")
+		}
+		if _, err := discordChannel(task.Source.Session); err != nil {
+			return fmt.Errorf("invalid development conversation: %w", err)
+		}
+	}
 	if route.Session == "" && route.Parent == "" && task.ReuseDevelopmentThread {
 		if task.Source == nil || task.Source.Provider != Name {
 			return fmt.Errorf("thread reuse requires a Discord development source")
@@ -142,21 +153,75 @@ func (e *Executor) ValidatePreparation(route execution.Route, task execution.Del
 	return nil
 }
 
+// CheckReviewChannel validates an explicit destination before any execution or
+// allocation is reserved. The default allocation already follows the source.
+func (e *Executor) CheckReviewChannel(ctx context.Context, route execution.Route, source execution.Route) error {
+	if err := e.ValidatePreparation(route, execution.Delivery{RequireSameChannel: true, Source: &source}); err != nil {
+		return err
+	}
+	expected, _, err := e.developmentConversation(ctx, source.Session)
+	if err != nil {
+		return err
+	}
+	actual := route.Parent
+	if route.Session != "" {
+		actual, err = e.reviewSessionChannel(ctx, route.Session)
+		if err != nil {
+			return err
+		}
+	}
+	if actual != expected {
+		return fmt.Errorf("require_same_channel: expected development channel %s, got review channel %s", expected, actual)
+	}
+	return nil
+}
+
+func (e *Executor) reviewSessionChannel(ctx context.Context, session string) (string, error) {
+	id, err := discordChannel(session)
+	if err != nil {
+		return "", err
+	}
+	channel, err := e.readDiscordChannel(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("read review conversation: %w", err)
+	}
+	switch channel.Type {
+	case 0:
+		return id, nil
+	case 10, 11, 12:
+		if snowflake(channel.Parent) {
+			return channel.Parent, nil
+		}
+	}
+	return "", fmt.Errorf("review conversation has no valid text-channel destination")
+}
+
+type discordConversation struct {
+	ID     string `json:"id"`
+	Type   int    `json:"type"`
+	Parent string `json:"parent_id"`
+	Name   string `json:"name"`
+}
+
+func (e *Executor) readDiscordChannel(ctx context.Context, id string) (discordConversation, error) {
+	var channel discordConversation
+	err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+id, "Bot "+e.discordToken, &channel)
+	if err == nil && channel.ID != id {
+		err = fmt.Errorf("Discord returned an invalid conversation")
+	}
+	return channel, err
+}
+
 func (e *Executor) developmentConversation(ctx context.Context, session string) (string, string, error) {
 	channelID, err := discordChannel(session)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid development conversation: %w", err)
 	}
-	var channel struct {
-		ID     string `json:"id"`
-		Type   int    `json:"type"`
-		Parent string `json:"parent_id"`
-		Name   string `json:"name"`
-	}
-	if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+channelID, "Bot "+e.discordToken, &channel); err != nil {
+	channel, err := e.readDiscordChannel(ctx, channelID)
+	if err != nil {
 		return "", "", fmt.Errorf("read development conversation: %w", err)
 	}
-	if channel.ID != channelID || strings.TrimSpace(channel.Name) == "" {
+	if strings.TrimSpace(channel.Name) == "" {
 		return "", "", fmt.Errorf("Discord returned an invalid development conversation")
 	}
 	parent := channel.ID
@@ -175,14 +240,11 @@ func (e *Executor) developmentConversation(ctx context.Context, session string) 
 		return "", "", fmt.Errorf("development conversation has no valid parent channel")
 	}
 	if channel.Type == 11 {
-		var parentChannel struct {
-			ID   string `json:"id"`
-			Type int    `json:"type"`
-		}
-		if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+parent, "Bot "+e.discordToken, &parentChannel); err != nil {
+		parentChannel, err := e.readDiscordChannel(ctx, parent)
+		if err != nil {
 			return "", "", fmt.Errorf("read development parent channel: %w", err)
 		}
-		if parentChannel.ID != parent || parentChannel.Type != 0 {
+		if parentChannel.Type != 0 {
 			return "", "", fmt.Errorf("automatic review placement requires a text-channel parent; forum, media and announcement parents are unsupported")
 		}
 	}

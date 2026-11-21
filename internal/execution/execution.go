@@ -48,6 +48,7 @@ func (r *Route) UnmarshalJSON(data []byte) error {
 
 // Delivery is the work description shared by execution providers.
 type Delivery struct {
+	RequireSameChannel     bool   `json:"require_same_channel,omitempty"`
 	ReuseDevelopmentThread bool   `json:"reuse_development_thread,omitempty"`
 	ContextBefore          string `json:"context_before,omitempty"`
 	GitHubLogin            string `json:"github_login,omitempty"`

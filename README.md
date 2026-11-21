@@ -191,9 +191,9 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
 
 `target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。单条 PR 指派中的显式 `parent` 可以覆盖创建位置；仓库及 `repository_defaults` 路由中的 `parent` 不再用于新建 cc-connect 审查会话，遗留配置无需清理即可默认跟随开发频道。已有工作项保存的路由和审查会话保持原位；需要迁移时，应先确认旧执行结束，再按 PR 重新指派。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
 
-### 开发 thread 复用与原始交流上下文（可选）
+### 审查频道、开发 thread 复用与原始交流上下文（可选）
 
-在仓库配置中设置 `review`，两个开关默认均关闭，可以分别启用：
+在仓库配置中设置 `review`，这些开关默认均关闭，可以分别启用：
 
 ```json
 {
@@ -201,6 +201,7 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
   "reviewer_login": "your-reviewer[bot]",
   "reviewer_route": {"provider": "cc-connect", "target": "reviewer-project"},
   "review": {
+    "require_same_channel": true,
     "reuse_development_thread": true,
     "context": {"thread_history": true}
   }
@@ -208,6 +209,8 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
 ```
 
 `reuse_development_thread` 让**尚未分配会话**的 reviewer 复用开发 thread 的 Discord ID，同时保留 reviewer 的 project 和 GitHub 身份；自动复用要求 reviewer project 与 developer project 不同，避免共享同一个 Agent 上下文。已有 reviewer 会话保持原位。`ink review --session` 仍选择指定的已有会话；单条 PR 的显式 `--parent` 仍创建独立审查 thread。关闭此开关时保留原来的独立 thread 行为。
+
+`require_same_channel` 要求自动派审与开发会话位于同一个 Discord 文本频道。显式传入 `--parent` 或 `--session` 时，同砚在派发前读取频道信息。目标跨频道或频道无法验证时，任务保留为待派发，诊断会显示错误。同一频道内可以新建或指定 Review thread，也可以搭配 `reuse_development_thread` 复用开发 thread。此开关需要已关联的开发会话和能够读取相关频道的 `INK_DISCORD_TOKEN`。
 
 `context.thread_history` 允许读取工作项绑定的开发 thread 中的原始用户和 bot 消息，不依赖 developer 的总结，也不共享其他 Agent 的内部思考或会话文件。派审 prompt 会要求 reviewer 先运行：
 
@@ -219,9 +222,11 @@ ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
 
 消息保留作者、时间、正文、编辑时间、常见 embed 文本及附件名称/URL；不会自动下载或理解图片、附件和外部链接。时间边界限制**消息创建时间**，不是不可变聊天快照：历史编辑与删除仍反映 Discord 当前状态，已删除消息无法恢复。API 可能因缺少 `READ_MESSAGE_HISTORY` 返回空列表，或因 `MESSAGE_CONTENT` 未配置而返回空正文；响应的 `warnings` 会提示这些歧义。即使消息有附件/embed，空正文也会提示可能是纯附件、系统消息或正文被隐藏；保留已取得的其他内容，reviewer 不应据此宣称已经读取全部背景。
 
-启用任一 review 开关后，可本地判断的来源、目标和会话准备配置会在创建执行轮次/会话之前统一校验。包括仅开启复用且无来源/项目冲突，以及开启历史读取且无来源（即使显式指定 session/parent）的情况；校验失败保留 pending、attempts 为 0，并记录 `review_preparation_invalid` 诊断。补齐配置后可进行首次真实投递，不会仅因本地准备配置错误而制造需要人工停止确认的 unknown 执行。显式 session/parent 在只开启复用时仍允许不依赖开发来源；历史读取则始终需要来源。
+启用 review 开关后，可本地判断的来源、目标和会话准备配置会在创建执行轮次/会话之前统一校验。包括仅开启复用且无来源/项目冲突，以及开启历史读取且无来源（即使显式指定 session/parent）的情况；校验失败保留 pending、attempts 为 0，并记录 `review_preparation_invalid` 诊断。补齐配置后可进行首次真实投递，不会仅因本地准备配置错误而制造需要人工停止确认的 unknown 执行。显式 session/parent 在只开启复用时仍允许不依赖开发来源；历史读取则始终需要来源。
 
 首版只支持普通文本频道下的公开开发 thread；普通频道、私有 thread、公告及论坛来源均拒绝读取/自动复用。读取使用 daemon 的 `INK_DISCORD_TOKEN` 身份，需要 `VIEW_CHANNEL`、`READ_MESSAGE_HISTORY` 和适用的 `MESSAGE_CONTENT` 配置；reviewer 的 Discord bot 还需能够访问、发言于目标 thread。开关不会修改 Discord 权限。reviewer 必须与同砚在同机、能使用新版 `ink` CLI 和该用户的私有 socket；这不是远端/跨用户的历史读取接口，也不是额外的 per-bot 认证机制。
+
+只开启同频道约束可用 `ink config set review '{"require_same_channel":true}' --repo owner/repository`，或在注册时传 `--require-same-channel`。配置命令会替换整个 `review` 对象，如已启用其他开关，请一起传入。
 
 可用 `ink config set review '{"reuse_development_thread":true,"context":{"thread_history":true}}' --global` 设置中心默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。缺省动态继承，迁移来的旧覆盖项保持原值；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取同时受任务快照和当前仓库开关约束：实时关闭可以撤销权限，之后开启或改派开发者不能扩大已派发任务的权限或改变其来源 thread。功能开关仅适用于 cc-connect，人工 reviewer 不会收到 bot 任务。
 

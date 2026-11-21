@@ -10,8 +10,7 @@ import (
 
 // Each pending task is its own durable outbox entry. Wake retries never create
 // executor attempts: only claim grants permission to do work.
-func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number int) (bool, error) {
-	id := key(repo.Repo, number)
+func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck reviewChannelCheck) (bool, error) {
 	s.mu.Lock()
 	st, err := s.store.load()
 	if err != nil {
@@ -56,6 +55,15 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 		s.mu.Unlock()
 		return true, saveErr
 	}
+	if current, err := channelCheck.result(w); !current || err != nil {
+		if err != nil {
+			h.Wake.Error = "review preparation: " + err.Error()
+			w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+			err = s.store.save(st)
+		}
+		s.mu.Unlock()
+		return true, err
+	}
 	if err := execution.ValidateDestination(s.providers, *route, route.Session == ""); err != nil {
 		s.mu.Unlock()
 		return true, err
@@ -79,6 +87,8 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 		}
 		// Never repeat ambiguous external conversation creation after restart.
 		h.Wake.Preparation = "preparing"
+	} else if d.RequireSameChannel {
+		h.Wake.Preparation = "prepared"
 	}
 	// Bound wake retries, including transport failures and process interruptions.
 	h.Wake.Attempts++

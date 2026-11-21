@@ -292,6 +292,22 @@ func decodeState(data []byte) (state, error) {
 	return st, validateState(st)
 }
 
+func (s *stateStore) loadWork(id string) (*Work, error) {
+	var payload string
+	err := s.db.QueryRow("SELECT payload FROM work_items WHERE id = ?", id).Scan(&payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var work Work
+	if err := json.Unmarshal([]byte(payload), &work); err != nil {
+		return nil, err
+	}
+	return &work, nil
+}
+
 func (s *stateStore) load() (state, error) {
 	st := state{Work: make(map[string]*Work)}
 	tx, err := s.db.Begin()

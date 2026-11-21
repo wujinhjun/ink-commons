@@ -129,6 +129,7 @@ func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Deliv
 			features = t.ConfigSnapshot.Repository.Review
 		}
 		if features != nil {
+			d.RequireSameChannel = features.RequireSameChannel
 			d.ReuseDevelopmentThread = features.ReuseDevelopmentThread
 			if features.Context.ThreadHistory {
 				d.ContextBefore = reviewHistoryBefore(t.CreatedAt)

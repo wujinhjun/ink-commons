@@ -99,12 +99,16 @@ func (w *Work) handoffMergeBlocked() bool {
 	return true
 }
 
+func reviewChannelUnverified(w *Work, t *Task) bool {
+	return t.Handoff.Assignee.Route != nil && t.Handoff.Wake.Preparation != "prepared" && deliveryFor(w, t, "", 0).RequireSameChannel
+}
+
 func handoffResponse(w *Work, t *Task, first bool) map[string]any {
 	next := ""
 	if w.Task != nil && w.Task.ID != t.ID {
 		next = w.Task.ID
 	}
-	return map[string]any{"next_task_id": next, "repo": w.Repo, "pull_url": w.Pull.URL, "phase": w.Phase, "task": t, "delivery": deliveryFor(w, t, "", 0), "first": first, "eligible": w.Task == t && t.Handoff.State == "pending" && !w.executionBlocked()}
+	return map[string]any{"next_task_id": next, "repo": w.Repo, "pull_url": w.Pull.URL, "phase": w.Phase, "task": t, "delivery": deliveryFor(w, t, "", 0), "first": first, "eligible": w.Task == t && t.Handoff.State == "pending" && !w.executionBlocked() && !reviewChannelUnverified(w, t)}
 }
 
 // The private Unix socket is the trust boundary (same as assign/confirm-stopped).
@@ -173,6 +177,10 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		}
 		if w.Task != t || h.State != "pending" || w.Pull.State != "open" || w.Pull.Draft || !w.Linked || w.executionBlocked() {
 			fail(out, apiError{409, "task is not eligible; wait for the previous handoff or resolve legacy execution"})
+			return
+		}
+		if reviewChannelUnverified(w, t) {
+			fail(out, apiError{409, "review channel must be verified before claiming"})
 			return
 		}
 		if err := s.freezeTaskConfig(w); err != nil {
