@@ -122,7 +122,7 @@ def read_profile(path):
     for key in fields - {'path', 'environment', 'retention'}:
         if key in profile and (not isinstance(profile[key], str) or not profile[key]):
             raise DeploymentError('invalid deployment profile field: ' + key)
-    if 'repository' in profile and not re.fullmatch(r'[\w.-]+/[\w.-]+', profile['repository'], re.ASCII):
+    if 'repository' in profile and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*', profile['repository'], re.ASCII):
         raise DeploymentError('deployment repository must be owner/repo')
     for key in ('cc_label', 'watchdog_label', 'service_user'):
         if key in profile and not re.fullmatch(r'[a-zA-Z0-9_.-]+', profile[key]):
@@ -204,8 +204,8 @@ def config_drift(data, declaration):
     if not declaration:
         return {'status': 'not_configured'}
     expected = json.loads(Path(declaration).read_text())
-    if expected.get('schema') != 1 or not all(isinstance(expected.get(key), dict)
-                                               for key in ('global', 'repositories')):
+    if not isinstance(expected, dict) or expected.get('schema') != 1 or not all(
+            isinstance(expected.get(key), dict) for key in ('global', 'repositories')):
         raise DeploymentError('invalid runtime configuration declaration')
     try:
         actual = local_get(data, '/v1/config/export', timeout=2)
@@ -722,7 +722,16 @@ def retention_plan(home, root, retention, include_legacy):
     protected = set()
     entry = root / 'ink'
     if entry.is_symlink():
-        protected.add(entry.resolve())
+        active = entry.resolve()
+        protected.add(active)
+        manifest = active.parent / 'deployment.json'
+        if manifest.is_file():
+            settings = json.loads(manifest.read_text())
+            for key in ('config_source', 'credentials', 'cc_config', 'profile_path',
+                        'runtime_declaration', 'allowed_signers', 'python'):
+                value = settings.get(key)
+                if value:
+                    protected.add(Path(value).resolve())
     for directory in (SYSTEM_DIR, home / 'Library/LaunchAgents'):
         for path in directory.glob('*.plist'):
             # Read structured paths only, and exclude any release referenced by a service.

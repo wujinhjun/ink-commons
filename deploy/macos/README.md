@@ -57,7 +57,7 @@ python3.12 manage.py maintain
 python3.12 manage.py maintain --include-legacy
 ```
 
-默认列出将归档的路径。明确加 `--apply` 才归档到安装目录下的 `archive/`。保留最近的 release、备份和轮转日志，以及所有仍被入口或 launchd 引用的版本。遇到无法检查的 plist 时停止归档。历史 `start`、`activate-*.command`、`staging-archive.*` 和旧 `deploy/<SHA>` 需用 `--include-legacy` 纳入计划。当前 stderr 在同砚停机切换期间按阈值轮转。归档不占用活跃保留额度，可在恢复窗口过后另外处置。
+默认列出将归档的路径。明确加 `--apply` 才归档到安装目录下的 `archive/`。保留最近的 release、备份和轮转日志，以及所有仍被入口、活动部署配置或 launchd 引用的版本。遇到无法检查的 plist 时停止归档。历史 `start`、`activate-*.command`、`staging-archive.*` 和旧 `deploy/<SHA>` 需用 `--include-legacy` 纳入计划。当前 stderr 在同砚停机切换期间按阈值轮转。归档不占用活跃保留额度，可在恢复窗口过后另外处置。
 
 ## 验收与恢复
 

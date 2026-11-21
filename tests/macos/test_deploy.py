@@ -630,11 +630,15 @@ class MacOSOutputTest(unittest.TestCase):
             home = Path(tmp).resolve()
             root = home / '.local/lib/ink-commons'
             releases = root / 'releases'
-            paths = [releases / (letter * 40) for letter in ('a', 'b', 'c', 'd')]
+            paths = [releases / (letter * 40) for letter in ('a', 'b', 'c', 'd', 'e')]
             for stamp, path in enumerate(paths, 1):
                 path.mkdir(parents=True)
                 m.os.utime(path, (stamp, stamp))
             (root / 'ink').symlink_to(paths[0] / 'ink')
+            (paths[0] / 'deployment.json').write_text(json.dumps({
+                'config_source': str(paths[2] / 'config.json'),
+            }))
+            m.os.utime(paths[0], (1, 1))
             system = home / 'LaunchDaemons'
             system.mkdir()
             (system / 'cc.plist').write_bytes(plistlib.dumps({'ProgramArguments': [str(paths[1] / 'cc')]}))
@@ -642,7 +646,7 @@ class MacOSOutputTest(unittest.TestCase):
             legacy.write_text('legacy')
             with patch.object(m, 'SYSTEM_DIR', system):
                 plan = m.retention_plan(home, root, {'releases': 1}, include_legacy=True)
-            self.assertEqual(set(plan), {paths[2], legacy})
+            self.assertEqual(set(plan), {paths[3], legacy})
             self.assertTrue(all(path.is_dir() for path in paths))
 
     def test_rotate_stderr_leaves_small_logs_and_preserves_old_bytes(self):
