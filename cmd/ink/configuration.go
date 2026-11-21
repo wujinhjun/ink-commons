@@ -16,11 +16,42 @@ import (
 	"ink-commons/internal/ink"
 )
 
+func exportConfiguration(args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: ink config export")
+	}
+	dir, err := directory()
+	if err != nil {
+		return err
+	}
+	response, err := localClient(dir, 10*time.Second).Get("http://ink/v1/config/export")
+	if err != nil {
+		return errors.New("daemon unavailable")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("configuration export failed: HTTP %d", response.StatusCode)
+	}
+	var content bytes.Buffer
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 16<<20))
+	if err != nil {
+		return err
+	}
+	if err := json.Indent(&content, raw, "", "  "); err != nil {
+		return errors.New("invalid configuration export")
+	}
+	_, err = content.WriteTo(os.Stdout)
+	return err
+}
+
 func configurationCommand(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: ink config get|set|unset|list [KEY] [JSON_VALUE] --global|--repo OWNER/REPO [--effective] [--json]")
 	}
 	action := args[0]
+	if action == "export" {
+		return exportConfiguration(args[1:])
+	}
 	if action != "get" && action != "set" && action != "unset" && action != "list" {
 		return errors.New("expected config get, set, unset, or list")
 	}

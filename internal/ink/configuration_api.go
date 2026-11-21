@@ -9,6 +9,28 @@ import (
 	"ink-commons/internal/execution"
 )
 
+// Export reads a single SQLite snapshot and retains only declared policy.
+func (s *Service) exportConfiguration(w http.ResponseWriter, r *http.Request) {
+	records, err := s.store.configRecords()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	global := ConfigValues{}
+	repositories := map[string]ConfigValues{}
+	for _, record := range records {
+		if record.Values == nil {
+			record.Values = ConfigValues{}
+		}
+		if record.Scope == "" {
+			global = record.Values
+		} else {
+			repositories[record.Scope] = record.Values
+		}
+	}
+	reply(w, http.StatusOK, map[string]any{"schema": 1, "global": global, "repositories": repositories})
+}
+
 func (s *Service) validateEffective(repo Repository) error {
 	if repo.ReviewerRoute == nil {
 		return nil

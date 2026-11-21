@@ -32,6 +32,14 @@ ink rollback --tag build-<previous-SHA> --dry-run
 
 若已有同砚 LaunchDaemon，升级和激活会在写入前停止。迁移前由管理员安排维护窗口，确认 cc-connect 与 watchdog 已由 personal-infra 管理，独立保留旧 plist、当前 state 和仍被引用的旧 release，再将旧同砚系统服务移出系统域。已有的系统服务与其数据留作回退依据。迁移激活使用登录域，需维持登录会话。任何仍引用旧 release 的 cc-connect 可执行文件须先迁到其独立安装目录。
 
+## 配置权威与 drift
+
+`~/.config/ink-commons/config.json` 是静态启动配置的默认来源。发布目录的 `config.json` 是上次暂存时保存的启动快照。修改静态来源后，下次暂存读取新内容。
+
+运行期仓库、reviewer、合入策略和执行参数以 SQLite 为准。JSON 中的 `repositories`、`repository_defaults` 和 `execution` 是旧数据库首次导入字段，暂存会逐项标记。SQLite 初始化后，通过 `ink config` 维护这些策略。
+
+执行 `(umask 077; ink config export > runtime-policy.json)` 可导出声明。部署时传 `--runtime-declaration runtime-policy.json`，暂存、升级及 status 会比对并报告有变化的范围。声明仅用于比对，首次安装尚无运行中 daemon 时报告 unavailable。声明可能包含本机路由和命令配置，应按私有文件保存。
+
 ## 验收与恢复
 
 - 暂存、激活和失败恢复均不复制 cc-connect，不修改其 plist，不停止或删除 watchdog。对本机 endpoint 的前后检查均为只读。

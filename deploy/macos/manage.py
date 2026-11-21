@@ -164,6 +164,27 @@ def verify_revision(binary, revision):
         raise DeploymentError('ink artifact revision does not match --revision')
 
 
+def config_drift(data, declaration):
+    if not declaration:
+        return {'status': 'not_configured'}
+    expected = json.loads(Path(declaration).read_text())
+    if expected.get('schema') != 1 or not all(isinstance(expected.get(key), dict)
+                                               for key in ('global', 'repositories')):
+        raise DeploymentError('invalid runtime configuration declaration')
+    try:
+        actual = local_get(data, '/v1/config/export', timeout=2)
+        if not isinstance(actual, dict) or actual.get('schema') != 1:
+            return {'status': 'unavailable'}
+    except (OSError, ValueError, IndexError, DeploymentError):
+        return {'status': 'unavailable'}
+    scopes = sorted(set(expected['repositories']) | set(actual['repositories']))
+    changed = [scope for scope in scopes
+               if expected['repositories'].get(scope) != actual['repositories'].get(scope)]
+    if expected['global'] != actual['global']:
+        changed.insert(0, 'global')
+    return {'status': 'changed' if changed else 'match', 'scopes': changed}
+
+
 def stage(args, *, reuse=False):
     if os.geteuid() == 0:
         raise DeploymentError('stage must run as the service user, without sudo')
@@ -190,7 +211,11 @@ def stage(args, *, reuse=False):
     release = root / revision
     if release.exists() and not reuse:
         raise DeploymentError('release already exists; reuse it or explicitly archive it before restaging')
-    config = json.loads(Path(args.config).expanduser().read_text())
+    config_source = Path(args.config).expanduser().resolve()
+    config = json.loads(config_source.read_text())
+    legacy = sorted(config.keys() & {'repositories', 'repository_defaults', 'execution'})
+    if legacy:
+        print('Legacy SQLite first-import fields:', ', '.join(legacy))
     command = Path(args.github_command).expanduser().resolve()
     if not command.is_file() or not os.access(command, os.X_OK):
         raise DeploymentError('App CLI is unavailable')
@@ -201,7 +226,12 @@ def stage(args, *, reuse=False):
     from runtime import credential_environment
     settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
                 'data': str(home / '.local/state/ink-commons'),
-                'cc_config': str(cc_config), 'project': args.project, 'environment': extra_env}
+                'cc_config': str(cc_config), 'project': args.project, 'environment': extra_env,
+                'config_source': str(config_source)}
+    declaration = getattr(args, 'runtime_declaration', None)
+    if declaration:
+        settings['runtime_declaration'] = str(Path(declaration).expanduser().resolve())
+        print(json.dumps({'config_drift': config_drift(settings['data'], settings['runtime_declaration'])}))
     if getattr(args, 'credentials', None):
         settings['credentials'] = str(Path(args.credentials).expanduser().resolve())
         del settings['cc_config'], settings['project']
@@ -326,8 +356,9 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
     if current.parent != releases or not (current / 'deployment.json').is_file():
         raise DeploymentError('installed release is unavailable')
     settings = json.loads((current / 'deployment.json').read_text())
-    config_path = current / 'config.json'
-    config = json.loads(config_path.read_text())
+    active_config_path = current / 'config.json'
+    config = json.loads(active_config_path.read_text())
+    config_path = Path(settings.get('config_source') or active_config_path)
     proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
     network_env = {**os.environ, **parse_env(proxy_entries)}
     app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
@@ -349,7 +380,12 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
     reuse = target.exists()
     if reuse and target != current:
         expected = {key: value for key, value in settings.items() if key != 'cc_binary_sha256'}
-        verify_staged_settings(target, config, {**expected, 'revision': revision})
+        desired_config = json.loads(config_path.read_text())
+        desired_config['github_command'] = config['github_command']
+        verify_staged_settings(target, desired_config,
+                               {**expected, 'config_source': str(config_path), 'revision': revision})
+        if settings.get('runtime_declaration'):
+            print(json.dumps({'config_drift': config_drift(settings['data'], settings['runtime_declaration'])}))
 
     assets = ('SHA256SUMS',) if reuse else (*BUNDLE_FILES, 'SHA256SUMS')
     allowed_signers = settings.get('allowed_signers')
@@ -372,6 +408,7 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
                 github_command=config['github_command'], cc_config=settings.get('cc_config', '~/.cc-connect/config.toml'),
                 project=settings.get('project'), credentials=settings.get('credentials'),
                 env=proxy_entries, allowed_signers=allowed_signers,
+                runtime_declaration=settings.get('runtime_declaration'),
             ))
 
     if not apply:
@@ -630,6 +667,12 @@ def status(args):
         report['runtime'] = health(data)
     except (OSError, ValueError, IndexError):
         report['runtime'] = {'status': 'unavailable'}
+    if 'manifest' in locals() and manifest.is_file():
+        active_settings = json.loads(manifest.read_text())
+        try:
+            report['config_drift'] = config_drift(data, active_settings.get('runtime_declaration'))
+        except (OSError, ValueError, DeploymentError):
+            report['config_drift'] = {'status': 'invalid_declaration'}
     report['cc_connect']={'process_pids':cc_process_pids(),'port':port,
                           'listener_pids':listener_pids(port),'binaries':binaries}
     print(json.dumps(report, indent=2))
@@ -644,6 +687,7 @@ def main():
     install = commands.add_parser('deploy', help='install from a GitHub Release bundle')
     for prepare in (build, install):
         prepare.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
+        prepare.add_argument('--runtime-declaration', help='SQLite policy declaration for read-only drift reporting')
         prepare.add_argument('--config', default='~/.config/ink-commons/config.json')
         prepare.add_argument('--allowed-signers', help='OpenSSH allowed_signers trust file for release signatures')
         prepare.add_argument('--credentials', help='private JSON file with cc_connect_token and discord_token')

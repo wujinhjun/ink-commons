@@ -182,6 +182,7 @@ class UpgradeTest(unittest.TestCase):
             (self.target / name).write_bytes((self.current / name).read_bytes())
         settings = json.loads((self.current / 'deployment.json').read_text())
         settings['revision'] = self.target.name
+        settings['config_source'] = str(self.current / 'config.json')
         settings.pop('cc_binary_sha256', None)
         (self.target / 'deployment.json').write_text(json.dumps(settings))
 
@@ -571,6 +572,16 @@ class MacOSOutputTest(unittest.TestCase):
         with patch.object(m.fcntl,'flock',side_effect=BlockingIOError()), patch.object(m.time,'monotonic',side_effect=[0,6]):
             with self.assertRaises(m.DeploymentError):
                 m.acquire_state_lock(stream)
+
+    def test_config_drift_reports_changed_scopes_without_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            declaration = Path(tmp) / 'policy.json'
+            declaration.write_text(json.dumps({'schema': 1, 'global': {},
+                                               'repositories': {'acme/demo': {'reviewer_login': 'old'}}}))
+            with patch.object(m, 'local_get', return_value={'schema': 1, 'global': {},
+                        'repositories': {'acme/demo': {'reviewer_login': 'new'}}}):
+                self.assertEqual(m.config_drift(tmp, declaration),
+                                 {'status': 'changed', 'scopes': ['acme/demo']})
 
     def test_no_proxy_rejects_non_host_text(self):
         self.assertEqual(m.parse_env(['NO_PROXY=localhost,127.0.0.1,.example.com,[::1]'])['NO_PROXY'],'localhost,127.0.0.1,.example.com,[::1]')

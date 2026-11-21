@@ -50,6 +50,7 @@ func (s *Service) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/self-check", s.selfCheck)
 	mux.HandleFunc("GET /v1/config", s.configuration)
+	mux.HandleFunc("GET /v1/config/export", s.exportConfiguration)
 	mux.HandleFunc("POST /v1/config", s.configuration)
 	mux.HandleFunc("DELETE /v1/config", s.configuration)
 	mux.HandleFunc("GET /v1/repositories", s.listRepositories)
