@@ -35,6 +35,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 		t.Run(outcome, func(t *testing.T) {
 			var creates, wakes, archiveReads, sourceReads int
 			var title string
+			var reservedAt time.Time
 			var s *Service
 			repo := Repository{
 				Repo: "acme/project", TaskMode: "cooperative", ReviewerLogin: "reviewer",
@@ -47,8 +48,12 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 				thread := func(id, parent, owner string) map[string]any {
 					return map[string]any{
 						"id": id, "type": 11, "name": title, "parent_id": parent, "owner_id": owner,
-						"thread_metadata": map[string]string{"archive_timestamp": "2026-10-21T12:00:00Z"},
 					}
+				}
+				archivedThread := func(id, owner string, archivedAt time.Time) map[string]any {
+					value := thread(id, "77", owner)
+					value["thread_metadata"] = map[string]string{"archive_timestamp": archivedAt.Format(time.RFC3339Nano)}
+					return value
 				}
 				switch r.Method + " " + r.URL.Path {
 				case "POST /api/v10/channels/77/threads":
@@ -59,9 +64,11 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 					}
 					title = body.Name
 					wake := notificationWork(t, s, repo, p).Task.Handoff.Wake
-					if wake.Preparation != "preparing" || wake.Allocation == nil || wake.Allocation.Name != title || wake.Allocation.Parent != "77" {
+					if wake.Preparation != "preparing" || wake.Allocation == nil || wake.Allocation.Name != title ||
+						wake.Allocation.Parent != "77" || wake.Allocation.ReservedAt == nil || wake.Allocation.ReservedAt.IsZero() {
 						t.Fatalf("Discord request was not reserved: %+v", wake)
 					}
+					reservedAt = *wake.Allocation.ReservedAt
 					return nil, io.EOF
 				case "GET /api/v10/channels/123":
 					sourceReads++
@@ -82,17 +89,30 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 				case "GET /api/v10/channels/77/threads/archived/public":
 					archiveReads++
 					threads := []map[string]any{}
-					more := outcome == "archived" && r.URL.Query().Get("before") == ""
-					switch {
-					case more:
-						threads = append(threads, thread("333", "77", "15"))
-					case outcome == "archived":
-						if r.URL.Query().Get("before") != "2026-10-21T12:00:00Z" {
-							t.Fatalf("incorrect cursor %s", r.URL)
+					before := r.URL.Query().Get("before")
+					more := false
+					older := archivedThread("444", "12", reservedAt.Add(-time.Hour))
+					switch outcome {
+					case "active":
+						if before != "" {
+							t.Fatalf("followed archive cursor past allocation window: %s", r.URL)
 						}
-						threads = append(threads, thread("999", "77", "12"))
-					case outcome == "ambiguous":
-						threads = append(threads, thread("888", "77", "12"))
+						threads = append(threads, older)
+						more = true
+					case "archived":
+						firstTimestamp := reservedAt.Add(-time.Minute)
+						switch before {
+						case "":
+							threads = append(threads, archivedThread("333", "15", firstTimestamp))
+						case firstTimestamp.Format(time.RFC3339Nano):
+							// The candidate remains eligible even with Discord's clock behind the daemon.
+							threads = append(threads, archivedThread("999", "12", reservedAt.Add(-4*time.Minute)), older)
+						default:
+							t.Fatalf("followed archive cursor past allocation window: %s", r.URL)
+						}
+						more = true
+					case "ambiguous":
+						threads = append(threads, archivedThread("888", "12", reservedAt))
 					}
 					reply(out, 200, map[string]any{"threads": threads, "has_more": more})
 				case "POST /hook":
@@ -189,6 +209,13 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 					t.Fatalf("unresolved allocation should stay fenced: %+v, creates=%d, wakes=%d", h.Wake, creates, wakes)
 				}
 				return
+			}
+			wantArchiveReads := 1
+			if outcome == "archived" {
+				wantArchiveReads = 2
+			}
+			if archiveReads != wantArchiveReads {
+				t.Fatalf("read %d archive pages, want %d", archiveReads, wantArchiveReads)
 			}
 			if wakes != 1 || h.Wake.Error != "" || h.Wake.AcceptedAt == nil || h.State != "pending" ||
 				!strings.Contains(w.Workflow.Reason, "Wake accepted") {

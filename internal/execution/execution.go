@@ -55,8 +55,9 @@ type ReviewPlacement struct {
 
 // ConversationAllocation identifies a thread across ambiguous creation results.
 type ConversationAllocation struct {
-	Parent string `json:"parent"`
-	Name   string `json:"name"`
+	Parent     string     `json:"parent"`
+	Name       string     `json:"name"`
+	ReservedAt *time.Time `json:"reserved_at,omitempty"`
 }
 
 // ConversationAllocator separates the single creation request from read-only recovery.

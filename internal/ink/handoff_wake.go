@@ -125,6 +125,8 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 		// Persist the exact destination before sending a creation request.
 		if allocates && !recovering && channelCheck.placement != nil && channelCheck.placement.Session == "" {
 			allocation := allocator.PlanConversation(*channelCheck.placement, d)
+			reservedAt := time.Now().UTC()
+			allocation.ReservedAt = &reservedAt
 			h.Wake.Allocation = &allocation
 		}
 		h.Wake.Preparation = "preparing"

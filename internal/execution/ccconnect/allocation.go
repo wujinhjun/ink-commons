@@ -85,8 +85,11 @@ func (e *Executor) FindConversation(ctx context.Context, allocation execution.Co
 		return "", fmt.Errorf("Discord returned an invalid bot ID")
 	}
 	var match string
-	check := func(page threadPage) error {
+	check := func(page threadPage, notBefore time.Time) error {
 		for _, thread := range page.Threads {
+			if archivedAt := thread.Metadata.ArchivedAt; !archivedAt.IsZero() && archivedAt.Before(notBefore) {
+				continue
+			}
 			if thread.Type != 11 || thread.Parent != allocation.Parent || thread.Owner != bot.ID || thread.Name != allocation.Name || !snowflake(thread.ID) {
 				continue
 			}
@@ -101,8 +104,15 @@ func (e *Executor) FindConversation(ctx context.Context, allocation execution.Co
 	if err := execution.GetJSON(ctx, e.client, discordAPI+"/guilds/"+parent.Guild+"/threads/active", auth, &active); err != nil {
 		return "", fmt.Errorf("list active Discord threads for channel %s: %w", allocation.Parent, err)
 	}
-	if err := check(active); err != nil {
+	if err := check(active, time.Time{}); err != nil {
 		return "", err
+	}
+	// Discord sorts archives by archive_timestamp, newest first. Allow for
+	// clock skew between the daemon's reservation and Discord's timestamps.
+	const clockSkewAllowance = 5 * time.Minute
+	var notBefore time.Time
+	if allocation.ReservedAt != nil && !allocation.ReservedAt.IsZero() {
+		notBefore = allocation.ReservedAt.Add(-clockSkewAllowance)
 	}
 	archivedURL := discordAPI + "/channels/" + allocation.Parent + "/threads/archived/public?limit=100"
 	var before time.Time
@@ -115,7 +125,7 @@ func (e *Executor) FindConversation(ctx context.Context, allocation execution.Co
 		if err := execution.GetJSON(ctx, e.client, endpoint, auth, &archived); err != nil {
 			return "", fmt.Errorf("list archived Discord threads for channel %s: %w", allocation.Parent, err)
 		}
-		if err := check(archived); err != nil {
+		if err := check(archived, notBefore); err != nil {
 			return "", err
 		}
 		if !archived.HasMore {
@@ -127,6 +137,9 @@ func (e *Executor) FindConversation(ctx context.Context, allocation execution.Co
 		next := archived.Threads[len(archived.Threads)-1].Metadata.ArchivedAt
 		if next.IsZero() || (!before.IsZero() && !next.Before(before)) {
 			return "", fmt.Errorf("Discord archive pagination did not advance")
+		}
+		if !next.After(notBefore) {
+			break
 		}
 		before = next
 	}
