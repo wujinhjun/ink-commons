@@ -67,35 +67,27 @@ func (e *Executor) Prepare(ctx context.Context, route execution.Route, task exec
 	if route.Session != "" {
 		return route.Session, nil
 	}
-	if task.ReuseDevelopmentThread && route.Parent == "" {
-		if err := e.ValidatePreparation(route, task); err != nil {
-			return "", err
-		}
-		id, err := e.publicDevelopmentThread(ctx, *task.Source)
+	placement := task.ReviewPlacement
+	if placement == nil {
+		var err error
+		placement, err = e.resolveReviewPlacement(ctx, route, task)
 		if err != nil {
-			return "", fmt.Errorf("reuse development thread: %w", err)
-		}
-		return "discord:" + id, nil
-	}
-	parent := route.Parent
-	name := fmt.Sprintf("Review %s #%d", task.Repository, task.Number)
-	if source := task.Source; source != nil && source.Provider == Name {
-		sourceParent, sourceName, err := e.developmentConversation(ctx, source.Session)
-		if err != nil && parent == "" {
 			return "", err
 		}
-		if err == nil {
-			if parent == "" {
-				parent = sourceParent
-			}
-			// Keep the PR identifier even when a long Unicode title must be truncated.
-			prefix := fmt.Sprintf("Review %s #%d · ", task.Repository, task.Number)
-			if len([]rune(prefix)) > 90 {
-				prefix = fmt.Sprintf("Review #%d · ", task.Number)
-			}
-			title := []rune(sourceName)
-			name = prefix + string(title[:min(len(title), 100-len([]rune(prefix)))])
+	}
+	if placement.Session != "" {
+		return placement.Session, nil
+	}
+	parent := placement.Parent
+	name := fmt.Sprintf("Review %s #%d", task.Repository, task.Number)
+	if placement.DevelopmentName != "" {
+		// Keep the PR identifier even when a long Unicode title must be truncated.
+		prefix := fmt.Sprintf("Review %s #%d · ", task.Repository, task.Number)
+		if len([]rune(prefix)) > 90 {
+			prefix = fmt.Sprintf("Review #%d · ", task.Number)
 		}
+		title := []rune(placement.DevelopmentName)
+		name = prefix + string(title[:min(len(title), 100-len([]rune(prefix)))])
 	}
 	if !snowflake(parent) {
 		return "", fmt.Errorf("new review session needs a Discord development conversation or an explicit parent")
@@ -120,6 +112,17 @@ func (e *Executor) Prepare(ctx context.Context, route execution.Route, task exec
 // ValidatePreparation performs the local checks that can be reported immediately
 // by assignment, without a Discord request or allocating a session.
 func (e *Executor) ValidatePreparation(route execution.Route, task execution.Delivery) error {
+	if task.RequireSameChannel {
+		if e.discordToken == "" {
+			return fmt.Errorf("require_same_channel needs INK_DISCORD_TOKEN")
+		}
+		if task.Source == nil || task.Source.Provider != Name {
+			return fmt.Errorf("require_same_channel needs a Discord development conversation")
+		}
+		if _, err := discordChannel(task.Source.Session); err != nil {
+			return fmt.Errorf("invalid development conversation: %w", err)
+		}
+	}
 	if route.Session == "" && route.Parent == "" && task.ReuseDevelopmentThread {
 		if task.Source == nil || task.Source.Provider != Name {
 			return fmt.Errorf("thread reuse requires a Discord development source")
@@ -142,21 +145,106 @@ func (e *Executor) ValidatePreparation(route execution.Route, task execution.Del
 	return nil
 }
 
+// ResolveReviewPlacement performs Discord reads before reserving an execution or
+// an allocation. Prepare uses the result directly when the constraint is enabled.
+func (e *Executor) ResolveReviewPlacement(ctx context.Context, route execution.Route, task execution.Delivery) (*execution.ReviewPlacement, error) {
+	if err := e.ValidatePreparation(route, task); err != nil {
+		return nil, err
+	}
+	if route.Session == "" {
+		return e.resolveReviewPlacement(ctx, route, task)
+	}
+	expected, _, err := e.developmentConversation(ctx, task.Source.Session)
+	if err != nil {
+		return nil, err
+	}
+	actual, err := e.reviewSessionChannel(ctx, route.Session)
+	if err != nil {
+		return nil, err
+	}
+	if actual != expected {
+		return nil, fmt.Errorf("require_same_channel: expected development channel %s, got review channel %s", expected, actual)
+	}
+	return &execution.ReviewPlacement{Session: route.Session}, nil
+}
+
+func (e *Executor) resolveReviewPlacement(ctx context.Context, route execution.Route, task execution.Delivery) (*execution.ReviewPlacement, error) {
+	if task.ReuseDevelopmentThread && route.Parent == "" {
+		if err := e.ValidatePreparation(route, task); err != nil {
+			return nil, err
+		}
+		id, err := e.publicDevelopmentThread(ctx, *task.Source)
+		if err != nil {
+			return nil, fmt.Errorf("reuse development thread: %w", err)
+		}
+		return &execution.ReviewPlacement{Session: "discord:" + id}, nil
+	}
+	placement := &execution.ReviewPlacement{Parent: route.Parent}
+	if source := task.Source; source != nil && source.Provider == Name {
+		parent, name, err := e.developmentConversation(ctx, source.Session)
+		if err != nil {
+			if task.RequireSameChannel || route.Parent == "" {
+				return nil, err
+			}
+			return placement, nil
+		}
+		if task.RequireSameChannel && route.Parent != "" && route.Parent != parent {
+			return nil, fmt.Errorf("require_same_channel: expected development channel %s, got review channel %s", parent, route.Parent)
+		}
+		if placement.Parent == "" {
+			placement.Parent = parent
+		}
+		placement.DevelopmentName = name
+	}
+	return placement, nil
+}
+
+func (e *Executor) reviewSessionChannel(ctx context.Context, session string) (string, error) {
+	id, err := discordChannel(session)
+	if err != nil {
+		return "", err
+	}
+	channel, err := e.readDiscordChannel(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("read review conversation: %w", err)
+	}
+	switch channel.Type {
+	case 0:
+		return id, nil
+	case 10, 11, 12:
+		if snowflake(channel.Parent) {
+			return channel.Parent, nil
+		}
+	}
+	return "", fmt.Errorf("review conversation has no valid text-channel destination")
+}
+
+type discordConversation struct {
+	ID     string `json:"id"`
+	Type   int    `json:"type"`
+	Parent string `json:"parent_id"`
+	Name   string `json:"name"`
+}
+
+func (e *Executor) readDiscordChannel(ctx context.Context, id string) (discordConversation, error) {
+	var channel discordConversation
+	err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+id, "Bot "+e.discordToken, &channel)
+	if err == nil && channel.ID != id {
+		err = fmt.Errorf("Discord returned an invalid conversation")
+	}
+	return channel, err
+}
+
 func (e *Executor) developmentConversation(ctx context.Context, session string) (string, string, error) {
 	channelID, err := discordChannel(session)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid development conversation: %w", err)
 	}
-	var channel struct {
-		ID     string `json:"id"`
-		Type   int    `json:"type"`
-		Parent string `json:"parent_id"`
-		Name   string `json:"name"`
-	}
-	if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+channelID, "Bot "+e.discordToken, &channel); err != nil {
+	channel, err := e.readDiscordChannel(ctx, channelID)
+	if err != nil {
 		return "", "", fmt.Errorf("read development conversation: %w", err)
 	}
-	if channel.ID != channelID || strings.TrimSpace(channel.Name) == "" {
+	if strings.TrimSpace(channel.Name) == "" {
 		return "", "", fmt.Errorf("Discord returned an invalid development conversation")
 	}
 	parent := channel.ID
@@ -175,14 +263,11 @@ func (e *Executor) developmentConversation(ctx context.Context, session string) 
 		return "", "", fmt.Errorf("development conversation has no valid parent channel")
 	}
 	if channel.Type == 11 {
-		var parentChannel struct {
-			ID   string `json:"id"`
-			Type int    `json:"type"`
-		}
-		if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+parent, "Bot "+e.discordToken, &parentChannel); err != nil {
+		parentChannel, err := e.readDiscordChannel(ctx, parent)
+		if err != nil {
 			return "", "", fmt.Errorf("read development parent channel: %w", err)
 		}
-		if parentChannel.ID != parent || parentChannel.Type != 0 {
+		if parentChannel.Type != 0 {
 			return "", "", fmt.Errorf("automatic review placement requires a text-channel parent; forum, media and announcement parents are unsupported")
 		}
 	}

@@ -353,7 +353,7 @@ func prunePushes(st *state, now time.Time) {
 	st.Pushes = kept
 }
 
-func (s *Service) beginDelivery(id string) (*Work, error) {
+func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Work, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.store.load()
@@ -375,6 +375,15 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 		work.Task.Error = "review preparation: " + err.Error()
 		work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 		return nil, s.store.save(st)
+	}
+
+	if current, err := channelCheck.result(work); !current || err != nil {
+		if err != nil {
+			work.Task.Error = "review preparation: " + err.Error()
+			work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+			return nil, s.store.save(st)
+		}
+		return nil, nil
 	}
 
 	if err := s.freezeTaskConfig(work); err != nil {
@@ -439,11 +448,15 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 	if ctx.Err() != nil {
 		return nil
 	}
-	if handled, err := s.dispatchHandoff(ctx, repo, number); handled || err != nil {
+	id := key(repo.Repo, number)
+	channelCheck, err := s.checkReviewChannel(ctx, id)
+	if err != nil {
 		return err
 	}
-	id := key(repo.Repo, number)
-	work, err := s.beginDelivery(id)
+	if handled, err := s.dispatchHandoff(ctx, id, channelCheck); handled || err != nil {
+		return err
+	}
+	work, err := s.beginDelivery(id, channelCheck)
 	if err != nil || work == nil {
 		return err
 	}
@@ -484,7 +497,11 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 			task.Error = "invalid preparation context: " + err.Error()
 			return s.saveDelivery(id, work)
 		}
-		session, err := executor.Prepare(ctx, *route, delivery)
+		preparation := delivery
+		if delivery.RequireSameChannel {
+			preparation.ReviewPlacement = channelCheck.placement
+		}
+		session, err := executor.Prepare(ctx, *route, preparation)
 		if err != nil {
 			task.Error = "prepare destination: " + err.Error()
 			return s.saveDelivery(id, work)
