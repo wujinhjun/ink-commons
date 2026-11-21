@@ -3,6 +3,7 @@ package ink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -357,9 +358,13 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		return s.startStackMerge(ctx, repo, number, run, mergeUpstream)
 	}
 	mergeSHA, err := mergeUpstream.merge(ctx, repo.Repo, number, run.SHA, run.Method)
-	if err != nil {
+	switch {
+	case errors.Is(err, errAppCommandNotStarted):
+		run.State = "waiting"
+		run.Reason = err.Error()
+	case err != nil:
 		run.Reason = "merge request failed or response was lost: " + err.Error() + "; verify GitHub before taking action"
-	} else {
+	default:
 		run.State = "merged"
 		run.Reason = ""
 		run.MergeSHA = mergeSHA

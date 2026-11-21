@@ -211,6 +211,10 @@ func listPages[T any](ctx context.Context, u upstream, path string) ([]T, error)
 	}
 }
 
+// Only errors known to occur before the child process starts may release a
+// merge reservation for retry.
+var errAppCommandNotStarted = errors.New("GitHub App command did not start")
+
 // App CLI 每次请求获取单仓库短期凭据，不把一小时 token 固定在常驻进程中。
 // 不经过 shell，不读取个人 gh 登录；失败时只返回通用错误，避免转发子进程秘密。
 func (u upstream) commandResponse(ctx context.Context, method, path, profile, version string, input []byte) (*http.Response, error) {
@@ -228,7 +232,7 @@ func (u upstream) commandResponse(ctx context.Context, method, path, profile, ve
 		args = append(args, "--input", "-")
 	}
 	if err := checkCommandDigest(u.command, u.commandDigest); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errAppCommandNotStarted, err)
 	}
 	cmd := exec.CommandContext(ctx, u.command, args...)
 	if input != nil {
@@ -238,7 +242,10 @@ func (u upstream) commandResponse(ctx context.Context, method, path, profile, ve
 	cmd.Stdout = output
 	// Stderr may contain broker authentication data. gh also prints the HTTP
 	// response to stdout with --include, even for HTTP errors.
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, errAppCommandNotStarted
+	}
+	runErr := cmd.Wait()
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("GitHub App command timed out or cancelled")
 	}

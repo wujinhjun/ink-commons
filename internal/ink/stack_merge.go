@@ -3,6 +3,7 @@ package ink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -41,6 +42,9 @@ func (s *Service) startStackMerge(ctx context.Context, repo Repository, number i
 	var result stackMergeResult
 	_, status, err := merger.gitHubJSON(ctx, http.MethodPut, stackMergePath(repo, number), "code", stackAPIVersion, body, &result, http.StatusConflict)
 	switch {
+	case errors.Is(err, errAppCommandNotStarted):
+		run.State = "waiting"
+		run.Reason = err.Error()
 	case status == http.StatusBadRequest:
 		run.State = "waiting"
 		run.Reason = "GitHub rejected the stack merge before accepting it (HTTP 400); waiting for preflight"

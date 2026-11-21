@@ -2,10 +2,13 @@ package ink
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -413,5 +416,62 @@ func TestHistoricalUnknownsAllReconcileWhenPRCloses(t *testing.T) {
 		if f.writes != 0 {
 			t.Fatal("read-only reconciliation submitted a merge")
 		}
+	}
+}
+
+func TestAutoMergeRetriesWhenPinnedMergerIsRestored(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, wantState, wantRequestID string
+		stack                                    bool
+	}{
+		{name: "ordinary", response: "HTTP/1.1 200 OK", wantState: "merged"},
+		{name: "stack", response: "HTTP/1.1 202 Accepted", wantState: "pending", wantRequestID: testStackRequestID, stack: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAutoMergeFixture(t)
+			if tc.stack {
+				f.setStack(1, "main")
+			}
+			dir := t.TempDir()
+			merger := filepath.Join(dir, "merger")
+			marker := filepath.Join(dir, "calls")
+			t.Setenv("INK_TEST_MERGER_CALLS", marker)
+			payload := fmt.Sprintf(`{"merged":true,"sha":%q}`, strings.Repeat("d", 40))
+			if tc.stack {
+				payload = fmt.Sprintf(`{"status":"pending","details":{"uuid":%q}}`, testStackRequestID)
+			}
+			valid := []byte(fmt.Sprintf(`#!/bin/sh
+printf x >> "$INK_TEST_MERGER_CALLS"
+cat >/dev/null
+printf '%%s\r\n\r\n%%s' '%s' '%s'
+`, tc.response, payload))
+			if err := os.WriteFile(merger, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			f.s.up.mergerCommand, f.s.up.mergerDigest = merger, fmt.Sprintf("%x", sha256.Sum256(valid))
+			ctx := context.Background()
+			if err := f.s.autoMerge(ctx, f.repo, f.pull.Number); err != nil {
+				t.Fatal(err)
+			}
+			work := notificationWork(t, f.s, f.repo, f.pull)
+			if len(work.AutoMerges) != 1 || work.AutoMerges[0].State != "waiting" ||
+				!strings.Contains(work.AutoMerges[0].Reason, "checksum mismatch") || hasInFlightAutoMerge(work) {
+				t.Fatalf("merge should be eligible for retry: %+v", work.AutoMerges)
+			}
+			if err := os.WriteFile(merger, valid, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.s.autoMerge(ctx, f.repo, f.pull.Number); err != nil {
+				t.Fatal(err)
+			}
+			work = notificationWork(t, f.s, f.repo, f.pull)
+			run := work.AutoMerges[0]
+			if run.State != tc.wantState || run.RequestID != tc.wantRequestID {
+				t.Fatalf("merge did not resume after restoring the pinned command: %+v", run)
+			}
+			if calls, err := os.ReadFile(marker); err != nil || string(calls) != "x" {
+				t.Fatalf("expected one write attempt, marker %q, error %v", calls, err)
+			}
+		})
 	}
 }
