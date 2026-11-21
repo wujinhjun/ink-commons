@@ -43,6 +43,7 @@ type handoffFixture struct {
 	path                      string
 	githubError               bool
 	conflictBaseSHA           string
+	conflictRefMergeable      bool
 	conflictDetailBaseSHA     string
 	conflictLookupUnavailable bool
 	beforeRead                func()
@@ -90,10 +91,14 @@ func (f *handoffFixture) upstream() {
 			if base == "" {
 				base = f.pull.Base.SHA
 			}
+			mergeable, state := "CONFLICTING", "DIRTY"
+			if f.conflictRefMergeable {
+				mergeable, state = "MERGEABLE", "UNSTABLE"
+			}
 			reply(out, 200, map[string]any{"data": map[string]any{"repository": map[string]any{
 				"pullRequest": map[string]any{
 					"state": "OPEN", "headRefOid": f.pull.Head.SHA, "baseRefName": f.pull.Base.Ref,
-					"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY",
+					"mergeable": mergeable, "mergeStateStatus": state,
 					"baseRef": map[string]any{"target": map[string]string{"oid": base}},
 				},
 			}}})

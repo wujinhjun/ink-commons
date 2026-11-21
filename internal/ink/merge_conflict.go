@@ -21,7 +21,7 @@ type MergeConflict struct {
 
 // GitHub's PR snapshot can retain the original base oid. Use the current ref
 // target and mergeability from one query, scoped to the already observed PR.
-func (u upstream) confirmedConflictBase(ctx context.Context, repo string, pull Pull) (PullBase, error) {
+func (u upstream) verifyConflictBase(ctx context.Context, repo string, pull Pull, dirty bool) (PullBase, error) {
 	owner, name, ok := strings.Cut(repo, "/")
 	if !ok || !ValidRepository(repo) || pull.Number <= 0 {
 		return PullBase{}, fmt.Errorf("invalid conflict lookup target")
@@ -52,12 +52,19 @@ func (u upstream) confirmedConflictBase(ctx context.Context, repo string, pull P
 		return PullBase{}, err
 	}
 	result := response.Data.Repository.PullRequest
+	base := PullBase{Ref: result.BaseRefName, SHA: result.BaseRef.Target.OID}
 	if len(response.Errors) != 0 || result.State != "OPEN" || result.IsDraft ||
-		result.HeadRefOid != pull.Head.SHA || result.BaseRefName != pull.Base.Ref ||
-		result.Mergeable != "CONFLICTING" || result.MergeStateStatus != "DIRTY" || !validSHA(result.BaseRef.Target.OID) {
-		return PullBase{}, fmt.Errorf("GitHub has not confirmed a conflict for the current PR refs")
+		result.HeadRefOid != pull.Head.SHA || base.Ref != pull.Base.Ref || !validSHA(base.SHA) {
+		return PullBase{}, fmt.Errorf("GitHub has not confirmed the current PR refs")
 	}
-	return PullBase{Ref: result.BaseRefName, SHA: result.BaseRef.Target.OID}, nil
+	if dirty {
+		if result.Mergeable != "CONFLICTING" || result.MergeStateStatus != "DIRTY" {
+			return PullBase{}, fmt.Errorf("GitHub has not confirmed a conflict for the current PR refs")
+		}
+	} else if base != pull.Base || result.Mergeable != "MERGEABLE" || result.MergeStateStatus == "DIRTY" {
+		return PullBase{}, fmt.Errorf("GitHub has not confirmed mergeability for the reported base")
+	}
+	return base, nil
 }
 
 func (w *Work) conflictBase() PullBase {
@@ -95,8 +102,8 @@ func (w *Work) blockedConflictTask() bool {
 }
 
 // The stored list observation fences concurrent changes to the PR version,
-// head, and target branch. A confirmed dirty observation obtains the base SHA
-// from the live ref, which may differ from either REST snapshot.
+// head, and target branch. base is the verified live ref when a GraphQL
+// lookup was needed. Its SHA may differ from a stale REST snapshot.
 func (s *Service) observeMergeConflict(repoName string, number int, version uint64, pull Pull, base PullBase, dirty bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -117,20 +124,19 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 		t := w.Task
 		// Keep the verified base mapping for an issued task when a check is
 		// inconclusive. A clean result for a stale SHA cannot retire that task.
-		if mergeable && pull.Base != w.conflictBase() {
-			return nil
-		}
-		if !mergeable && t != nil && t.ConflictBase != nil {
+		if mergeable && pull.Base != w.conflictBase() && (base.Ref == "" || base != pull.Base) {
 			return nil
 		}
 		changed := w.MergeConflict != nil
-		w.MergeConflict = nil
-		if mergeable && t != nil && t.ConflictBase != nil && t.Handoff != nil &&
-			(t.Handoff.State == "pending" || t.Handoff.State == "blocked") {
+		if t != nil && t.ConflictBase != nil {
+			if !mergeable || t.Handoff == nil || (t.Handoff.State != "pending" && t.Handoff.State != "blocked") {
+				return nil
+			}
 			t.Handoff.State = "superseded"
 			w.replaceTask(nil)
 			changed = true
 		}
+		w.MergeConflict = nil
 		if !changed {
 			return nil
 		}

@@ -275,6 +275,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	version, observedPull, reviewerCommand := w.Version, w.Pull, w.Reviewer.GitHubCommand
 	confirmingConflict := w.MergeConflict != nil
 	trackingConflict := confirmingConflict || (w.Task != nil && w.Task.ConflictBase != nil)
+	observedConflictBase := w.conflictBase()
 	s.mu.Unlock()
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo.Repo, number)
 	wait := func(reason string) error {
@@ -287,7 +288,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	if _, _, err := s.up.gitHubJSON(ctx, http.MethodGet, path, "inspect", stackAPIVersion, nil, &pull); err != nil {
 		if confirmingConflict {
 			observedPull.Mergeable = nil
-			if err := s.observeMergeConflict(repo.Repo, number, version, observedPull, observedPull.Base, false); err != nil {
+			if err := s.observeMergeConflict(repo.Repo, number, version, observedPull, PullBase{}, false); err != nil {
 				return err
 			}
 		}
@@ -300,18 +301,19 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		return wait("waiting for this PR to become the bottom of its GitHub stack")
 	}
 	dirty := pull.Mergeable != nil && !*pull.Mergeable && pull.MergeableState == "dirty"
-	base := pull.Base
-	if dirty && repo.TaskMode == "cooperative" {
+	mergeable := pull.Mergeable != nil && *pull.Mergeable
+	var base PullBase
+	if (dirty && repo.TaskMode == "cooperative") || (trackingConflict && mergeable && pull.Base != observedConflictBase) {
 		var err error
-		base, err = s.up.confirmedConflictBase(ctx, repo.Repo, pull)
+		base, err = s.up.verifyConflictBase(ctx, repo.Repo, pull, dirty)
 		if err != nil {
-			if confirmingConflict {
+			if dirty && confirmingConflict {
 				pull.Mergeable = nil
-				if resetErr := s.observeMergeConflict(repo.Repo, number, version, pull, pull.Base, false); resetErr != nil {
+				if resetErr := s.observeMergeConflict(repo.Repo, number, version, pull, PullBase{}, false); resetErr != nil {
 					return resetErr
 				}
 			}
-			return wait("cannot confirm conflict against the current GitHub base ref")
+			return wait("cannot confirm mergeability against the current GitHub base ref")
 		}
 	}
 	if trackingConflict || dirty {

@@ -156,7 +156,7 @@ func TestMergeConflictConfirmationRestartsAfterFailedPRRead(t *testing.T) {
 }
 
 func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T) {
-	for _, scenario := range []string{"both REST snapshots stale", "detail already current"} {
+	for _, scenario := range []string{"both REST snapshots stale", "detail already current", "base advances again and becomes clean"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := approvedConflictFixture(t)
 			task := confirmConflict(t, f)
@@ -165,7 +165,7 @@ func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T
 				Outcome: "blocked", Reason: "main advanced"}, 200)
 
 			f.conflictBaseSHA = strings.Repeat("d", 40)
-			if scenario == "detail already current" {
+			if scenario != "both REST snapshots stale" {
 				f.conflictDetailBaseSHA = f.conflictBaseSHA
 			}
 			f.conflictLookupUnavailable = true
@@ -228,6 +228,14 @@ func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T
 			preflightConflict(t, f)
 			if w := f.work(t); w.Task == nil || w.Task.ID != next.ID {
 				t.Fatal("a clean result for the stale base retired a task on the live base")
+			}
+			f.conflictRefMergeable = true
+			if scenario == "base advances again and becomes clean" {
+				f.conflictBaseSHA = strings.Repeat("e", 40)
+				preflightConflict(t, f)
+				if w := f.work(t); w.Task == nil || w.Task.ID != next.ID {
+					t.Fatal("a clean live ref cannot validate a REST result for a different SHA")
+				}
 			}
 			f.conflictDetailBaseSHA = f.conflictBaseSHA
 			preflightConflict(t, f)
