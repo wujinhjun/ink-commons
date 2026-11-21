@@ -21,8 +21,6 @@ import tempfile
 import time
 
 LABEL = 'com.ink-commons.daemon'
-CC_LABEL = 'com.cc-connect.service'
-WATCHDOG = 'com.personal-infra.discord-watchdog'
 SYSTEM_DIR = Path('/Library/LaunchDaemons')
 REPOSITORY = 'wujinhjun/ink-commons'
 BUNDLE_FILES = ('ink', 'manage.py', 'runtime.py', 'config.example.json', 'REVISION')
@@ -83,11 +81,6 @@ def disabled(domain,label):
     return re.search(pattern,result.stdout.decode()) is not None
 
 
-def listener_pids(port):
-    result = subprocess.run(['/usr/sbin/lsof','-nP','-t','-iTCP:'+str(port),'-sTCP:LISTEN'],capture_output=True)
-    return sorted({int(value) for value in result.stdout.split() if value.isdigit()})
-
-
 def acquire_state_lock(stream,timeout=5):
     deadline=time.monotonic()+timeout
     while True:
@@ -100,21 +93,11 @@ def acquire_state_lock(stream,timeout=5):
             time.sleep(0.1)
 
 
-def cc_process_pids():
-    result=subprocess.run(['/bin/ps','-ww','-Ao','pid=,comm='],capture_output=True)
-    pids=[]
-    for line in result.stdout.decode().splitlines():
-        fields=line.strip().split(None,1)
-        if len(fields)==2 and fields[0].isdigit() and Path(fields[1]).name=='cc-connect':
-            pids.append(int(fields[0]))
-    return sorted(set(pids))
-
-
 def read_profile(path):
     if not path:
         return {}
     profile = json.loads(Path(path).expanduser().read_text())
-    fields = {'repository', 'cc_label', 'watchdog_label', 'service_user', 'python',
+    fields = {'repository', 'service_user', 'python',
               'github_command', 'path', 'credentials', 'cc_version_file',
               'environment', 'retention', 'project'}
     if not isinstance(profile, dict) or profile.keys() - fields:
@@ -124,9 +107,8 @@ def read_profile(path):
             raise DeploymentError('invalid deployment profile field: ' + key)
     if 'repository' in profile and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*', profile['repository'], re.ASCII):
         raise DeploymentError('deployment repository must be owner/repo')
-    for key in ('cc_label', 'watchdog_label', 'service_user'):
-        if key in profile and not re.fullmatch(r'[a-zA-Z0-9_.-]+', profile[key]):
-            raise DeploymentError('invalid deployment profile identifier: ' + key)
+    if 'service_user' in profile and not re.fullmatch(r'[a-zA-Z0-9_.-]+', profile['service_user']):
+        raise DeploymentError('invalid deployment profile service user')
     for key in ('python', 'github_command', 'credentials', 'cc_version_file'):
         if key in profile and not Path(profile[key]).is_absolute():
             raise DeploymentError('deployment profile paths must be absolute: ' + key)
@@ -256,12 +238,17 @@ def stage(args, *, reuse=False):
     legacy = sorted(config.keys() & {'repositories', 'repository_defaults', 'execution'})
     if legacy:
         print('Legacy SQLite first-import fields:', ', '.join(legacy))
-    command = Path(args.github_command or profile.get('github_command', '~/.local/bin/yuxingyi')).expanduser().resolve()
+    command_path = args.github_command or profile.get('github_command') or config.get('github_command')
+    if not command_path:
+        raise DeploymentError('configure an absolute GitHub reader CLI path')
+    command = Path(command_path).expanduser()
+    if not command.is_absolute():
+        raise DeploymentError('configure an absolute GitHub reader CLI path')
+    command = command.resolve()
     if not command.is_file() or not os.access(command, os.X_OK):
         raise DeploymentError('App CLI is unavailable')
     config['github_command'] = str(command)
     # 凭据和路径检查先于构建；永远不输出 cc-connect 生成配置。
-    cc_config = Path(args.cc_config).expanduser().resolve()
     sys.path.insert(0, str(Path(__file__).parent))
     from runtime import credential_environment
     python = profile.get('python', sys.executable)
@@ -269,7 +256,7 @@ def stage(args, *, reuse=False):
         raise DeploymentError('deployment Python is unavailable')
     settings = {'revision': revision, 'home': str(home), 'python': python,
                 'data': str(home / '.local/state/ink-commons'),
-                'cc_config': str(cc_config), 'project': args.project or profile.get('project', 'yu-xing-yi-codex'), 'environment': extra_env,
+                'environment': extra_env,
                 'config_source': str(config_source)}
     if profile_path:
         settings['profile_path'] = str(Path(profile_path).expanduser().resolve())
@@ -281,10 +268,17 @@ def stage(args, *, reuse=False):
     credentials = getattr(args, 'credentials', None) or profile.get('credentials')
     if credentials:
         settings['credentials'] = str(Path(credentials).expanduser().resolve())
-        del settings['cc_config'], settings['project']
+    elif args.cc_config:
+        project = args.project or profile.get('project')
+        if not project:
+            raise DeploymentError('--cc-config requires an explicit --project')
+        settings['cc_config'] = str(Path(args.cc_config).expanduser().resolve())
+        settings['project'] = project
     if allowed_signers:
         settings['allowed_signers'] = allowed_signers
-    credential_environment(settings)
+    env = credential_environment(settings)
+    if config.get('cc_connect_url') and not env.get('INK_CC_CONNECT_TOKEN'):
+        raise DeploymentError('configured cc-connect provider requires a webhook token')
     if release.exists():
         verify_staged_settings(release, config, settings)
         verify_artifact(artifact, release, revision, bundled)
@@ -456,7 +450,7 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
                 raise DeploymentError('downloaded bundle does not match the main revision')
             stage(argparse.Namespace(
                 revision=revision, artifact_dir=artifact, config=str(config_path),
-                github_command=config['github_command'], cc_config=settings.get('cc_config', '~/.cc-connect/config.toml'),
+                github_command=config['github_command'], cc_config=settings.get('cc_config'),
                 project=settings.get('project'), credentials=settings.get('credentials'),
                 env=proxy_entries, allowed_signers=allowed_signers,
                 runtime_declaration=settings.get('runtime_declaration'), profile=settings.get('profile_path'),
@@ -494,16 +488,19 @@ def ink_plist(release, settings):
             'StandardErrorPath': str(data / 'stderr.log')}
 
 
-def check_cc_endpoint(config):
+def check_provider_endpoints(config):
     from urllib.parse import urlsplit
-    url = urlsplit(config.get('cc_connect_url', ''))
-    if url.scheme not in ('http', 'https') or url.hostname not in ('127.0.0.1', '::1', 'localhost') or not url.port:
-        raise DeploymentError('cc_connect_url must identify a local cc-connect endpoint with a port')
-    try:
-        with socket.create_connection((url.hostname, url.port), timeout=2):
-            pass
-    except OSError:
-        raise DeploymentError('cc-connect endpoint unavailable; check the externally managed service') from None
+    for key in ('cc_connect_url', 'http_provider_url'):
+        if not config.get(key):
+            continue
+        url = urlsplit(config[key])
+        if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password:
+            raise DeploymentError('invalid configured provider endpoint: ' + key)
+        try:
+            with socket.create_connection((url.hostname, url.port or (443 if url.scheme == 'https' else 80)), timeout=2):
+                pass
+        except OSError:
+            raise DeploymentError('configured provider endpoint unavailable: ' + key) from None
 
 
 def local_get(data, path, timeout=25):
@@ -589,7 +586,7 @@ def activate(args):
         raise DeploymentError('release has no App CLI')
     if not (release / 'ink').is_file() or not Path(settings['python']).is_file():
         raise DeploymentError('release runtime unavailable')
-    check_cc_endpoint(config)
+    check_provider_endpoints(config)
 
     old_loaded = loaded(domain, LABEL)
     old_plist = path.read_bytes() if path.exists() else None
@@ -638,7 +635,7 @@ def activate(args):
             time.sleep(1)
         else:
             raise DeploymentError('running revision did not match staged revision')
-        check_cc_endpoint(config)
+        check_provider_endpoints(config)
         phase = 'daemon_self_check'
         for attempt in range(3):
             try:
@@ -802,18 +799,14 @@ def status(args):
     config_path=home/'.config/ink-commons/config.json'
     if 'manifest' in locals() and manifest.is_file():
         config_path=manifest.parent/'config.json'
-    from urllib.parse import urlparse
-    endpoint=json.loads(config_path.read_text()).get('cc_connect_url','') if config_path.is_file() else ''
-    port=urlparse(endpoint).port or 9111
-    profile = read_profile(getattr(args, 'profile', None)) or active_settings.get('profile', {})
-    cc_label = profile.get('cc_label', CC_LABEL)
-    watchdog = profile.get('watchdog_label', WATCHDOG)
-    binaries={}
-    for name,path in [('system',SYSTEM_DIR/(cc_label+'.plist')),('login',home/'Library/LaunchAgents'/(cc_label+'.plist'))]:
-        if path.is_file():
-            binary=Path(plistlib.loads(path.read_bytes())['ProgramArguments'][0])
-            binaries[name]={'path':str(binary),'exists':binary.is_file()}
-    report = {'user': args.user, 'services': {}}
+    config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+    report = {'user': args.user, 'services': {LABEL: {
+        'system': loaded('system', LABEL),
+        'login': loaded('gui/' + str(account.pw_uid), LABEL),
+    }}, 'providers': {
+        'cc-connect': bool(config.get('cc_connect_url')),
+        'http': bool(config.get('http_provider_url')),
+    }}
     checkouts = {}
     for mapping in getattr(args, 'checkout', []):
         repo, separator, checkout = mapping.partition('=')
@@ -821,10 +814,6 @@ def status(args):
             raise DeploymentError('checkout must have the form OWNER/REPO=DIR')
         checkouts[repo.lower()] = str(Path(checkout).expanduser().resolve())
     report['repositories'] = repository_status(data, home / '.local/lib/ink-commons/ink', checkouts)
-    for label in (LABEL, cc_label, watchdog):
-        report['services'][label] = {
-            'system': loaded('system', label),
-            'login': loaded('gui/' + str(account.pw_uid), label)}
     try:
         report['runtime'] = health(data)
     except (OSError, ValueError, IndexError):
@@ -836,6 +825,7 @@ def status(args):
         except (OSError, ValueError, DeploymentError):
             report['config_drift'] = {'status': 'invalid_declaration'}
     report['config_sha256'] = hashlib.sha256(config_path.read_bytes()).hexdigest() if config_path.is_file() else None
+    profile = read_profile(getattr(args, 'profile', None)) or active_settings.get('profile', {})
     cc_version = None
     if profile.get('cc_version_file'):
         try:
@@ -845,8 +835,8 @@ def status(args):
                               if isinstance(meta.get(key), str) and re.fullmatch(r'[a-zA-Z0-9.+_-]{1,100}', meta[key])}
         except (OSError, ValueError):
             pass
-    report['cc_connect']={'process_pids':cc_process_pids(),'port':port,
-                          'listener_pids':listener_pids(port),'binaries':binaries, 'version': cc_version}
+    if cc_version and report['providers']['cc-connect']:
+        report['cc_connect_version'] = cc_version
     print(json.dumps(report, indent=2))
 
 
@@ -863,10 +853,10 @@ def main():
         prepare.add_argument('--config', default='~/.config/ink-commons/config.json')
         prepare.add_argument('--profile', help='validated deployment profile JSON')
         prepare.add_argument('--allowed-signers', help='OpenSSH allowed_signers trust file for release signatures')
-        prepare.add_argument('--credentials', help='private JSON file with cc_connect_token and discord_token')
-        prepare.add_argument('--cc-config', default='~/.cc-connect/config.toml')
-        prepare.add_argument('--project', default=None)
-        prepare.add_argument('--github-command', default=None)
+        prepare.add_argument('--credentials', help='private JSON file for configured provider tokens')
+        prepare.add_argument('--cc-config', help='explicit legacy TOML credential source')
+        prepare.add_argument('--project', help='project in the legacy TOML credential source')
+        prepare.add_argument('--github-command', help='absolute GitHub reader CLI path')
     update = commands.add_parser('upgrade', help='prepare a published release')
     selection = update.add_mutually_exclusive_group()
     selection.add_argument('--tag', help='published build-<SHA> tag')
