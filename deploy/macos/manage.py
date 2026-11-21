@@ -219,22 +219,18 @@ def stage(args, *, reuse=False):
     return release
 
 
-def require_login_deployment():
-    if loaded('system', LABEL) or (SYSTEM_DIR / (LABEL + '.plist')).exists():
-        raise DeploymentError('legacy system service detected; migrate it separately')
-
-
 def deploy(args):
     uid = os.geteuid()
     if uid == 0:
         raise DeploymentError('deploy must run as the service user, without sudo')
-    require_login_deployment()
     home = Path.home().resolve()
     root = home / '.local/lib/ink-commons'
     with deployment_lock(root):
         entry = root / 'ink'
-        gui = 'gui/' + str(uid)
-        if entry.exists() or entry.is_symlink() or loaded(gui, LABEL):
+        plist = LABEL + '.plist'
+        if (entry.exists() or entry.is_symlink() or (SYSTEM_DIR / plist).exists()
+                or (home / 'Library/LaunchAgents' / plist).exists()
+                or loaded('system', LABEL) or loaded('gui/' + str(uid), LABEL)):
             raise DeploymentError('an Ink deployment already exists; use upgrade')
         artifact = Path(__file__).resolve().parent
         args.revision = bundle_revision(artifact)
@@ -262,9 +258,8 @@ def upgrade():
         raise DeploymentError('upgrade must run as the service user, without sudo')
     root = Path.home().resolve() / '.local/lib/ink-commons'
     entry = root / 'ink'
-    require_login_deployment()
     if not entry.is_symlink():
-        raise DeploymentError('upgrade requires an existing login deployment')
+        raise DeploymentError('upgrade requires an existing Ink deployment')
     with deployment_lock(root):
         upgrade_system(root, entry)
 
@@ -296,7 +291,10 @@ def upgrade_system(root, entry):
     if not re.fullmatch(r'[0-9a-f]{40}', revision):
         raise DeploymentError('GitHub did not return a valid main revision')
     target = releases / revision
-    if target == current:
+    if (target == current and loaded('system', LABEL)
+            and (SYSTEM_DIR / (LABEL + '.plist')).is_file()
+            and not (Path(settings['home']) / 'Library/LaunchAgents' / (LABEL + '.plist')).exists()
+            and not loaded('gui/' + str(os.geteuid()), LABEL)):
         try:
             running = health(settings['data'])
         except (OSError, ValueError, IndexError, DeploymentError):
@@ -344,12 +342,13 @@ def activate_staged(release):
     activate(argparse.Namespace(user=pwd.getpwuid(os.geteuid()).pw_name, release=release))
 
 
-def ink_plist(release, settings):
+def ink_plist(release, settings, user):
     data = Path(settings['data'])
     env = {'HOME': settings['home'],
            'PATH': str(Path(settings['home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'}
     env.update(parse_env([key + '=' + value for key, value in settings.get('environment', {}).items()]))
-    return {'Label': LABEL, 'ProgramArguments': [settings['python'], str(release / 'runtime.py')],
+    return {'Label': LABEL, 'UserName': user,
+            'ProgramArguments': [settings['python'], str(release / 'runtime.py')],
             'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30,
             'ExitTimeOut': 45, 'EnvironmentVariables': env,
             'StandardOutPath': str(data / 'stdout.log'),
@@ -398,11 +397,36 @@ def loaded(domain, label):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
+def run_as_admin(args):
+    # A snapshot or a health check can outlast the sudo timestamp.
+    return run(['/usr/bin/sudo', '--', *args])
+
+
+@contextmanager
+def system_activation_lock():
+    # The root-owned directory has a shared inode across service accounts.
+    # Locking it avoids a user-writable or replaceable lock file.
+    descriptor = os.open(SYSTEM_DIR, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise DeploymentError('another system Ink activation is running') from None
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def install_system_plist(path, source):
+    run_as_admin(['/usr/bin/install', '-S', '-o', 'root', '-g', 'wheel', '-m', '0644', source, path])
+
+
 def unload(domain, label, timeout=45):
     if not loaded(domain,label):
         return
     try:
-        run(['/bin/launchctl','bootout',domain+'/'+label])
+        launchctl = run_as_admin if domain == 'system' else run
+        launchctl(['/bin/launchctl', 'bootout', domain + '/' + label])
     except subprocess.CalledProcessError:
         # 服务也可能在状态读取与 bootout 之间自行退出。
         if not loaded(domain,label):
@@ -414,6 +438,21 @@ def unload(domain, label, timeout=45):
         if time.monotonic() >= deadline:
             raise DeploymentError('service did not stop before deadline: '+label)
         time.sleep(0.1)
+
+
+def restore_launchd_service(domain, path, was_loaded, was_disabled, *, settings_changed=False):
+    restart = was_loaded and not loaded(domain, LABEL)
+    launchctl = run_as_admin if domain == 'system' else run
+    target = domain + '/' + LABEL
+    try:
+        if restart:
+            if was_disabled:
+                launchctl(['/bin/launchctl', 'enable', target])
+            launchctl(['/bin/launchctl', 'bootstrap', domain, path])
+    finally:
+        # A loaded service can be disabled, but a disabled service cannot be bootstrapped.
+        if was_disabled and (restart or settings_changed):
+            launchctl(['/bin/launchctl', 'disable', target])
 
 
 def validate_state_directory(data, home, uid):
@@ -433,7 +472,12 @@ def switch_entry(entry, target):
 def activate(args):
     account = pwd.getpwnam(args.user)
     if os.geteuid() == 0 or os.geteuid() != account.pw_uid:
-        raise DeploymentError('activate must run as the non-root login service user')
+        raise DeploymentError('activate must run as the service user, without sudo')
+    with system_activation_lock():
+        activate_system(args, account)
+
+
+def activate_system(args, account):
     home = Path(account.pw_dir).resolve()
     root = home / '.local/lib/ink-commons'
     release = Path(args.release).resolve()
@@ -444,10 +488,9 @@ def activate(args):
         raise DeploymentError('release home or revision differs from the deployment manifest')
     data = Path(settings['data'])
     validate_state_directory(data, home, account.pw_uid)
-    require_login_deployment()
-    domain = 'gui/' + str(account.pw_uid)
-    run(['/bin/launchctl', 'print', domain], stdout=subprocess.DEVNULL)
-    path = home / 'Library/LaunchAgents' / (LABEL + '.plist')
+    gui = 'gui/' + str(account.pw_uid)
+    path = SYSTEM_DIR / (LABEL + '.plist')
+    agent_path = home / 'Library/LaunchAgents' / path.name
     config = json.loads((release / 'config.json').read_text())
     if not config.get('github_command') or not Path(config['github_command']).is_file():
         raise DeploymentError('release has no App CLI')
@@ -455,12 +498,23 @@ def activate(args):
         raise DeploymentError('release runtime unavailable')
     check_provider_endpoints(config)
 
-    old_loaded = loaded(domain, LABEL)
+    old_loaded = loaded('system', LABEL)
+    agent_loaded = loaded(gui, LABEL)
     old_plist = path.read_bytes() if path.exists() else None
-    if old_loaded and old_plist is None:
+    agent_plist = agent_path.read_bytes() if agent_path.exists() else None
+    if (old_loaded and old_plist is None) or (agent_loaded and agent_plist is None):
         raise DeploymentError('loaded Ink service has no restorable plist')
-    old_mode = stat.S_IMODE(path.stat().st_mode) if old_plist is not None else 0o600
-    old_disabled = disabled(domain, LABEL)
+    if old_plist is not None and plistlib.loads(old_plist).get('UserName') != args.user:
+        raise DeploymentError('system Ink service belongs to a different user')
+    if old_loaded and agent_loaded:
+        raise DeploymentError('both system and login Ink services are loaded')
+    agent_mode = stat.S_IMODE(agent_path.stat().st_mode) if agent_plist is not None else 0o600
+    old_disabled = disabled('system', LABEL)
+    agent_disabled = agent_loaded and disabled(gui, LABEL)
+    try:
+        run(['/usr/bin/sudo', '-v'])
+    except subprocess.CalledProcessError:
+        raise DeploymentError('administrator authorization is required to activate the LaunchDaemon') from None
     backup = root / 'backups' / str(time.time_ns())
     backup.mkdir(parents=True, mode=0o700)
     print('Backup:', backup, flush=True)
@@ -470,15 +524,26 @@ def activate(args):
         (backup / 'ink').symlink_to(old_link)
     elif entry.exists():
         shutil.copy2(entry, backup / 'ink')
+    system_backup = backup / 'system' / path.name
     if old_plist is not None:
-        atomic(backup / path.name, old_plist)
+        atomic(system_backup, old_plist)
+    if agent_plist is not None:
+        atomic(backup / 'login' / agent_path.name, agent_plist)
+    candidate_plist = backup / 'candidate' / path.name
+    atomic(candidate_plist, plistlib.dumps(ink_plist(release, settings, args.user)))
     gate = release / 'enabled'
     gate_was_enabled = gate.exists()
     snapshot = backup / 'state'
     candidate_started = False
+    system_changed = False
+    agent_removed = False
     phase = 'stop_old_service'
     try:
-        unload(domain, LABEL)
+        if agent_plist is not None:
+            agent_path.unlink()
+            agent_removed = True
+            unload(gui, LABEL)
+        unload('system', LABEL)
         phase = 'snapshot'
         with open(data / 'state.json.lock', 'a') as lock:
             os.fchmod(lock.fileno(), 0o600)
@@ -486,10 +551,11 @@ def activate(args):
             shutil.copytree(data, snapshot, ignore=shutil.ignore_patterns('ink.sock', 'state.json.lock', '*.log'))
         phase = 'start_candidate'
         gate.unlink(missing_ok=True)
-        atomic(path, plistlib.dumps(ink_plist(release, settings)))
-        run(['/bin/launchctl', 'enable', domain + '/' + LABEL])
+        system_changed = True
+        install_system_plist(path, candidate_plist)
+        run_as_admin(['/bin/launchctl', 'enable', 'system/' + LABEL])
         candidate_started = True
-        run(['/bin/launchctl', 'bootstrap', domain, path])
+        run_as_admin(['/bin/launchctl', 'bootstrap', 'system', path])
         phase = 'verify_revision'
         for _ in range(30):
             try:
@@ -517,7 +583,7 @@ def activate(args):
         try:
             if candidate_started:
                 gate.unlink(missing_ok=True)
-                unload(domain, LABEL)
+                unload('system', LABEL)
                 with open(data / 'state.json.lock', 'a') as lock:
                     acquire_state_lock(lock)
                     for item in data.iterdir():
@@ -533,15 +599,18 @@ def activate(args):
                     atomic(entry, (backup / 'ink').read_bytes(), stat.S_IMODE((backup / 'ink').stat().st_mode))
                 else:
                     entry.unlink(missing_ok=True)
-            if old_plist is None:
-                path.unlink(missing_ok=True)
-            else:
-                atomic(path, old_plist, old_mode)
-            run(['/bin/launchctl', 'disable' if old_disabled else 'enable', domain + '/' + LABEL])
+            if system_changed:
+                if old_plist is None:
+                    run_as_admin(['/bin/rm', '-f', path])
+                else:
+                    install_system_plist(path, system_backup)
             if gate_was_enabled:
                 atomic(gate, b'ready\n')
-            if old_loaded and not loaded(domain, LABEL):
-                run(['/bin/launchctl', 'bootstrap', domain, path])
+            if agent_removed:
+                atomic(agent_path, agent_plist, agent_mode)
+            restore_launchd_service('system', path, old_loaded, old_disabled,
+                                    settings_changed=system_changed)
+            restore_launchd_service(gui, agent_path, agent_loaded, agent_disabled)
         except Exception as recovery_error:
             print(json.dumps({'deployment': 'rollback_incomplete', 'phase': phase,
                               'revision': release.name, 'backup': str(backup)}), flush=True)
@@ -550,6 +619,13 @@ def activate(args):
                           'revision': release.name, 'backup': str(backup)}), flush=True)
         raise
     print('Activated revision:', release.name, 'gate: open')
+
+
+def activate_from_cli(args):
+    if os.geteuid() == 0:
+        raise DeploymentError('activate must run as the service user, without sudo')
+    with deployment_lock(Path.home().resolve() / '.local/lib/ink-commons'):
+        activate(args)
 
 
 def status(args):
@@ -611,7 +687,7 @@ def main():
         if args.action == 'upgrade':
             upgrade()
         else:
-            {'stage': stage, 'deploy': deploy, 'activate': activate, 'status': status}[args.action](args)
+            {'stage': stage, 'deploy': deploy, 'activate': activate_from_cli, 'status': status}[args.action](args)
     except DeploymentError as error:
         print('Deployment failed:', str(error), file=sys.stderr)
         return 1
