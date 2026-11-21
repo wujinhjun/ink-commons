@@ -101,7 +101,11 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.delivering, id); s.mu.Unlock() }()
 	if prepared.Session == "" {
-		session, prepareErr := executor.Prepare(ctx, prepared, d)
+		preparation := d
+		if d.RequireSameChannel {
+			preparation.ReviewPlacement = channelCheck.placement
+		}
+		session, prepareErr := executor.Prepare(ctx, prepared, preparation)
 		prepared.Session = session
 		if prepareErr == nil {
 			prepareErr = execution.ValidateDestination(s.providers, prepared, false)

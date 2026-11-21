@@ -9,14 +9,16 @@ import (
 )
 
 type reviewChannelBinding struct {
-	taskID string
-	route  execution.Route
-	source execution.Route
+	taskID      string
+	route       execution.Route
+	source      execution.Route
+	reuseThread bool
 }
 
 type reviewChannelCheck struct {
-	binding reviewChannelBinding
-	err     error
+	binding   reviewChannelBinding
+	placement *execution.ReviewPlacement
+	err       error
 }
 
 func reviewChannelDestination(w *Work) reviewChannelBinding {
@@ -28,10 +30,10 @@ func reviewChannelDestination(w *Work) reviewChannelBinding {
 	if w.Task.Handoff != nil {
 		route = w.Task.Handoff.Assignee.Route
 	}
-	if !delivery.RequireSameChannel || route == nil || (route.Parent == "" && route.Session == "") || delivery.Source == nil {
+	if !delivery.RequireSameChannel || route == nil || delivery.Source == nil {
 		return reviewChannelBinding{}
 	}
-	return reviewChannelBinding{w.Task.ID, *route, *delivery.Source}
+	return reviewChannelBinding{w.Task.ID, *route, *delivery.Source, delivery.ReuseDevelopmentThread}
 }
 
 // Resolve Discord channels without holding the state lock. The caller compares
@@ -56,12 +58,14 @@ func (s *Service) checkReviewChannel(ctx context.Context, id string) (reviewChan
 		return check, err
 	}
 	provider, ok := s.providers[binding.route.Provider].(interface {
-		CheckReviewChannel(context.Context, execution.Route, execution.Route) error
+		ResolveReviewPlacement(context.Context, execution.Route, execution.Delivery) (*execution.ReviewPlacement, error)
 	})
 	if !ok {
 		check.err = fmt.Errorf("provider does not support require_same_channel")
 	} else {
-		check.err = provider.CheckReviewChannel(ctx, binding.route, binding.source)
+		check.placement, check.err = provider.ResolveReviewPlacement(ctx, binding.route, execution.Delivery{
+			RequireSameChannel: true, ReuseDevelopmentThread: binding.reuseThread, Source: &binding.source,
+		})
 	}
 	return check, nil
 }

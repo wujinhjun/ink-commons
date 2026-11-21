@@ -15,10 +15,12 @@ import (
 func TestRequireSameReviewChannel(t *testing.T) {
 	cases := []struct {
 		name, parent, session, wantSession, wantError string
-		reuse, allocate, disabled                     bool
+		reuse, allocate, disabled, restoreAccess      bool
 	}{
 		{name: "default placement", wantSession: "discord:999", allocate: true},
 		{name: "reuse developer thread", reuse: true, wantSession: "discord:123"},
+		{name: "retry default placement after access restored", wantSession: "discord:999", allocate: true, restoreAccess: true, wantError: "read development conversation"},
+		{name: "retry thread reuse after access restored", reuse: true, wantSession: "discord:123", restoreAccess: true, wantError: "reuse development thread"},
 		{name: "same parent", parent: "77", wantSession: "discord:999", allocate: true},
 		{name: "same channel session", session: "discord:456:22", wantSession: "discord:456:22"},
 		{name: "cross-channel parent", parent: "88", wantError: "expected development channel 77, got review channel 88"},
@@ -29,12 +31,18 @@ func TestRequireSameReviewChannel(t *testing.T) {
 	for _, mode := range []string{"legacy", "cooperative"} {
 		for _, tc := range cases {
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
-				var allocations, deliveries int
+				var allocations, deliveries, sourceReads int
+				sourceReadable := !tc.restoreAccess
 				client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
 					out := httptest.NewRecorder()
 					switch r.Method + " " + r.URL.Path {
 					case "GET /api/v10/channels/123":
-						reply(out, 200, map[string]any{"id": "123", "type": 11, "parent_id": "77", "name": "Development"})
+						sourceReads++
+						if sourceReadable {
+							reply(out, 200, map[string]any{"id": "123", "type": 11, "parent_id": "77", "name": "Development"})
+						} else {
+							out.WriteHeader(http.StatusForbidden)
+						}
 					case "GET /api/v10/channels/77":
 						reply(out, 200, map[string]any{"id": "77", "type": 0})
 					case "GET /api/v10/channels/456":
@@ -111,7 +119,26 @@ func TestRequireSameReviewChannel(t *testing.T) {
 						w.Task.Attempts != 0 || w.Task.Delivery != "pending" {
 						t.Fatalf("invalid route was dispatched or lost its diagnostic: %+v", w.Task)
 					}
-					return
+					if !tc.restoreAccess {
+						return
+					}
+					if sourceReads != 1 {
+						t.Fatalf("first dispatch attempted %d source reads", sourceReads)
+					}
+					sourceReadable = true
+					if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
+						t.Fatal(err)
+					}
+					w = notificationWork(t, s, repo, p)
+					if sourceReads != 2 {
+						t.Fatalf("retry resolved the source more than once: %d total reads", sourceReads)
+					}
+					if mode == "legacy" && (w.Task.Attempts != 1 || w.Task.Delivery != "accepted" || w.Task.Error != "") {
+						t.Fatalf("retry did not start the first legacy attempt: %+v", w.Task)
+					}
+					if mode == "cooperative" && (w.Task.Handoff.Wake.Attempts != 1 || w.Task.Handoff.Wake.Error != "") {
+						t.Fatalf("retry did not start the first cooperative wake: %+v", w.Task.Handoff.Wake)
+					}
 				}
 				if deliveries != 1 || allocations > 1 || (allocations == 1) != tc.allocate || w.Reviewer.Route.Session != tc.wantSession {
 					t.Fatalf("delivery=%d allocation=%d reviewer=%+v", deliveries, allocations, w.Reviewer)

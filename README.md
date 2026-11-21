@@ -210,7 +210,7 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
 
 `reuse_development_thread` 让**尚未分配会话**的 reviewer 复用开发 thread 的 Discord ID，同时保留 reviewer 的 project 和 GitHub 身份；自动复用要求 reviewer project 与 developer project 不同，避免共享同一个 Agent 上下文。已有 reviewer 会话保持原位。`ink review --session` 仍选择指定的已有会话；单条 PR 的显式 `--parent` 仍创建独立审查 thread。关闭此开关时保留原来的独立 thread 行为。
 
-`require_same_channel` 要求自动派审与开发会话位于同一个 Discord 文本频道。显式传入 `--parent` 或 `--session` 时，同砚在派发前读取频道信息。目标跨频道或频道无法验证时，任务保留为待派发，诊断会显示错误。同一频道内可以新建或指定 Review thread，也可以搭配 `reuse_development_thread` 复用开发 thread。此开关需要已关联的开发会话和能够读取相关频道的 `INK_DISCORD_TOKEN`。
+`require_same_channel` 要求自动派审与开发会话位于同一个 Discord 文本频道。同砚在预留执行或创建会话前读取开发来源，并校验显式传入的 `--parent` 或 `--session`。目标跨频道或频道无法验证时，任务保留为待派发，诊断会显示错误。同一频道内可以新建或指定 Review thread，也可以搭配 `reuse_development_thread` 复用开发 thread。此开关需要已关联的开发会话和能够读取相关频道的 `INK_DISCORD_TOKEN`。
 
 `context.thread_history` 允许读取工作项绑定的开发 thread 中的原始用户和 bot 消息，不依赖 developer 的总结，也不共享其他 Agent 的内部思考或会话文件。派审 prompt 会要求 reviewer 先运行：
 

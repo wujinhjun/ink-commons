@@ -497,7 +497,11 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 			task.Error = "invalid preparation context: " + err.Error()
 			return s.saveDelivery(id, work)
 		}
-		session, err := executor.Prepare(ctx, *route, delivery)
+		preparation := delivery
+		if delivery.RequireSameChannel {
+			preparation.ReviewPlacement = channelCheck.placement
+		}
+		session, err := executor.Prepare(ctx, *route, preparation)
 		if err != nil {
 			task.Error = "prepare destination: " + err.Error()
 			return s.saveDelivery(id, work)

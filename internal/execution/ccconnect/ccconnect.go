@@ -67,35 +67,27 @@ func (e *Executor) Prepare(ctx context.Context, route execution.Route, task exec
 	if route.Session != "" {
 		return route.Session, nil
 	}
-	if task.ReuseDevelopmentThread && route.Parent == "" {
-		if err := e.ValidatePreparation(route, task); err != nil {
-			return "", err
-		}
-		id, err := e.publicDevelopmentThread(ctx, *task.Source)
+	placement := task.ReviewPlacement
+	if placement == nil {
+		var err error
+		placement, err = e.resolveReviewPlacement(ctx, route, task)
 		if err != nil {
-			return "", fmt.Errorf("reuse development thread: %w", err)
-		}
-		return "discord:" + id, nil
-	}
-	parent := route.Parent
-	name := fmt.Sprintf("Review %s #%d", task.Repository, task.Number)
-	if source := task.Source; source != nil && source.Provider == Name {
-		sourceParent, sourceName, err := e.developmentConversation(ctx, source.Session)
-		if err != nil && parent == "" {
 			return "", err
 		}
-		if err == nil {
-			if parent == "" {
-				parent = sourceParent
-			}
-			// Keep the PR identifier even when a long Unicode title must be truncated.
-			prefix := fmt.Sprintf("Review %s #%d · ", task.Repository, task.Number)
-			if len([]rune(prefix)) > 90 {
-				prefix = fmt.Sprintf("Review #%d · ", task.Number)
-			}
-			title := []rune(sourceName)
-			name = prefix + string(title[:min(len(title), 100-len([]rune(prefix)))])
+	}
+	if placement.Session != "" {
+		return placement.Session, nil
+	}
+	parent := placement.Parent
+	name := fmt.Sprintf("Review %s #%d", task.Repository, task.Number)
+	if placement.DevelopmentName != "" {
+		// Keep the PR identifier even when a long Unicode title must be truncated.
+		prefix := fmt.Sprintf("Review %s #%d · ", task.Repository, task.Number)
+		if len([]rune(prefix)) > 90 {
+			prefix = fmt.Sprintf("Review #%d · ", task.Number)
 		}
+		title := []rune(placement.DevelopmentName)
+		name = prefix + string(title[:min(len(title), 100-len([]rune(prefix)))])
 	}
 	if !snowflake(parent) {
 		return "", fmt.Errorf("new review session needs a Discord development conversation or an explicit parent")
@@ -153,27 +145,58 @@ func (e *Executor) ValidatePreparation(route execution.Route, task execution.Del
 	return nil
 }
 
-// CheckReviewChannel validates an explicit destination before any execution or
-// allocation is reserved. The default allocation already follows the source.
-func (e *Executor) CheckReviewChannel(ctx context.Context, route execution.Route, source execution.Route) error {
-	if err := e.ValidatePreparation(route, execution.Delivery{RequireSameChannel: true, Source: &source}); err != nil {
-		return err
+// ResolveReviewPlacement performs Discord reads before reserving an execution or
+// an allocation. Prepare uses the result directly when the constraint is enabled.
+func (e *Executor) ResolveReviewPlacement(ctx context.Context, route execution.Route, task execution.Delivery) (*execution.ReviewPlacement, error) {
+	if err := e.ValidatePreparation(route, task); err != nil {
+		return nil, err
 	}
-	expected, _, err := e.developmentConversation(ctx, source.Session)
+	if route.Session == "" {
+		return e.resolveReviewPlacement(ctx, route, task)
+	}
+	expected, _, err := e.developmentConversation(ctx, task.Source.Session)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	actual := route.Parent
-	if route.Session != "" {
-		actual, err = e.reviewSessionChannel(ctx, route.Session)
-		if err != nil {
-			return err
-		}
+	actual, err := e.reviewSessionChannel(ctx, route.Session)
+	if err != nil {
+		return nil, err
 	}
 	if actual != expected {
-		return fmt.Errorf("require_same_channel: expected development channel %s, got review channel %s", expected, actual)
+		return nil, fmt.Errorf("require_same_channel: expected development channel %s, got review channel %s", expected, actual)
 	}
-	return nil
+	return &execution.ReviewPlacement{Session: route.Session}, nil
+}
+
+func (e *Executor) resolveReviewPlacement(ctx context.Context, route execution.Route, task execution.Delivery) (*execution.ReviewPlacement, error) {
+	if task.ReuseDevelopmentThread && route.Parent == "" {
+		if err := e.ValidatePreparation(route, task); err != nil {
+			return nil, err
+		}
+		id, err := e.publicDevelopmentThread(ctx, *task.Source)
+		if err != nil {
+			return nil, fmt.Errorf("reuse development thread: %w", err)
+		}
+		return &execution.ReviewPlacement{Session: "discord:" + id}, nil
+	}
+	placement := &execution.ReviewPlacement{Parent: route.Parent}
+	if source := task.Source; source != nil && source.Provider == Name {
+		parent, name, err := e.developmentConversation(ctx, source.Session)
+		if err != nil {
+			if task.RequireSameChannel || route.Parent == "" {
+				return nil, err
+			}
+			return placement, nil
+		}
+		if task.RequireSameChannel && route.Parent != "" && route.Parent != parent {
+			return nil, fmt.Errorf("require_same_channel: expected development channel %s, got review channel %s", parent, route.Parent)
+		}
+		if placement.Parent == "" {
+			placement.Parent = parent
+		}
+		placement.DevelopmentName = name
+	}
+	return placement, nil
 }
 
 func (e *Executor) reviewSessionChannel(ctx context.Context, session string) (string, error) {
