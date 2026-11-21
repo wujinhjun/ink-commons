@@ -19,6 +19,9 @@ func (s *Service) exportConfiguration(w http.ResponseWriter, r *http.Request) {
 	global := ConfigValues{}
 	repositories := map[string]ConfigValues{}
 	for _, record := range records {
+		if record.Scope == legacyConfigScope {
+			continue
+		}
 		if record.Values == nil {
 			record.Values = ConfigValues{}
 		}
