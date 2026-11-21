@@ -21,10 +21,11 @@ import (
 )
 
 type taskCredential struct {
-	TaskID string           `json:"task_id"`
-	Token  string           `json:"token"`
-	Route  *execution.Route `json:"route,omitempty"`
-	Login  string           `json:"github_login,omitempty"`
+	TaskID   string           `json:"task_id"`
+	Token    string           `json:"token"`
+	Route    *execution.Route `json:"route,omitempty"`
+	Login    string           `json:"github_login,omitempty"`
+	Rejected bool             `json:"rejected,omitempty"`
 }
 
 func taskCommand(args []string) error {
@@ -68,6 +69,7 @@ func taskCommand(args []string) error {
 	path := "http://ink/v1/tasks/" + *taskID
 	method := http.MethodGet
 	var body io.Reader
+	credentialPath := ""
 	if action != "status" {
 		file := *claimFile
 		if file == "" {
@@ -81,6 +83,7 @@ func taskCommand(args []string) error {
 			}
 			file = filepath.Join(folder, *taskID+".json")
 		}
+		credentialPath = file
 		credential, err := readTaskCredential(file)
 		if errors.Is(err, os.ErrNotExist) && action == "claim" {
 			route := routeFromEnv(os.Getenv)
@@ -121,7 +124,25 @@ func taskCommand(args []string) error {
 			if explicitRoute != nil {
 				current = *explicitRoute
 			}
-			if credential.Route != nil && (current.Provider != credential.Route.Provider || current.Target != credential.Route.Target || current.Session != credential.Route.Session) {
+			if credential.Rejected {
+				switch {
+				case explicitRoute != nil:
+					credential.Route = explicitRoute
+					credential.Login = ""
+				case current.Valid(false):
+					credential.Route = &current
+					credential.Login = ""
+				case *login != "":
+					credential.Route = nil
+					credential.Login = *login
+				default:
+					return errors.New("previous claim was rejected; supply the assigned route with --provider/--target/--session or --github-login")
+				}
+				credential.Rejected = false
+				if err := replaceTaskCredential(file, credential); err != nil {
+					return fmt.Errorf("record corrected claim route: %w", err)
+				}
+			} else if credential.Route != nil && (current.Provider != credential.Route.Provider || current.Target != credential.Route.Target || current.Session != credential.Route.Session) {
 				return errors.New("claim file belongs to another agent route")
 			}
 		}
@@ -164,6 +185,14 @@ func taskCommand(args []string) error {
 			Error string `json:"error"`
 		}
 		_ = json.Unmarshal(data, &problem)
+		if action == "claim" && res.StatusCode == http.StatusForbidden {
+			if credentialPath != "" {
+				if err := markTaskCredentialRejected(credentialPath, *taskID); err != nil {
+					return fmt.Errorf("daemon HTTP %d: %s; failed to record rejected claim: %w", res.StatusCode, problem.Error, err)
+				}
+			}
+			return fmt.Errorf("daemon HTTP %d: %s; the claim was rejected and can be retried with the assigned route or --github-login", res.StatusCode, problem.Error)
+		}
 		return fmt.Errorf("daemon HTTP %d: %s", res.StatusCode, problem.Error)
 	}
 	_, err = os.Stdout.Write(data)
@@ -173,13 +202,10 @@ func taskCommand(args []string) error {
 // explicitTaskRoute lets runtimes that do not inject CC_PROJECT/CC_SESSION_KEY
 // bind a claim to the route carried by the wake prompt.
 func explicitTaskRoute(provider, target, session string) (*execution.Route, error) {
-	provider = strings.TrimSpace(provider)
-	target = strings.TrimSpace(target)
-	session = strings.TrimSpace(session)
-	if provider == "" && target == "" && session == "" {
+	if strings.TrimSpace(provider) == "" && strings.TrimSpace(target) == "" && strings.TrimSpace(session) == "" {
 		return nil, nil
 	}
-	if provider == "" || target == "" || session == "" {
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(target) == "" || strings.TrimSpace(session) == "" {
 		return nil, errors.New("--provider, --target and --session must be provided together")
 	}
 	route := execution.Route{Provider: provider, Target: target, Session: session}
@@ -187,6 +213,47 @@ func explicitTaskRoute(provider, target, session string) (*execution.Route, erro
 		return nil, errors.New("explicit task route is invalid")
 	}
 	return &route, nil
+}
+
+func markTaskCredentialRejected(path, taskID string) error {
+	credential, err := readTaskCredential(path)
+	if err != nil {
+		return err
+	}
+	if credential.TaskID != taskID || len(credential.Token) < 32 {
+		return errors.New("claim file does not belong to this task")
+	}
+	credential.Rejected = true
+	return replaceTaskCredential(path, credential)
+}
+
+func replaceTaskCredential(path string, credential taskCredential) error {
+	data, err := json.Marshal(credential)
+	if err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return err
+	}
+	name := temp.Name()
+	defer os.Remove(name)
+	if err := temp.Chmod(0600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(append(data, '\n')); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 func readTaskCredential(path string) (taskCredential, error) {

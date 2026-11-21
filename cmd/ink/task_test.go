@@ -183,3 +183,77 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 		t.Fatal("partial explicit route accepted")
 	}
 }
+
+func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
+	dir, err := os.MkdirTemp("/private/tmp", "ink-task-reject-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	t.Setenv("INK_DATA_DIR", dir)
+	t.Setenv("INK_PROVIDER", "")
+	t.Setenv("CC_PROJECT", "wrong-project")
+	t.Setenv("CC_SESSION_KEY", "discord:999")
+	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan map[string]any, 2)
+	attempts := 0
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		input := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+		}
+		requests <- input
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"error":"claim route does not match task assignee"}`)
+			return
+		}
+		io.WriteString(w, `{"first":true,"task":{"handoff":{"state":"claimed"}}}`)
+	})}
+	go server.Serve(ln)
+	defer server.Close()
+
+	id := uuid.NewString()
+	if err := taskCommand([]string{"claim", "--task", id}); err == nil {
+		t.Fatal("rejected environment claim was accepted")
+	}
+	first := <-requests
+	firstRoute, _ := first["route"].(map[string]any)
+	if firstRoute["target"] != "wrong-project" {
+		t.Fatalf("unexpected first route: %#v", firstRoute)
+	}
+	credential, err := readTaskCredential(filepath.Join(dir, "claims", id+".json"))
+	if err != nil || !credential.Rejected {
+		t.Fatalf("rejected claim was not recorded: %#v %v", credential, err)
+	}
+
+	if err := taskCommand([]string{
+		"claim", "--task", id,
+		"--provider", "cc-connect", "--target", "correct-project", "--session", "discord:123",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := <-requests
+	secondRoute, _ := second["route"].(map[string]any)
+	if second["token"] != first["token"] || secondRoute["target"] != "correct-project" || secondRoute["session"] != "discord:123" {
+		t.Fatalf("corrected claim did not reuse the credential: first=%#v second=%#v", first, second)
+	}
+	credential, err = readTaskCredential(filepath.Join(dir, "claims", id+".json"))
+	if err != nil || credential.Rejected || credential.Route == nil || credential.Route.Target != "correct-project" {
+		t.Fatalf("corrected credential not persisted: %#v %v", credential, err)
+	}
+}
+
+func TestExplicitTaskRoutePreservesExactValues(t *testing.T) {
+	route, err := explicitTaskRoute(" cc-connect ", " target ", " discord:123 ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Provider != " cc-connect " || route.Target != " target " || route.Session != " discord:123 " {
+		t.Fatalf("explicit route was normalized: %#v", route)
+	}
+}
