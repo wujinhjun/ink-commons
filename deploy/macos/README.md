@@ -17,7 +17,18 @@ yuxingyi --profile inspect -R wujinhjun/ink-commons release download --pattern '
 
 ## 已有部署
 
-从任意目录可运行 `~/.local/lib/ink-commons/ink upgrade`。暂存的部署文件先按 GitHub Release 校验，校验后再切换同砚。需要手动指定版本时，从对应 Release 执行 `manage.py stage --revision "$(cat REVISION)" --artifact-dir .`，然后以登录用户执行 `manage.py activate --release DIR --user "$(id -un)"`。
+升级以 GitHub Release 为准。默认选择 stable channel，可显式指定 `--channel preview` 或 `--tag build-<SHA>`。默认下载、校验并暂存，切换需要 `--apply`。`--dry-run` 只打印版本计划。
+
+```sh
+ink upgrade --channel stable --dry-run
+ink upgrade --tag build-<SHA>
+ink upgrade --tag build-<SHA> --apply
+ink rollback --tag build-<previous-SHA> --dry-run
+```
+
+明确确认目标版本兼容现有 SQLite 后，可省略 rollback 的 `--dry-run` 切换。回滚保留最新状态，激活自检失败时会恢复原版本和切换前快照。回滚前保存最新状态。旧二进制没有新命令时，从发布包调用 `manage.py upgrade` 或 `manage.py rollback` 并传相同参数。
+
+发布包包含 SHA-256 校验清单。为 CI 配置 `INK_RELEASE_SIGNING_KEY` 可发布 OpenSSH 签名。首次安装用 `--allowed-signers` 指向通过独立渠道取得的信任文件，签名身份为 `ink-release`，命名空间为 `ink-commons`。部署会沿用信任文件；选择签名校验后，缺签名或签名错误都会终止。已发布的早期无签名版本仍可按摘要验证。
 
 若已有同砚 LaunchDaemon，升级和激活会在写入前停止。迁移前由管理员安排维护窗口，确认 cc-connect 与 watchdog 已由 personal-infra 管理，独立保留旧 plist、当前 state 和仍被引用的旧 release，再将旧同砚系统服务移出系统域。已有的系统服务与其数据留作回退依据。迁移激活使用登录域，需维持登录会话。任何仍引用旧 release 的 cc-connect 可执行文件须先迁到其独立安装目录。
 

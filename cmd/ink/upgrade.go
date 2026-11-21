@@ -9,9 +9,6 @@ import (
 )
 
 func upgradeServices(args []string) error {
-	if len(args) != 0 {
-		return errors.New("usage: ink upgrade")
-	}
 	binary, err := os.Executable()
 	if err != nil {
 		return err
@@ -31,7 +28,7 @@ func upgradeServices(args []string) error {
 	if err := json.Unmarshal(content, &settings); err != nil || !filepath.IsAbs(settings.Python) {
 		return errors.New("installed deployment has no valid Python path")
 	}
-	command := exec.Command(settings.Python, filepath.Join(release, "manage.py"), "upgrade")
+	command := exec.Command(settings.Python, append([]string{filepath.Join(release, "manage.py")}, args...)...)
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr

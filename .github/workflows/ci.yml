@@ -66,6 +66,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          INK_RELEASE_SIGNING_KEY: ${{ secrets.INK_RELEASE_SIGNING_KEY }}
         run: |
           tip=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')
           if [[ "$tip" != "$GITHUB_SHA" ]]; then
@@ -81,5 +82,13 @@ jobs:
                 --title "macOS build ${GITHUB_SHA:0:12}" --notes "Apple Silicon build of $GITHUB_SHA."
               ;;
           esac
+          if [[ -n "$INK_RELEASE_SIGNING_KEY" ]]; then
+            key=$(mktemp)
+            trap 'rm -f "$key"' EXIT
+            chmod 600 "$key"
+            printf '%s\n' "$INK_RELEASE_SIGNING_KEY" > "$key"
+            ssh-keygen -Y sign -f "$key" -n ink-commons ink-artifact/SHA256SUMS
+          fi
+          unset INK_RELEASE_SIGNING_KEY
           gh release upload "$tag" ink-artifact/* --clobber
           gh release edit "$tag" --draft=false --latest

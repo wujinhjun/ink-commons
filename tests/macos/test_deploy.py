@@ -71,6 +71,20 @@ class ArtifactStageTest(unittest.TestCase):
         with self.assertRaisesRegex(m.DeploymentError, 'release already exists'):
             self.stage()
 
+    def test_signature_rejects_changed_manifest(self):
+        trust = self.home / 'allowed_signers'
+        key = self.home / 'test-key'
+        m.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', key])
+        trust.write_text('ink-release ' + key.with_suffix('.pub').read_text())
+        manifest = self.artifact / 'SHA256SUMS'
+        manifest.write_bytes(b'approved manifest')
+        m.run(['/usr/bin/ssh-keygen', '-Y', 'sign', '-f', key, '-n', 'ink-commons', manifest],
+              capture_output=True)
+        m.verify_signature(self.artifact, trust)
+        manifest.write_bytes(b'changed manifest')
+        with self.assertRaisesRegex(m.DeploymentError, 'signature verification failed'):
+            m.verify_signature(self.artifact, trust)
+
     def test_rejects_tampered_binary(self):
         self.write_artifact(self.revision)
         (self.artifact / 'ink').write_bytes(b'tampered')
@@ -202,7 +216,7 @@ class UpgradeTest(unittest.TestCase):
                 self.assertEqual(kwargs['env']['NODE_OPTIONS'], '--use-env-proxy')
                 self.assertEqual(kwargs['env']['PATH'], '/usr/bin:/bin')
                 if args[5] == 'api':
-                    return SimpleNamespace(stdout=self.target.name.encode())
+                    return SimpleNamespace(stdout=('build-' + self.target.name).encode())
                 directory = Path(args[args.index('--dir') + 1])
                 (directory / 'REVISION').write_text(self.target.name)
 
@@ -218,7 +232,7 @@ class UpgradeTest(unittest.TestCase):
              patch.object(m, 'run', side_effect=run), \
              patch.object(m, 'stage', side_effect=stage) as staged, \
              patch.object(m, 'activate_staged') as activate:
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         staged.assert_called_once()
         activate.assert_called_once_with(self.target)
@@ -227,31 +241,48 @@ class UpgradeTest(unittest.TestCase):
         self.assertIn('--pattern=manage.py', self.calls[1])
         self.assertIn('--pattern=runtime.py', self.calls[1])
 
+    def test_dry_run_selects_published_release_without_download_or_activation(self):
+        with patch.object(m, 'output', return_value='build-' + self.target.name) as query, \
+             patch.object(m, 'run') as run, patch.object(m, 'activate_staged') as activate:
+            m.upgrade_system(self.root, self.entry, channel='stable', dry_run=True)
+        self.assertIn('repos/' + m.REPOSITORY + '/releases/latest', query.call_args.args[0])
+        run.assert_not_called()
+        activate.assert_not_called()
+
+    def test_prepare_without_apply_does_not_activate(self):
+        self.make_staged_target()
+        manifest = self.make_published_manifest(self.target)
+        tag = 'build-' + self.target.name
+        with self.mock_manifest_download(manifest, self.target.name), \
+             patch.object(m, 'activate_staged') as activate:
+            m.upgrade_system(self.root, self.entry, tag=tag)
+        activate.assert_not_called()
+
     def test_unpublished_build_does_not_stage_or_activate(self):
         with patch.object(m, 'run', side_effect=subprocess.CalledProcessError(1, 'release download')) as run, \
-             patch.object(m, 'output', return_value=self.target.name), \
+             patch.object(m, 'select_release', return_value=('build-' + self.target.name, self.target.name)), \
              patch.object(m, 'stage') as staged:
             with self.assertRaisesRegex(m.DeploymentError, 'check the GitHub Actions publish job'):
-                m.upgrade_system(self.root, self.entry)
+                m.upgrade_system(self.root, self.entry, apply=True)
 
         run.assert_called_once()
         staged.assert_not_called()
 
     def test_healthy_current_version_needs_no_download_or_sudo(self):
         with patch.object(m, 'run') as run, \
-             patch.object(m, 'output', return_value=self.current.name), \
+             patch.object(m, 'select_release', return_value=('build-' + self.current.name, self.current.name)), \
              patch.object(m, 'health', return_value={'revision': self.current.name, 'gate': 'open'}):
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         run.assert_not_called()
 
     def test_missing_health_socket_reactivates_installed_target(self):
         manifest = self.make_published_manifest(self.current)
         with self.mock_manifest_download(manifest, self.current.name), \
-             patch.object(m, 'output', return_value=self.current.name), \
+             patch.object(m, 'select_release', return_value=('build-' + self.current.name, self.current.name)), \
              patch.object(m, 'health', side_effect=FileNotFoundError), \
              patch.object(m, 'activate_staged') as activate:
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         activate.assert_called_once_with(self.current)
 
@@ -259,9 +290,9 @@ class UpgradeTest(unittest.TestCase):
         self.make_staged_target()
         manifest = self.make_published_manifest(self.target)
         with self.mock_manifest_download(manifest, self.target.name), \
-             patch.object(m, 'output', return_value=self.target.name), \
+             patch.object(m, 'select_release', return_value=('build-' + self.target.name, self.target.name)), \
              patch.object(m, 'activate_staged') as activate:
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         activate.assert_called_once_with(self.target)
 
@@ -274,10 +305,10 @@ class UpgradeTest(unittest.TestCase):
                 original = script.read_bytes()
                 script.write_bytes(b'changed after staging')
                 with self.mock_manifest_download(manifest, self.target.name), \
-                     patch.object(m, 'output', return_value=self.target.name), \
+                     patch.object(m, 'select_release', return_value=('build-' + self.target.name, self.target.name)), \
                      patch.object(m, 'activate_staged') as activate:
                     with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: ' + name):
-                        m.upgrade_system(self.root, self.entry)
+                        m.upgrade_system(self.root, self.entry, apply=True)
                 activate.assert_not_called()
                 script.write_bytes(original)
 
@@ -294,9 +325,9 @@ class UpgradeTest(unittest.TestCase):
                 original = file.read_bytes()
                 file.write_bytes(content)
                 with patch.object(m, 'run') as run, \
-                     patch.object(m, 'output', return_value=self.target.name):
+                     patch.object(m, 'select_release', return_value=('build-' + self.target.name, self.target.name)):
                     with self.assertRaisesRegex(m.DeploymentError, diagnostic):
-                        m.upgrade_system(self.root, self.entry)
+                        m.upgrade_system(self.root, self.entry, apply=True)
                 run.assert_not_called()
                 file.write_bytes(original)
 

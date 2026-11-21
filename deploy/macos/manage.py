@@ -120,6 +120,19 @@ def bundle_revision(artifact):
     return revision
 
 
+def verify_signature(artifact, allowed_signers):
+    if not allowed_signers:
+        return
+    manifest = artifact / 'SHA256SUMS'
+    try:
+        with manifest.open('rb') as stream:
+            run(['/usr/bin/ssh-keygen', '-Y', 'verify', '-f', allowed_signers,
+                 '-I', 'ink-release', '-n', 'ink-commons', '-s', artifact / 'SHA256SUMS.sig'],
+                stdin=stream, capture_output=True)
+    except (OSError, subprocess.CalledProcessError):
+        raise DeploymentError('release checksum signature verification failed') from None
+
+
 def verify_artifact(artifact, release, revision, bundled):
     names = BUNDLE_FILES if bundled else ('ink',)
     checksums = {}
@@ -158,6 +171,12 @@ def stage(args, *, reuse=False):
         raise DeploymentError('Python 3.11.8+ required')
     artifact = Path(args.artifact_dir).expanduser() if args.artifact_dir else None
     bundled = artifact is not None and (artifact / 'REVISION').is_file()
+    allowed_signers = getattr(args, 'allowed_signers', None)
+    if allowed_signers:
+        allowed_signers = str(Path(allowed_signers).expanduser().resolve())
+        if not bundled:
+            raise DeploymentError('signature verification requires a complete release bundle')
+        verify_signature(artifact, allowed_signers)
     if bundled:
         revision = bundle_revision(artifact)
         if revision != args.revision:
@@ -186,6 +205,8 @@ def stage(args, *, reuse=False):
     if getattr(args, 'credentials', None):
         settings['credentials'] = str(Path(args.credentials).expanduser().resolve())
         del settings['cc_config'], settings['project']
+    if allowed_signers:
+        settings['allowed_signers'] = allowed_signers
     credential_environment(settings)
     if release.exists():
         verify_staged_settings(release, config, settings)
@@ -257,7 +278,7 @@ def deployment_lock(root):
         yield
 
 
-def upgrade():
+def upgrade(args):
     if os.geteuid() == 0:
         raise DeploymentError('upgrade must run as the service user, without sudo')
     root = Path.home().resolve() / '.local/lib/ink-commons'
@@ -266,8 +287,11 @@ def upgrade():
         raise DeploymentError('legacy system deployment detected; migrate to the login service before upgrading')
     if not entry.is_symlink():
         raise DeploymentError('upgrade requires an existing login deployment')
+    if args.dry_run:
+        upgrade_system(root, entry, tag=args.tag, channel=args.channel, dry_run=True)
+        return
     with deployment_lock(root):
-        upgrade_system(root, entry)
+        upgrade_system(root, entry, tag=args.tag, channel=args.channel, apply=args.apply)
 
 
 def verify_staged_settings(target, config, expected_settings):
@@ -281,7 +305,22 @@ def verify_staged_settings(target, config, expected_settings):
                               'archive the staged release before retrying')
 
 
-def upgrade_system(root, entry):
+def select_release(app, network_env, tag, channel):
+    if tag is None:
+        if channel == 'preview':
+            tag = output([*app, 'api', f'repos/{REPOSITORY}/releases',
+                          '--jq', '[.[] | select(.prerelease and (.draft | not))][0].tag_name // ""'],
+                         env=network_env)
+        else:
+            tag = output([*app, 'api', f'repos/{REPOSITORY}/releases/latest',
+                          '--jq', '.tag_name'], env=network_env)
+    match = re.fullmatch(r'build-([0-9a-f]{40})', tag)
+    if match is None:
+        raise DeploymentError('no deployment release found; specify a published build-<SHA> tag')
+    return tag, match[1]
+
+
+def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=False):
     releases = root / 'releases'
     current = entry.resolve().parent
     if current.parent != releases or not (current / 'deployment.json').is_file():
@@ -292,10 +331,11 @@ def upgrade_system(root, entry):
     proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
     network_env = {**os.environ, **parse_env(proxy_entries)}
     app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
-    revision = output([*app, 'api', f'repos/{REPOSITORY}/git/ref/heads/main',
-                       '--jq', '.object.sha'], env=network_env)
-    if not re.fullmatch(r'[0-9a-f]{40}', revision):
-        raise DeploymentError('GitHub did not return a valid main revision')
+    tag, revision = select_release(app, network_env, tag, channel)
+    if dry_run:
+        print(json.dumps({'current': current.name, 'tag': tag, 'revision': revision,
+                          'staged': (releases / revision).is_dir()}))
+        return
     target = releases / revision
     if target == current:
         try:
@@ -312,13 +352,17 @@ def upgrade_system(root, entry):
         verify_staged_settings(target, config, {**expected, 'revision': revision})
 
     assets = ('SHA256SUMS',) if reuse else (*BUNDLE_FILES, 'SHA256SUMS')
+    allowed_signers = settings.get('allowed_signers')
+    if allowed_signers:
+        assets += ('SHA256SUMS.sig',)
     with tempfile.TemporaryDirectory() as artifact:
         try:
-            run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact,
+            run([*app, 'release', 'download', tag, '--dir', artifact,
                  *[f'--pattern={name}' for name in assets]], env=network_env)
         except subprocess.CalledProcessError:
             raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
         if reuse:
+            verify_signature(Path(artifact), allowed_signers)
             verify_artifact(Path(artifact), target, revision, bundled=True)
         else:
             if bundle_revision(Path(artifact)) != revision:
@@ -327,9 +371,12 @@ def upgrade_system(root, entry):
                 revision=revision, artifact_dir=artifact, config=str(config_path),
                 github_command=config['github_command'], cc_config=settings.get('cc_config', '~/.cc-connect/config.toml'),
                 project=settings.get('project'), credentials=settings.get('credentials'),
-                env=proxy_entries,
+                env=proxy_entries, allowed_signers=allowed_signers,
             ))
 
+    if not apply:
+        print('Prepared:', target)
+        return
     try:
         activate_staged(target)
     except (OSError, subprocess.CalledProcessError):
@@ -598,11 +645,21 @@ def main():
     for prepare in (build, install):
         prepare.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
         prepare.add_argument('--config', default='~/.config/ink-commons/config.json')
+        prepare.add_argument('--allowed-signers', help='OpenSSH allowed_signers trust file for release signatures')
         prepare.add_argument('--credentials', help='private JSON file with cc_connect_token and discord_token')
         prepare.add_argument('--cc-config', default='~/.cc-connect/config.toml')
         prepare.add_argument('--project', default='yu-xing-yi-codex')
         prepare.add_argument('--github-command', default='~/.local/bin/yuxingyi')
-    commands.add_parser('upgrade', help='download and activate the verified main build')
+    update = commands.add_parser('upgrade', help='prepare a published release')
+    selection = update.add_mutually_exclusive_group()
+    selection.add_argument('--tag', help='published build-<SHA> tag')
+    selection.add_argument('--channel', choices=('stable', 'preview'))
+    update.add_argument('--dry-run', action='store_true')
+    update.add_argument('--apply', action='store_true', help='explicitly activate the prepared release')
+    rollback = commands.add_parser('rollback', help='select a prior release and preserve current SQLite state')
+    rollback.add_argument('--tag', required=True)
+    rollback.add_argument('--dry-run', action='store_true')
+    rollback.set_defaults(apply=True, channel=None)
     apply = commands.add_parser('activate')
     apply.add_argument('--release', required=True)
     apply.add_argument('--user', required=True)
@@ -614,8 +671,8 @@ def main():
     if sys.platform != 'darwin':
         parser.error('macOS only')
     try:
-        if args.action == 'upgrade':
-            upgrade()
+        if args.action in ('upgrade', 'rollback'):
+            upgrade(args)
         else:
             {'stage': stage, 'deploy': deploy, 'activate': activate, 'status': status}[args.action](args)
     except DeploymentError as error:
