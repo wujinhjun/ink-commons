@@ -1,19 +1,21 @@
 # macOS 部署与恢复
 
-同砚在 Apple Silicon Mac 上由当前登录用户运行。需要 Python 3.11.8+、可读取发布及受管仓库的 GitHub App CLI，以及能访问的本机 cc-connect webhook。GitHub Release 发布包包含同砚及其安装脚本。
+同砚在 Apple Silicon Mac 上由当前登录用户运行。需要 Python 3.11.8+、可读取发布及受管仓库的 GitHub App CLI。执行端由同砚配置选择，可以先安装服务、之后再接入执行端。GitHub Release 发布包包含同砚及其安装脚本。
 
 ## 首次部署
 
-先通过 personal-infra 或独立安装器准备 cc-connect。若依赖 personal-infra Discord watchdog，将 cc-connect 保持在它配置的登录域。由 personal-infra 管理 cc-connect 和 watchdog 的安装、升级、日志及恢复。
-
-在 `~/.config/ink-commons/config.json` 中配置 `cc_connect_url`，例如 `http://127.0.0.1:9111/hook`。使用仅服务用户可读的 JSON 凭据文件，包含 `cc_connect_token` 和 `discord_token` 两个字段。兼容已有部署时，可用 `--cc-config` 与 `--project` 指定此前的 TOML 凭据源。
+同砚独立安装和运行。通过 `config.json` 或 `--github-command` 指定 GitHub 读取命令的绝对路径。安装包可通过有权读取该仓库的 GitHub 客户端取得。
 
 ```sh
-yuxingyi --profile inspect -R wujinhjun/ink-commons release download --pattern '*' --dir ink-deploy
-(cd ink-deploy && shasum -a 256 -c SHA256SUMS && python3.12 manage.py deploy --credentials ~/.config/ink-commons/credentials.json)
+cd ink-deploy
+shasum -a 256 -c SHA256SUMS
+python3.12 manage.py deploy --github-command /absolute/path/to/github-reader
 ```
 
-运行 `ink init` 可为运行 Agent 的用户安装 skill。激活只操作同砚的 LaunchAgent，启动前后检查 cc-connect endpoint，并在打开轮询之前验证同砚版本和 GitHub App 权限。cc-connect 与 watchdog 在切换期间继续运行。
+接入执行端时，配置其 endpoint 和凭据。cc-connect 使用 `cc_connect_url`，HTTP 执行端使用 `http_provider_url`。使用仅服务用户可读的 JSON 文件，通过 `--credentials` 传入相应的 `cc_connect_token`、`discord_token` 或 `http_provider_token`。旧版 cc-connect TOML 兼容入口需要显式提供 `--cc-config` 和 `--project`。
+
+运行 `ink init` 可为 Agent 用户安装 skill。激活只管理同砚的 LaunchAgent，探测显式配置的 provider endpoint，并验证同砚版本和 GitHub 读取权限。执行端服务及其 watchdog 由各自的运维方管理。
+
 
 ## 已有部署
 
@@ -30,7 +32,7 @@ ink rollback --tag build-<previous-SHA> --dry-run
 
 发布包包含 SHA-256 校验清单。为 CI 配置 `INK_RELEASE_SIGNING_KEY` 可发布 OpenSSH 签名。首次安装用 `--allowed-signers` 指向通过独立渠道取得的信任文件，签名身份为 `ink-release`，命名空间为 `ink-commons`。部署会沿用信任文件；选择签名校验后，缺签名或签名错误都会终止。已发布的早期无签名版本仍可按摘要验证。
 
-若已有同砚 LaunchDaemon，升级和激活会在写入前停止。迁移前由管理员安排维护窗口，确认 cc-connect 与 watchdog 已由 personal-infra 管理，独立保留旧 plist、当前 state 和仍被引用的旧 release，再将旧同砚系统服务移出系统域。已有的系统服务与其数据留作回退依据。迁移激活使用登录域，需维持登录会话。任何仍引用旧 release 的 cc-connect 可执行文件须先迁到其独立安装目录。
+若已有同砚 LaunchDaemon，升级和激活会在写入前停止。迁移前由管理员安排维护窗口，确认外部服务的独立运行条件，独立保留旧 plist、当前 state 和仍被引用的旧 release，再将旧同砚系统服务移出系统域。已有的系统服务与其数据留作回退依据。迁移激活使用登录域，需维持登录会话。任何仍引用旧 release 的 cc-connect 可执行文件须先迁到其独立安装目录。
 
 ## 配置权威与 drift
 
@@ -42,9 +44,9 @@ ink rollback --tag build-<previous-SHA> --dry-run
 
 ## 验收与恢复
 
-- 暂存、激活和失败恢复均不复制 cc-connect，不修改其 plist，不停止或删除 watchdog。对本机 endpoint 的前后检查均为只读。
+- 暂存、激活和失败恢复均不复制 cc-connect，不修改其 plist，不停止或删除 watchdog。对本机 已配置 endpoint 的前后检查均为只读。
 - root 调用激活或发现旧同砚 LaunchDaemon 时，在修改前退出。启用前应核对当前身份、服务模式及 GitHub self-check。
 - 停止旧同砚并取得状态锁后，保存旧 plist、入口和状态快照，再启动关闭轮询 gate 的候选版本。失败时先停止候选，确认状态锁后恢复快照及旧登录服务。若无法确认候选已停止，保留备份等待恢复。
-- `manage.py status --user "$(id -un)"` 显示 release SHA、gate、同砚域和外部服务状态。验证失败切换时使用打印的备份路径。已完成切换并处理过新任务后，先保存最新 SQLite 状态再安排回滚。
+- `manage.py status --user "$(id -un)"` 显示 release SHA、gate、同砚域和配置的执行端。验证失败切换时使用打印的备份路径。已完成切换并处理过新任务后，先保存最新 SQLite 状态再安排回滚。
 
 隔离验证使用 `python3.12 -m unittest discover -s tests/macos -v`，其中模拟 launchd 与本机 HTTP 检查。
