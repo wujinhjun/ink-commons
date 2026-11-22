@@ -143,7 +143,12 @@ ink notification status --event '通知中的事件 ID'
 "auto_merge": {"enabled": true, "method": "merge"}
 ```
 
-`method` 可选 `merge`（默认）、`squash` 或 `rebase`。也可用 `ink config set auto_merge '{"enabled":true,"method":"squash"}' --global` 设置动态继承的全局默认值，或通过 `ink register --auto-merge-after-approval --merge-method squash owner/repository` 注册。显式 `"auto_merge": {"enabled": false}` 或注册参数 `--auto-merge-after-approval=false` 覆盖注册默认值；缺省动态继承，迁移来的旧覆盖项需 unset 后才恢复继承。
+`method` 可选 `merge`（默认）、`squash` 或 `rebase`。在具体仓库开启时，可以显式设置 `reuse_reader_identity: true`，让同砚复用读取 GitHub 的 App 执行合入。省略或设为 `false` 时使用专用合入 App。全局配置不会为仓库开启自动合入。
+
+```sh
+ink config set auto_merge '{"enabled":true,"method":"merge","reuse_reader_identity":true}' --repo owner/repository
+ink register --auto-merge-after-approval --reuse-reader-identity owner/repository
+```
 
 开启后，同砚仅处理已关联、打开、非 Draft 且由指定 reviewer 正式批准当前 head SHA 的 PR。每次尝试前重新读取 PR、review 和检查结果；需要 GitHub 报告 `mergeable: true`、`mergeable_state: clean`，并要求 head 和可用的 test-merge SHA 上当前已发现的 check runs 全部结束且为 success、neutral 或 skipped。检查未完成、失败、无权限读取、合并冲突或状态未知时保留 `waiting` 和原因，后续轮询重新检查。cooperative 模式下，指定 reviewer 已完成批准交接后，同一 base 和 head 间隔至少 30 秒仍被 GitHub 报告为冲突时，同砚给开发会话派一个可领取的核查任务。开发者本地试合，处理实际冲突并推送后由同砚重新送审。若本地试合成功，用 blocked handoff 记录 GitHub 与本地结果的差异。**需要保证等待特定 CI 时，应在 GitHub 分支规则中将其设为必需检查**；当前尚未出现的非必需检查不能由同砚保证等待。
 
@@ -151,7 +156,7 @@ ink notification status --event '通知中的事件 ID'
 
 GitHub 原生 Stack PR 使用异步合入。只有当前目标分支已经是 stack 目标分支的栈底 PR 才能发起请求。GitHub 将下一条推进到栈底后，同砚会按它当时的 head SHA 重新核验批准与检查。合入请求 ID 持久化在 `auto_merges` 的 `request_id` 中，服务重启后继续查询。GitHub 确认合入后才发合入通知。遇到没有可核验请求 ID 的历史 `unknown` 记录，仍按下述对账规则处理。
 
-读取使用配置的 GitHub App `inspect` profile；实际 merge 请求和异步合入结果查询使用同一 CLI 的 `code` profile，并以 JSON stdin 传入 SHA 和方法。App 需要相应仓库的 contents 写权限、PR/checks 读取权限，且 broker 允许 code profile；使用 `INK_GITHUB_TOKEN` 部署时同样需要相应权限。不会回退个人 gh 凭据，不自动扩大 App 权限。
+读取使用配置的 GitHub App 的 `inspect` profile。实际 merge 请求和异步结果查询，使用所选合入 App 命令的 `code` profile。App 需要相应仓库的 contents 写权限，且 broker 必须允许对应的 profile。仓库选定的身份模式随合入请求记录保存，配置变更后仍用原模式查询已发出的异步请求。
 
 工作项 API 的 `auto_merges` 保存 SHA、reviewer、review ID、方式、状态、merge SHA、更新时间及原因。merge 发出前持久化 `unknown` 预留；同一 PR 的并发轮询和重启不会重复发请求。响应丢失、中断或结果无法判定时保留 unknown 并产生诊断，不自动重放。GitHub 对 Stack 合入返回明确的 HTTP 400 拒绝时，后续轮询会从预检开始；**任何历史 SHA 仍有 unknown 时，都继续告警并阻止该 PR 的新 head 自动合入**，避免后续 push 掩盖未决结果。仍然打开且结果不明的 PR 需人工核查和处理，当前没有自动重放/重置接口。
 
@@ -352,4 +357,4 @@ Apple Silicon Mac 可从 GitHub Release 安装系统级 LaunchDaemon，同砚以
 
 ### 自动合入身份
 
-自动合入需要在具体仓库显式启用 `auto_merge.enabled`。全局值不能为仓库启用自动合入。线上启用前，分别检查读取 App、reviewer App 与 merger App 的实际身份和仓库授权。静态启动配置中的 `github_merger_command` 指向专用 merger App 的绝对 CLI 路径，`github_merger_command_sha256` 为其批准的 SHA-256。设置 `github_command_sha256` 可同样固定 reader CLI。升级任一 CLI 时更新其预期摘要。App CLI 每次调用前会检查配置的摘要。缺少专用 merger 时保留审查状态并报告等待原因。
+专用合入模式下，静态启动配置中的 `github_merger_command` 指向独立 App 的绝对 CLI 路径，`github_merger_command_sha256` 为批准的 SHA-256。复用模式使用 `github_command`，仍须配置不同的 reviewer App。可以用 `github_command_sha256` 固定 reader CLI 的摘要。启用仓库自动合入时会校验所选 App 命令的配置，GitHub 在实际合入时检查仓库授权和分支规则。已有配置缺少所需命令时，审核状态仍保留，并报告等待原因。

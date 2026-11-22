@@ -87,7 +87,9 @@ func (s *Service) pollStackMerge(ctx context.Context, repo Repository, number in
 		return fmt.Errorf("invalid stored stack merge request ID")
 	}
 	var result stackMergeResult
-	merger, err := s.up.merger()
+	// Poll with the same identity mode that submitted the original request,
+	// even if the repository configuration changed while it was pending.
+	merger, err := s.up.merger(run.ReuseReaderIdentity)
 	if err == nil {
 		_, _, err = merger.gitHubJSON(ctx, http.MethodGet, stackMergePath(repo, number)+"/"+id.String(), "code", stackAPIVersion, nil, &result)
 	}

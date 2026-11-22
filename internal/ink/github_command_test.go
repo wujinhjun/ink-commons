@@ -144,7 +144,7 @@ exit 1
 func TestMergerRequiresDedicatedPinnedCommand(t *testing.T) {
 	up := newUpstream("reader-token")
 	up.command = "/unused-reader"
-	if _, err := up.merger(); err == nil {
+	if _, err := up.merger(false); err == nil {
 		t.Fatal("reader used as merger")
 	}
 	script := filepath.Join(t.TempDir(), "merger")
@@ -153,7 +153,7 @@ func TestMergerRequiresDedicatedPinnedCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	up.mergerCommand, up.mergerDigest = script, fmt.Sprintf("%x", sha256.Sum256(body))
-	merger, err := up.merger()
+	merger, err := up.merger(false)
 	if err != nil || merger.command != script || merger.token != "" {
 		t.Fatalf("incorrect merger routing: %v", err)
 	}

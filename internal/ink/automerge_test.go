@@ -288,6 +288,10 @@ func TestAutoMergeRegistrationRequiresRepositoryOptIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	s.up.mergerCommand = filepath.Join(t.TempDir(), "merger")
+	if err := os.WriteFile(s.up.mergerCommand, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	s.up.http.Transport = testTransport(func(r *http.Request) (*http.Response, error) {
 		w := httptest.NewRecorder()
 		reply(w, 200, []Pull{})
@@ -473,5 +477,17 @@ printf '%%s\r\n\r\n%%s' '%s' '%s'
 				t.Fatalf("expected one write attempt, marker %q, error %v", calls, err)
 			}
 		})
+	}
+}
+
+func TestAutoMergeReservationRejectsChangedIdentityMode(t *testing.T) {
+	f := newAutoMergeFixture(t)
+	current := f.repo
+	current.AutoMerge = &AutoMergeConfig{Enabled: true, ReuseReaderIdentity: true}
+	setRepositoryConfigForTest(t, f.s, current)
+	run := AutoMergeRun{SHA: f.pull.Head.SHA, Reviewer: f.repo.ReviewerLogin, Method: "merge", State: "unknown"}
+	reserved, err := f.s.updateAutoMerge(f.repo, 42, run, true)
+	if err != nil || reserved {
+		t.Fatalf("reserved merge under a stale identity policy: %v (%v)", reserved, err)
 	}
 }
