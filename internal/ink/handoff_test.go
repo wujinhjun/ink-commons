@@ -525,7 +525,7 @@ func TestCooperativeSchemaUpgradeProtectsClaimsFromOlderBinaries(t *testing.T) {
 	f := newHandoffFixture(t)
 	task := f.work(t).Task
 	f.claim(t, task, claimA, 200)
-	if _, err := f.s.store.db.Exec("DROP TABLE runtime_config; PRAGMA user_version=2"); err != nil {
+	if _, err := f.s.store.db.Exec("DROP TABLE workspace_allocations; DROP TABLE runtime_config; PRAGMA user_version=2"); err != nil {
 		t.Fatal(err)
 	}
 	f.restart(t)

@@ -45,6 +45,7 @@ type Repository struct {
 }
 
 type Config struct {
+	WorkspaceFullSlots  int
 	RepositoryDefaults  Repository
 	Repositories        []Repository
 	PollSeconds         int

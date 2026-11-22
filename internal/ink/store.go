@@ -20,15 +20,16 @@ import (
 
 const stateDatabase = "state.sqlite3"
 const legacyState = "state.json"
-const schemaVersion = 4
+const schemaVersion = 5
 
 type state struct {
 	// Configurations is populated only for JSON export/import. Workflow saves
 	// deliberately ignore it; runtime policy has a separate transactional API.
-	Configurations []ConfigRecord   `json:"configurations,omitempty"`
-	Repositories   []Repository     `json:"repositories,omitempty"`
-	Pushes         []Push           `json:"pushes"`
-	Work           map[string]*Work `json:"work"`
+	Configurations []ConfigRecord        `json:"configurations,omitempty"`
+	Workspaces     []WorkspaceAllocation `json:"workspaces,omitempty"`
+	Repositories   []Repository          `json:"repositories,omitempty"`
+	Pushes         []Push                `json:"pushes"`
+	Work           map[string]*Work      `json:"work"`
 }
 
 // stateStore keeps the workflow snapshot API; each read and incremental save is a
@@ -131,9 +132,15 @@ func (s *stateStore) initialize(legacy, marker string) error {
 		}
 		version = 4
 	}
+	if version == 4 {
+		if _, err := tx.Exec(workspaceSchema + " PRAGMA user_version = 5;"); err != nil {
+			return err
+		}
+		version = 5
+	}
 	if version == schemaVersion {
 		// Detect missing tables before serving; never recreate damaged workflow tables.
-		for _, table := range []string{"work_items", "pushes", "repositories", "runtime_config"} {
+		for _, table := range []string{"work_items", "pushes", "repositories", "runtime_config", "workspace_allocations"} {
 			rows, err := tx.Query("SELECT * FROM " + table + " LIMIT 0")
 			if err != nil {
 				return err
@@ -162,7 +169,7 @@ func (s *stateStore) initialize(legacy, marker string) error {
 	if _, err := tx.Exec(`CREATE TABLE work_items (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
  CREATE TABLE pushes (position INTEGER PRIMARY KEY, payload TEXT NOT NULL);
  CREATE TABLE repositories (name TEXT PRIMARY KEY, payload TEXT NOT NULL);
- CREATE TABLE runtime_config (scope TEXT PRIMARY KEY, payload TEXT NOT NULL, revision INTEGER NOT NULL);`); err != nil {
+ CREATE TABLE runtime_config (scope TEXT PRIMARY KEY, payload TEXT NOT NULL, revision INTEGER NOT NULL);` + workspaceSchema); err != nil {
 		return err
 	}
 	data, err := os.ReadFile(legacy)
@@ -195,6 +202,11 @@ func (s *stateStore) initialize(legacy, marker string) error {
 		}
 		if err := importConfigRecords(tx, st.Configurations); err != nil {
 			return err
+		}
+		for _, a := range st.Workspaces {
+			if err := insertWorkspace(context.Background(), tx, a); err != nil {
+				return err
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -236,6 +248,7 @@ func validateState(st state) error {
 func decodeState(data []byte) (state, error) {
 	var raw struct {
 		Configurations []ConfigRecord             `json:"configurations,omitempty"`
+		Workspaces     []WorkspaceAllocation      `json:"workspaces,omitempty"`
 		Repositories   []Repository               `json:"repositories,omitempty"`
 		Pushes         []Push                     `json:"pushes"`
 		Work           map[string]json.RawMessage `json:"work"`
@@ -250,6 +263,7 @@ func decodeState(data []byte) (state, error) {
 		return st, errors.New("expected one state object")
 	}
 	st.Configurations = raw.Configurations
+	st.Workspaces = raw.Workspaces
 	st.Repositories = raw.Repositories
 	st.Pushes = raw.Pushes
 	if raw.Work != nil {
@@ -555,6 +569,10 @@ func StateSnapshot(dir, output string, asJSON bool) error {
 		return err
 	}
 	if asJSON {
+		st.Workspaces, err = s.exportWorkspaces()
+		if err != nil {
+			return err
+		}
 		data, err := json.MarshalIndent(st, "", "  ")
 		if err != nil {
 			return err

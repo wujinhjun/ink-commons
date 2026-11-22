@@ -362,3 +362,18 @@ Apple Silicon Mac 可从 GitHub Release 安装系统级 LaunchDaemon，同砚以
 ### Git 工作树盘点
 
 `ink workspace list --repo /path/to/clone --json` 按本地 clone 列出 Git 登记的工作树及其分支、HEAD、改动和失效状态。省略 `--repo` 时使用当前目录。独立 clone 即使指向同一个远程仓库，也各自维护自己的工作树登记。
+
+### Full / Lite 工作区
+
+`ink workspace acquire` 从指定的本地 clone 或 worktree 申请隔离目录，PR 创建前也可使用。请先在源 clone 准备需要的本地 ref。默认优先使用 Full，全部占用时分配 Lite。使用 `--kind full` 可明确要求 Full，使用 `--kind lite` 可直接申请 Lite。Full 槽位首次申请时才创建，每个独立 clone 默认最多两个，可在 daemon 配置中通过 `workspace_full_slots` 调整。 若复用 Full 时已有缓存阻止 checkout，且工作树仍处于归还时的状态，自动分配会尝试其他 Full 或 Lite。
+
+```sh
+ink workspace acquire --repo ~/src/project --ref origin/main --branch feature/new --request-id my-new-work --json
+ink workspace list --repo ~/src/project --json
+ink workspace release --id ALLOCATION_ID --json
+ink workspace remove --id RELEASED_LITE_ID --json
+```
+
+返回值含本次分配的 ID、实际类型、工作目录、初始 HEAD 和状态。用同一 `--request-id` 重试，不会重复分配。省略 `--branch` 时检出 detached HEAD，适合固定 SHA 的审查。Agent 会话中的请求会记录会话路由，已领取的同砚任务还可传入 `--task TASK_ID`，并以该任务的 SHA 申请。
+
+完成工作并离开目录后显式归还。归还要求目录没有未提交或未跟踪文件，且 HEAD 能在线验证已保存在 `origin` 上。Full 归还后保留实际目录和被忽略的缓存，供后续任务复用。Lite 归还后可显式删除。删除前重新核验，目录中有未提交、未跟踪或忽略文件时拒绝删除。分支由 Git 独立管理。现有手工 worktree 出现在盘点里，不受分配或删除命令管理。
