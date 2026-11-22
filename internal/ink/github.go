@@ -58,6 +58,7 @@ type Config struct {
 	GitHubMergerCommand string
 	GitHubMergerSHA256  string
 	PollGate            string
+	ConfigOnly          bool
 }
 
 func (c Config) ValidateGitHubCommands() error {

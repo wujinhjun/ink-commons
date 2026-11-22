@@ -832,6 +832,17 @@ class DeployTest(unittest.TestCase):
              patch.object(runtime.os, 'execve') as start:
             runtime.main()
         self.assertEqual(start.call_args.args[2]['INK_HTTP_PROVIDER_TOKEN'], 'fixture')
+        self.assertNotIn('--config-only', start.call_args.args[1])
+
+    def test_runtime_forwards_explicit_config_only_mode(self):
+        (self.release / 'deployment.json').write_text(json.dumps({'data': str(self.data)}))
+        with patch.object(runtime, '__file__', str(self.release / 'runtime.py')), \
+             patch.object(runtime.os, 'execve') as start:
+            runtime.main(('--config-only',))
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[1][-3:], [
+            '-poll-gate', str(self.release / 'enabled'), '--config-only',
+        ])
 
     def test_no_provider_means_no_external_service_probe(self):
         with patch.object(m.socket, 'create_connection') as connect:

@@ -67,7 +67,9 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/notifications/ack", s.ackNotification)
 	mux.HandleFunc("GET /v1/notifications/status", s.notificationStatus)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && !s.pollReady() {
+		configWrite := s.config.ConfigOnly && r.URL.Path == "/v1/config" &&
+			(r.Method == http.MethodPost || r.Method == http.MethodDelete)
+		if r.Method != http.MethodGet && !configWrite && !s.pollReady() {
 			fail(w, apiError{503, "deployment verification in progress"})
 			return
 		}
@@ -76,6 +78,9 @@ func (s *Service) Handler() http.Handler {
 }
 
 func (s *Service) pollReady() bool {
+	if s.config.ConfigOnly {
+		return false
+	}
 	if s.config.PollGate == "" {
 		return true
 	}
