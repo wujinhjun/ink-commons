@@ -17,6 +17,10 @@ python3.12 manage.py deploy --config ./config.example.json \
 
 以服务用户运行部署命令。脚本通过 `sudo` 安装由 `root:wheel` 所有的 `/Library/LaunchDaemons/com.ink-commons.daemon.plist` 并管理系统域服务。构建、配置、状态和凭据操作由服务用户完成。运行 `ink init` 可为 Agent 用户安装 skill。激活会探测已配置的 provider endpoint，并验证同砚版本和 GitHub 读取权限。执行端服务及其 watchdog 由各自的运维方管理。
 
+部署 fork 的发布包时，给 `deploy` 或 `stage` 加上 `--release-repo owner/repo`。该仓库应在 `main` 发布与提交 SHA 对应的 `build-<SHA>` Release。服务用户的读取客户端需要能访问此发布仓库和受管仓库。省略参数时使用官方发布仓库，旧部署也沿用该默认值。已安装版本要换发布源时，从目标仓库取得并校验发布包，再用带 `--release-repo` 的 `deploy` 或 `stage` 和 `activate` 切换。
+
+如果读取客户端或其他子命令依赖不同的工具目录，可在 `deploy` 或 `stage` 时指定 `--service-path '/absolute/bin:/usr/bin:/bin'`。发布仓库和服务 PATH 都会随部署设置保留到后续升级。服务依然使用 macOS LaunchDaemon 和部署账户下的版本、状态目录。
+
 ## 已有部署
 
 从任意目录可运行 `~/.local/lib/ink-commons/ink upgrade`。暂存的部署文件先按 GitHub Release 校验，校验后再请求管理员授权以切换同砚。需要手动指定版本时，从对应 Release 执行 `manage.py stage --revision "$(cat REVISION)" --artifact-dir .`，然后以登录用户执行 `manage.py activate --release DIR --user "$(id -un)"`。

@@ -242,16 +242,21 @@ class UpgradeTest(unittest.TestCase):
 
         staged.assert_called_once()
         activate.assert_called_once_with(self.target)
-        self.assertEqual(self.calls[0][:6], ['/test/github-app-cli', '--profile', 'inspect', '-R', m.REPOSITORY, 'api'])
+        self.assertEqual(self.calls[0][:6], ['/test/github-app-cli', '--profile', 'inspect', '-R', m.DEFAULT_RELEASE_REPO, 'api'])
         self.assertEqual(self.calls[1][5:8], ['release', 'download', 'build-' + self.target.name])
         self.assertIn('--pattern=manage.py', self.calls[1])
         self.assertIn('--pattern=runtime.py', self.calls[1])
 
-    def test_upgrade_accepts_cli_without_global_profile_or_repo_flags(self):
+    def test_upgrade_uses_configured_repo_and_preserves_deployment_settings(self):
         config_file = self.current / 'config.json'
         config_file.write_text(json.dumps({
             'github_command': '/test/github-app-cli', 'github_read_args': [],
         }))
+
+        settings_file = self.current / 'deployment.json'
+        settings = json.loads(settings_file.read_text())
+        settings.update(release_repo='fork-owner/ink-fork', service_path='/custom/bin:/usr/bin:/bin')
+        settings_file.write_text(json.dumps(settings))
 
         def run(args, **kwargs):
             self.calls.append(args)
@@ -260,15 +265,29 @@ class UpgradeTest(unittest.TestCase):
             directory = Path(args[args.index('--dir') + 1])
             (directory / 'REVISION').write_text(self.target.name)
 
-        with patch.object(m, 'run', side_effect=run), patch.object(m, 'stage'), \
+        with patch.object(m, 'run', side_effect=run), patch.object(m, 'stage') as staged, \
              patch.object(m, 'activate_staged'):
             m.upgrade_system(self.root, self.entry)
 
         self.assertEqual(self.calls[0][:3], [
-            '/test/github-app-cli', 'api', f'repos/{m.REPOSITORY}/git/ref/heads/main',
+            '/test/github-app-cli', 'api', 'repos/fork-owner/ink-fork/git/ref/heads/main',
         ])
         self.assertEqual(self.calls[1][1:4], ['release', 'download', 'build-' + self.target.name])
-        self.assertEqual(self.calls[1][6:8], ['--repo', m.REPOSITORY])
+        self.assertEqual(self.calls[1][6:8], ['--repo', 'fork-owner/ink-fork'])
+        staged.assert_called_once()
+        self.assertEqual(staged.call_args.args[0].release_repo, 'fork-owner/ink-fork')
+        self.assertEqual(staged.call_args.args[0].service_path, settings['service_path'])
+        plist = m.ink_plist(self.current, {**settings, 'python': '/usr/bin/python3'}, 'operator')
+        self.assertEqual(plist['EnvironmentVariables']['PATH'], settings['service_path'])
+
+    def test_upgrade_rejects_invalid_release_repository_before_network(self):
+        settings_file = self.current / 'deployment.json'
+        settings = json.loads(settings_file.read_text())
+        settings_file.write_text(json.dumps({**settings, 'release_repo': 'org/..'}))
+        with patch.object(m, 'output') as output:
+            with self.assertRaisesRegex(m.DeploymentError, 'invalid release repository'):
+                m.upgrade_system(self.root, self.entry)
+        output.assert_not_called()
 
     def test_unpublished_build_does_not_stage_or_activate(self):
         with patch.object(m, 'run', side_effect=subprocess.CalledProcessError(1, 'release download')) as run, \
