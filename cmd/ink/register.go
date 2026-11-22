@@ -30,6 +30,7 @@ func register(args []string) error {
 	developer := flags.String("developer", "", "human developer login")
 	autoMerge := flags.Bool("auto-merge-after-approval", false, "automatically merge the approved head after checks pass")
 	mergeMethod := flags.String("merge-method", "merge", "merge, squash or rebase (for automatic merge)")
+	reuseReader := flags.Bool("reuse-reader-identity", false, "use the configured reader App for automatic merge")
 	hook := flags.String("post-approval", "", "absolute path of postApproval executable; receives event JSON on stdin")
 	reuseThread := flags.Bool("reuse-development-thread", false, "reuse the development thread with an independent reviewer project")
 	sameChannel := flags.Bool("require-same-channel", false, "require Discord reviews to stay in the development channel")
@@ -60,8 +61,8 @@ func register(args []string) error {
 		if f.Name == "reuse-development-thread" || f.Name == "thread-history" || f.Name == "require-same-channel" {
 			repo.Review = &ink.ReviewFeatures{RequireSameChannel: *sameChannel, ReuseDevelopmentThread: *reuseThread, Context: ink.ReviewContextFeatures{ThreadHistory: *threadHistory}}
 		}
-		if f.Name == "auto-merge-after-approval" || f.Name == "merge-method" {
-			repo.AutoMerge = &ink.AutoMergeConfig{Enabled: *autoMerge, Method: *mergeMethod}
+		if f.Name == "auto-merge-after-approval" || f.Name == "merge-method" || f.Name == "reuse-reader-identity" {
+			repo.AutoMerge = &ink.AutoMergeConfig{Enabled: *autoMerge, Method: *mergeMethod, ReuseReaderIdentity: *reuseReader}
 		}
 	})
 	if *taskMode != "" && *taskMode != "legacy" && *taskMode != "cooperative" {
