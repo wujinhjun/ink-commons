@@ -39,3 +39,44 @@ func TestInspectLinkedWorktree(t *testing.T) {
 		t.Fatalf("unexpected inventory: %+v", repo)
 	}
 }
+
+func TestInspectRejectsReusedWorktreePath(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		independentClone bool
+	}{
+		{name: "another clone", independentClone: true},
+		{name: "directory inside the same clone"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := testRepo(t)
+			linked := filepath.Join(root, "linked")
+			testGit(t, root, "worktree", "add", "--detach", linked, "HEAD")
+			testGit(t, root, "worktree", "lock", linked)
+			if err := os.Rename(linked, filepath.Join(t.TempDir(), "moved")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(linked, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if test.independentClone {
+				testGit(t, linked, "init", "-b", "replacement")
+			}
+			if err := os.WriteFile(filepath.Join(linked, "untracked"), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			repo, err := Inspect(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(repo.Worktree) != 2 {
+				t.Fatalf("expected one linked registration: %+v", repo.Worktree)
+			}
+			main, entry := repo.Worktree[0], repo.Worktree[1]
+			if !entry.Locked || entry.Prunable || entry.Head != main.Head || entry.Error == "" || entry.Dirty || entry.Ignored {
+				t.Fatalf("expected registered HEAD and unknown file status: %+v", entry)
+			}
+		})
+	}
+}

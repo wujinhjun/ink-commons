@@ -87,7 +87,10 @@ func Inspect(ctx context.Context, path string) (Repository, error) {
 				continue
 			}
 			if !entry.Bare && !entry.Prunable {
-				entry.Dirty, entry.Ignored, err = Status(ctx, entry.Path)
+				err := checkWorktreeIdentity(ctx, entry.Path, common)
+				if err == nil {
+					entry.Dirty, entry.Ignored, err = Status(ctx, entry.Path)
+				}
 				if err != nil {
 					entry.Error = err.Error()
 				}
@@ -97,6 +100,26 @@ func Inspect(ctx context.Context, path string) (Repository, error) {
 		}
 	}
 	return repo, nil
+}
+
+// A stale registration may point inside an existing clone or at a different
+// repository. Git discovery at that path must match both the root and clone.
+func checkWorktreeIdentity(ctx context.Context, path, expectedCommon string) error {
+	root, err := Git(ctx, path, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(strings.TrimSuffix(string(root), "\n")) != filepath.Clean(path) {
+		return fmt.Errorf("Git worktree root differs from its registered path")
+	}
+	common, err := CommonDir(ctx, path)
+	if err != nil {
+		return err
+	}
+	if common != expectedCommon {
+		return fmt.Errorf("Git common directory differs from the inspected clone")
+	}
+	return nil
 }
 
 func Status(ctx context.Context, path string) (dirty, ignored bool, err error) {
