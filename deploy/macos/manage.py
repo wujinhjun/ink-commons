@@ -285,7 +285,15 @@ def upgrade_system(root, entry):
     config = json.loads(config_path.read_text())
     proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
     network_env = {**os.environ, **parse_env(proxy_entries)}
-    app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
+    prefix = config.get('github_read_args')
+    if prefix is None:
+        app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
+        release_scope = []
+    else:
+        if not isinstance(prefix, list) or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in prefix):
+            raise DeploymentError('invalid github_read_args')
+        app = [config['github_command'], *[arg.replace('{repo}', REPOSITORY) for arg in prefix]]
+        release_scope = ['--repo', REPOSITORY]
     revision = output([*app, 'api', f'repos/{REPOSITORY}/git/ref/heads/main',
                        '--jq', '.object.sha'], env=network_env)
     if not re.fullmatch(r'[0-9a-f]{40}', revision):
@@ -311,7 +319,7 @@ def upgrade_system(root, entry):
     assets = ('SHA256SUMS',) if reuse else (*BUNDLE_FILES, 'SHA256SUMS')
     with tempfile.TemporaryDirectory() as artifact:
         try:
-            run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact,
+            run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact, *release_scope,
                  *[f'--pattern={name}' for name in assets]], env=network_env)
         except subprocess.CalledProcessError:
             raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None

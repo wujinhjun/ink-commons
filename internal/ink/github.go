@@ -53,12 +53,24 @@ type Config struct {
 	GitHubToken         string
 	GitHubCommand       string
 	GitHubCommandSHA256 string
+	GitHubReadArgs      []string
+	GitHubMergeArgs     []string
 	GitHubMergerCommand string
 	GitHubMergerSHA256  string
 	PollGate            string
 }
 
 func (c Config) ValidateGitHubCommands() error {
+	if (c.GitHubReadArgs != nil || c.GitHubMergeArgs != nil) && c.GitHubCommand == "" {
+		return fmt.Errorf("GitHub CLI arguments require github_command")
+	}
+	for _, args := range [][]string{c.GitHubReadArgs, c.GitHubMergeArgs} {
+		for _, arg := range args {
+			if arg == "" || strings.ContainsRune(arg, 0) {
+				return fmt.Errorf("GitHub CLI arguments must be nonempty and contain no NUL")
+			}
+		}
+	}
 	if c.GitHubMergerCommand != "" {
 		if c.GitHubCommand == "" || !filepath.IsAbs(c.GitHubMergerCommand) || c.GitHubMergerSHA256 == "" {
 			return fmt.Errorf("merger requires a dedicated absolute command, checksum and separate reader")
@@ -112,6 +124,8 @@ type upstream struct {
 	lastOK        *atomic.Int64
 	command       string
 	commandDigest string
+	readArgs      []string
+	mergeArgs     []string
 	mergerCommand string
 	mergerDigest  string
 	token         string
@@ -244,7 +258,18 @@ func (u upstream) commandResponse(ctx context.Context, repo, method, path, profi
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	args := []string{"--profile", profile, "-R", repo, "api", "--include", "--method", method, path}
+	prefix := u.readArgs
+	if profile == "code" {
+		prefix = u.mergeArgs
+	}
+	args := make([]string, 0, len(prefix)+9)
+	if prefix == nil {
+		args = append(args, "--profile", profile, "-R", repo)
+	}
+	for _, arg := range prefix {
+		args = append(args, strings.ReplaceAll(arg, "{repo}", repo))
+	}
+	args = append(args, "api", "--include", "--method", method, path)
 	if version != "" {
 		args = append(args, "--header", "X-GitHub-Api-Version: "+version)
 	}

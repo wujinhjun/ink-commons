@@ -135,6 +135,7 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 	up := newUpstream(config.GitHubToken)
 	up.command = config.GitHubCommand
 	up.commandDigest = config.GitHubCommandSHA256
+	up.readArgs, up.mergeArgs = config.GitHubReadArgs, config.GitHubMergeArgs
 	up.mergerCommand, up.mergerDigest = config.GitHubMergerCommand, config.GitHubMergerSHA256
 	stateDir := filepath.Dir(path)
 	if resolved, err := filepath.EvalSymlinks(stateDir); err == nil {
