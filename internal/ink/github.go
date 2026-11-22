@@ -151,10 +151,14 @@ func (u upstream) gitHubGet(ctx context.Context, path string, result any) (http.
 const stackAPIVersion = "2026-03-10"
 
 func (u upstream) gitHubJSON(ctx context.Context, method, path, profile, version string, input []byte, result any, acceptedErrors ...int) (http.Header, int, error) {
+	return u.gitHubScopedJSON(ctx, "", method, path, profile, version, input, result, acceptedErrors...)
+}
+
+func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, profile, version string, input []byte, result any, acceptedErrors ...int) (http.Header, int, error) {
 	var res *http.Response
 	var err error
 	if u.command != "" {
-		res, err = u.commandResponse(ctx, method, path, profile, version, input)
+		res, err = u.commandResponse(ctx, repo, method, path, profile, version, input)
 	} else {
 		var req *http.Request
 		req, err = http.NewRequestWithContext(ctx, method, u.github+path, bytes.NewReader(input))
@@ -217,14 +221,22 @@ var errAppCommandNotStarted = errors.New("GitHub App command did not start")
 
 // App CLI 每次请求获取单仓库短期凭据，不把一小时 token 固定在常驻进程中。
 // 不经过 shell，不读取个人 gh 登录；失败时只返回通用错误，避免转发子进程秘密。
-func (u upstream) commandResponse(ctx context.Context, method, path, profile, version string, input []byte) (*http.Response, error) {
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(parts) < 3 || parts[0] != "repos" || !ValidRepository(parts[1]+"/"+parts[2]) {
-		return nil, fmt.Errorf("GitHub command requires a repository API path")
+func (u upstream) commandResponse(ctx context.Context, repo, method, path, profile, version string, input []byte) (*http.Response, error) {
+	if path == "/graphql" && method == http.MethodPost && profile == "inspect" {
+		if !ValidRepository(repo) {
+			return nil, fmt.Errorf("GitHub GraphQL requires a repository scope")
+		}
+		path = "graphql"
+	} else {
+		parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+		if len(parts) < 3 || parts[0] != "repos" || !ValidRepository(parts[1]+"/"+parts[2]) {
+			return nil, fmt.Errorf("GitHub command requires a repository API path")
+		}
+		repo = parts[1] + "/" + parts[2]
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	args := []string{"--profile", profile, "-R", parts[1] + "/" + parts[2], "api", "--include", "--method", method, path}
+	args := []string{"--profile", profile, "-R", repo, "api", "--include", "--method", method, path}
 	if version != "" {
 		args = append(args, "--header", "X-GitHub-Api-Version: "+version)
 	}

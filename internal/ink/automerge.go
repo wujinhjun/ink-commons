@@ -275,6 +275,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	version, observedPull, reviewerCommand := w.Version, w.Pull, w.Reviewer.GitHubCommand
 	confirmingConflict := w.MergeConflict != nil
 	trackingConflict := confirmingConflict || (w.Task != nil && w.Task.ConflictBase != nil)
+	observedConflictBase := w.conflictBase()
 	s.mu.Unlock()
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo.Repo, number)
 	wait := func(reason string) error {
@@ -283,18 +284,11 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		_, err := s.updateAutoMerge(repo, number, run, false)
 		return err
 	}
-	mergeUpstream, err := s.up.merger()
-	if err != nil {
-		return wait(err.Error())
-	}
-	if sameAppCommand(reviewerCommand, mergeUpstream.command) {
-		return wait("reviewer and merger must use separate GitHub Apps")
-	}
 	var pull Pull
 	if _, _, err := s.up.gitHubJSON(ctx, http.MethodGet, path, "inspect", stackAPIVersion, nil, &pull); err != nil {
 		if confirmingConflict {
 			observedPull.Mergeable = nil
-			if err := s.observeMergeConflict(repo.Repo, number, version, observedPull, false); err != nil {
+			if err := s.observeMergeConflict(repo.Repo, number, version, observedPull, PullBase{}, false); err != nil {
 				return err
 			}
 		}
@@ -307,8 +301,23 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		return wait("waiting for this PR to become the bottom of its GitHub stack")
 	}
 	dirty := pull.Mergeable != nil && !*pull.Mergeable && pull.MergeableState == "dirty"
+	mergeable := pull.Mergeable != nil && *pull.Mergeable
+	var base PullBase
+	if (dirty && repo.TaskMode == "cooperative") || (trackingConflict && mergeable && pull.Base != observedConflictBase) {
+		var err error
+		base, err = s.up.verifyConflictBase(ctx, repo.Repo, pull, dirty)
+		if err != nil {
+			if dirty && confirmingConflict {
+				pull.Mergeable = nil
+				if resetErr := s.observeMergeConflict(repo.Repo, number, version, pull, PullBase{}, false); resetErr != nil {
+					return resetErr
+				}
+			}
+			return wait("cannot confirm mergeability against the current GitHub base ref")
+		}
+	}
 	if trackingConflict || dirty {
-		if err := s.observeMergeConflict(repo.Repo, number, version, pull, dirty); err != nil {
+		if err := s.observeMergeConflict(repo.Repo, number, version, pull, base, dirty); err != nil {
 			return err
 		}
 	}
@@ -317,6 +326,13 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	if pull.Mergeable == nil || !*pull.Mergeable || pull.MergeableState != "clean" {
 		return wait("GitHub has not reported a clean, mergeable PR")
+	}
+	mergeUpstream, err := s.up.merger()
+	if err != nil {
+		return wait(err.Error())
+	}
+	if sameAppCommand(reviewerCommand, mergeUpstream.command) {
+		return wait("reviewer and merger must use separate GitHub Apps")
 	}
 	refs := []string{run.SHA}
 	if validSHA(pull.MergeCommitSHA) && pull.MergeCommitSHA != run.SHA {
