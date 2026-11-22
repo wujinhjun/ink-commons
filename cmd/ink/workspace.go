@@ -203,6 +203,11 @@ func workspaceAPI(method, path string, payload any, result any) (bool, error) {
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
+		// A privileged daemon disables this endpoint. Keep read-only inventory
+		// available via the caller's local Git without bypassing write denials.
+		if method == http.MethodGet && res.StatusCode == http.StatusForbidden {
+			return false, nil
+		}
 		var problem struct{ Error string }
 		_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&problem)
 		if res.StatusCode == http.StatusNotFound && problem.Error == "" {

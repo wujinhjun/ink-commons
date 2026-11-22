@@ -147,24 +147,74 @@ func (s *Service) acquireWorkspace(ctx context.Context, req workspaceRequest) (W
 		return WorkspaceAllocation{}, apiError{400, err.Error()}
 	}
 	a, err := readWorkspace(s.store.db.QueryRowContext(ctx, "SELECT "+workspaceColumns+" FROM workspace_allocations WHERE request_id = ?", req.RequestID))
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		a, err = s.reserveWorkspace(ctx, req, common)
-		if err != nil {
-			return a, err
-		}
-	case err != nil:
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return a, err
-	case a.Common != common || a.Preference != req.Preference || a.Ref != req.Ref || a.Branch != req.Branch || a.TaskID != req.TaskID || !sameWorkspaceOwner(a.Owner, req.Owner):
+	}
+	if err == nil && (a.Common != common || a.Preference != req.Preference || a.Ref != req.Ref ||
+		a.Branch != req.Branch || a.TaskID != req.TaskID || !sameWorkspaceOwner(a.Owner, req.Owner)) {
 		return a, apiError{409, "request ID is already bound to different workspace parameters"}
 	}
-	if a.State != "preparing" {
-		return a, nil
+
+	skipped := map[string]bool{}
+	pinnedHead := ""
+	for {
+		if a.ID == "" {
+			a, err = s.reserveWorkspace(ctx, req, common, pinnedHead, skipped)
+			if err != nil {
+				return a, err
+			}
+		}
+		if a.State != "preparing" {
+			return a, nil
+		}
+		active, unchanged, err := s.activateWorkspace(ctx, req, a)
+		if !unchanged {
+			return active, err
+		}
+		// This reservation can go away without changing the last released
+		// allocation. No client received it as active.
+		if _, deleteErr := s.store.db.ExecContext(ctx, "DELETE FROM workspace_allocations WHERE id = ? AND state = 'preparing'", a.ID); deleteErr != nil {
+			return a, deleteErr
+		}
+		if req.Preference != "auto" {
+			return WorkspaceAllocation{}, err
+		}
+		skipped[a.Path] = true
+		pinnedHead = a.Head
+		a = WorkspaceAllocation{}
+	}
+}
+
+func (s *Service) activateWorkspace(ctx context.Context, req workspaceRequest, a WorkspaceAllocation) (WorkspaceAllocation, bool, error) {
+	if a.TaskID != "" {
+		// Don't allow handoff to invalidate this claim during Git preparation.
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.validateWorkspaceOwner(ctx, req, a.Head); err != nil {
+			return a, false, err
+		}
 	}
 	if err := prepareWorkspace(ctx, a); err != nil {
-		return a, apiError{409, err.Error()}
+		if workspaceStillReleased(ctx, a) {
+			return a, true, apiError{409, err.Error()}
+		}
+		return a, false, apiError{409, fmt.Sprintf("%v; workspace %s remains preparing; inspect %s, then retry request %s or run ink workspace release --id %s", err, a.ID, a.Path, a.RequestID, a.ID)}
 	}
-	return s.workspaceState(ctx, a, "active")
+	active, err := s.workspaceState(ctx, a, "active")
+	return active, false, err
+}
+
+func workspaceStillReleased(ctx context.Context, a WorkspaceAllocation) bool {
+	if a.Previous == "" {
+		return false
+	}
+	repo, err := workspace.Inspect(ctx, a.Source)
+	if err != nil || repo.Common != a.Common {
+		return false
+	}
+	tree, err := managedWorkspaceTree(ctx, repo, a.Path)
+	return err == nil && tree != nil && tree.Head == a.Previous && tree.Branch == "" && !tree.Dirty &&
+		workspace.CheckIdle(ctx, a.Path) == nil
 }
 
 func sameWorkspaceOwner(a, b *execution.Route) bool {
@@ -198,7 +248,7 @@ func (s *Service) validateWorkspaceOwner(ctx context.Context, req workspaceReque
 	return nil
 }
 
-func (s *Service) reserveWorkspace(ctx context.Context, req workspaceRequest, common string) (WorkspaceAllocation, error) {
+func (s *Service) reserveWorkspace(ctx context.Context, req workspaceRequest, common, pinnedHead string, skipped map[string]bool) (WorkspaceAllocation, error) {
 	ref := req.Ref
 	if ref == "" {
 		ref = "HEAD"
@@ -220,6 +270,9 @@ func (s *Service) reserveWorkspace(ctx context.Context, req workspaceRequest, co
 	head, err := workspace.Git(ctx, req.Source, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
 	if err != nil {
 		return WorkspaceAllocation{}, apiError{400, "workspace ref is not an available local commit"}
+	}
+	if pinnedHead != "" && strings.TrimSpace(string(head)) != pinnedHead {
+		return WorkspaceAllocation{}, apiError{409, "workspace ref moved while finding an alternate slot; retry with a fixed ref"}
 	}
 	if req.Branch != "" {
 		branchHead, err := workspace.Git(ctx, req.Source, "rev-parse", "--verify", "--end-of-options", "refs/heads/"+req.Branch)
@@ -256,6 +309,9 @@ func (s *Service) reserveWorkspace(ctx context.Context, req workspaceRequest, co
 	if req.Preference != "lite" {
 		for slot := 1; slot <= s.fullWorkspaceSlots; slot++ {
 			path := filepath.Join(dir, fmt.Sprintf("full-%d", slot))
+			if skipped[path] {
+				continue
+			}
 			previous, available, err := s.availableWorkspaceSlot(ctx, repo, path)
 			if err != nil {
 				return a, err
