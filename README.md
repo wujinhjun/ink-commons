@@ -358,3 +358,7 @@ Apple Silicon Mac 可从 GitHub Release 安装系统级 LaunchDaemon，同砚以
 ### 自动合入身份
 
 专用合入模式下，静态启动配置中的 `github_merger_command` 指向独立 App 的绝对 CLI 路径，`github_merger_command_sha256` 为批准的 SHA-256。复用模式使用 `github_command`，仍须配置不同的 reviewer App。可以用 `github_command_sha256` 固定 reader CLI 的摘要。启用仓库自动合入时会校验所选 App 命令的配置，GitHub 在实际合入时检查仓库授权和分支规则。已有配置缺少所需命令时，审核状态仍保留，并报告等待原因。
+
+### Git 工作树盘点
+
+`ink workspace list --repo /path/to/clone --json` 按本地 clone 列出 Git 登记的工作树及其分支、HEAD、改动和失效状态。省略 `--repo` 时使用当前目录。独立 clone 即使指向同一个远程仓库，也各自维护自己的工作树登记。
