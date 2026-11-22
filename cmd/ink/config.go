@@ -23,6 +23,7 @@ type DaemonConfig struct {
 	GitHubCommandSHA256 string `json:"github_command_sha256,omitempty"`
 	GitHubMergerCommand string `json:"github_merger_command,omitempty"`
 	GitHubMergerSHA256  string `json:"github_merger_command_sha256,omitempty"`
+	WorkspaceFullSlots  int    `json:"workspace_full_slots"`
 	PollSeconds         int    `json:"poll_seconds"`
 	CCConnectURL        string `json:"cc_connect_url"`
 	HTTPURL             string `json:"http_provider_url,omitempty"`
@@ -60,6 +61,7 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		return cfg, nil, err
 	}
 	cfg.PollSeconds = file.PollSeconds
+	cfg.WorkspaceFullSlots = file.WorkspaceFullSlots
 	cfg.GitHubCommand = file.GitHubCommand
 	cfg.GitHubCommandSHA256 = file.GitHubCommandSHA256
 	cfg.GitHubMergerCommand = file.GitHubMergerCommand

@@ -30,7 +30,7 @@ type Repository struct {
 }
 
 func Git(ctx context.Context, path string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"--no-optional-locks", "-C", path}, args...)...)
+	cmd := exec.CommandContext(ctx, "git", append([]string{"--no-optional-locks", "-c", "core.hooksPath=/dev/null", "-C", path}, args...)...)
 	// The selected clone must win over Git's inherited repository overrides.
 	for _, variable := range os.Environ() {
 		if !strings.HasPrefix(variable, "GIT_") {
@@ -142,4 +142,21 @@ func Status(ctx context.Context, path string) (dirty, ignored bool, err error) {
 		}
 	}
 	return dirty, ignored, nil
+}
+
+// CheckIdle protects a clean index during a paused Git operation.
+func CheckIdle(ctx context.Context, path string) error {
+	out, err := Git(ctx, path, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return err
+	}
+	dir := strings.TrimSuffix(string(out), "\n")
+	for _, name := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "BISECT_START", "rebase-merge", "rebase-apply", "sequencer", "index.lock"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return fmt.Errorf("worktree has a Git operation in progress (%s)", name)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }

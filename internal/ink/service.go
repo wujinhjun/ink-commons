@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -16,16 +17,25 @@ import (
 )
 
 type Service struct {
-	store      *stateStore
-	config     Config
-	up         upstream
-	mu         sync.Mutex
-	lastPoll   atomic.Int64
-	delivering map[string]bool
-	providers  map[string]execution.Executor
+	store              *stateStore
+	workspaceMu        sync.Mutex
+	workspaceRoot      string
+	fullWorkspaceSlots int
+	config             Config
+	up                 upstream
+	mu                 sync.Mutex
+	lastPoll           atomic.Int64
+	delivering         map[string]bool
+	providers          map[string]execution.Executor
 }
 
 func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
+	if config.WorkspaceFullSlots < 0 || config.WorkspaceFullSlots > 32 {
+		return nil, fmt.Errorf("workspace_full_slots must be between 0 and 32")
+	}
+	if config.WorkspaceFullSlots == 0 {
+		config.WorkspaceFullSlots = 2
+	}
 	for _, repo := range append([]Repository{config.RepositoryDefaults}, config.Repositories...) {
 		if err := repo.ValidateReviewFeatures(); err != nil {
 			return nil, err
@@ -126,7 +136,15 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 	up.command = config.GitHubCommand
 	up.commandDigest = config.GitHubCommandSHA256
 	up.mergerCommand, up.mergerDigest = config.GitHubMergerCommand, config.GitHubMergerSHA256
-	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool)}, nil
+	stateDir := filepath.Dir(path)
+	if resolved, err := filepath.EvalSymlinks(stateDir); err == nil {
+		stateDir = resolved
+	}
+	if absolute, err := filepath.Abs(stateDir); err == nil {
+		stateDir = absolute
+	}
+	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool),
+		workspaceRoot: filepath.Join(stateDir, "workspaces"), fullWorkspaceSlots: config.WorkspaceFullSlots}, nil
 }
 
 func (s *Service) Close() error { return s.store.db.Close() }
