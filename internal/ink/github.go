@@ -130,8 +130,15 @@ func newUpstream(token string) upstream {
 	}
 }
 
-// Only merge requests use the dedicated write identity.
-func (u upstream) merger() (upstream, error) {
+// Only explicitly opted-in repositories may use the reader App for merge calls.
+func (u upstream) merger(reuseReader bool) (upstream, error) {
+	if reuseReader {
+		if u.command == "" {
+			return upstream{}, fmt.Errorf("auto_merge.reuse_reader_identity requires a GitHub App command")
+		}
+		u.token = ""
+		return u, nil
+	}
 	if u.mergerCommand != "" {
 		u.command, u.commandDigest = u.mergerCommand, u.mergerDigest
 		u.token = ""

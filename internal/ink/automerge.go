@@ -11,8 +11,9 @@ import (
 )
 
 type AutoMergeConfig struct {
-	Enabled bool   `json:"enabled"`
-	Method  string `json:"method,omitempty"`
+	Enabled             bool   `json:"enabled"`
+	Method              string `json:"method,omitempty"`
+	ReuseReaderIdentity bool   `json:"reuse_reader_identity,omitempty"`
 }
 
 func (c *AutoMergeConfig) method() string {
@@ -33,15 +34,16 @@ func (c *AutoMergeConfig) Validate() error {
 }
 
 type AutoMergeRun struct {
-	RequestID string    `json:"request_id,omitempty"`
-	SHA       string    `json:"sha"`
-	Reviewer  string    `json:"reviewer"`
-	ReviewID  int64     `json:"review_id"`
-	Method    string    `json:"method"`
-	State     string    `json:"state"`
-	Reason    string    `json:"reason,omitempty"`
-	MergeSHA  string    `json:"merge_sha,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	RequestID           string    `json:"request_id,omitempty"`
+	ReuseReaderIdentity bool      `json:"reuse_reader_identity,omitempty"`
+	SHA                 string    `json:"sha"`
+	Reviewer            string    `json:"reviewer"`
+	ReviewID            int64     `json:"review_id"`
+	Method              string    `json:"method"`
+	State               string    `json:"state"`
+	Reason              string    `json:"reason,omitempty"`
+	MergeSHA            string    `json:"merge_sha,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 func (run AutoMergeRun) inFlight() bool {
@@ -192,7 +194,12 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 			return false, nil
 		}
 		current, ok := s.repo(repo.Repo)
-		if !ok || current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method || w.Phase != "approved" || w.Pull.Head.SHA != run.SHA || !strings.EqualFold(w.Reviewer.GitHubLogin, run.Reviewer) {
+		if !ok || current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method ||
+			current.AutoMerge.ReuseReaderIdentity != run.ReuseReaderIdentity || w.Phase != "approved" || w.Pull.Head.SHA != run.SHA || !strings.EqualFold(w.Reviewer.GitHubLogin, run.Reviewer) {
+			return false, nil
+		}
+		merger, err := s.up.merger(run.ReuseReaderIdentity)
+		if err != nil || sameAppCommand(w.Reviewer.GitHubCommand, merger.command) {
 			return false, nil
 		}
 	}
@@ -271,7 +278,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 			return nil
 		}
 	}
-	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting"}
+	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting", ReuseReaderIdentity: repo.AutoMerge.ReuseReaderIdentity}
 	version, observedPull, reviewerCommand := w.Version, w.Pull, w.Reviewer.GitHubCommand
 	confirmingConflict := w.MergeConflict != nil
 	trackingConflict := confirmingConflict || (w.Task != nil && w.Task.ConflictBase != nil)
@@ -327,7 +334,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	if pull.Mergeable == nil || !*pull.Mergeable || pull.MergeableState != "clean" {
 		return wait("GitHub has not reported a clean, mergeable PR")
 	}
-	mergeUpstream, err := s.up.merger()
+	mergeUpstream, err := s.up.merger(run.ReuseReaderIdentity)
 	if err != nil {
 		return wait(err.Error())
 	}
