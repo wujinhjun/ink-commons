@@ -171,7 +171,7 @@ class UpgradeTest(unittest.TestCase):
         self.current.mkdir(parents=True)
         self.entry = self.root / 'ink'
         self.entry.symlink_to(self.current / 'ink')
-        (self.current / 'config.json').write_text(json.dumps({'github_command': '/test/yuxingyi'}))
+        (self.current / 'config.json').write_text(json.dumps({'github_command': '/test/github-app-cli'}))
         binary = b'current cc-connect'
         (self.current / 'cc-connect').write_bytes(binary)
         (self.current / 'deployment.json').write_text(json.dumps({
@@ -206,7 +206,7 @@ class UpgradeTest(unittest.TestCase):
         real_run = m.run
 
         def run(args, **kwargs):
-            if args[0] != '/test/yuxingyi':
+            if args[0] != '/test/github-app-cli':
                 return real_run(args, **kwargs)
             self.assertEqual(args[5:8], ['release', 'download', 'build-' + revision])
             self.assertEqual(args[10:], ['--pattern=SHA256SUMS'])
@@ -217,7 +217,7 @@ class UpgradeTest(unittest.TestCase):
     def test_downloads_main_and_reuses_current_configuration(self):
         def run(args, **kwargs):
             self.calls.append(args)
-            if args[0] == '/test/yuxingyi':
+            if args[0] == '/test/github-app-cli':
                 self.assertEqual(kwargs['env']['HTTPS_PROXY'], 'http://127.0.0.1:7897')
                 self.assertEqual(kwargs['env']['NODE_OPTIONS'], '--use-env-proxy')
                 self.assertEqual(kwargs['env']['PATH'], '/usr/bin:/bin')
@@ -242,7 +242,7 @@ class UpgradeTest(unittest.TestCase):
 
         staged.assert_called_once()
         activate.assert_called_once_with(self.target)
-        self.assertEqual(self.calls[0][:6], ['/test/yuxingyi', '--profile', 'inspect', '-R', m.REPOSITORY, 'api'])
+        self.assertEqual(self.calls[0][:6], ['/test/github-app-cli', '--profile', 'inspect', '-R', m.REPOSITORY, 'api'])
         self.assertEqual(self.calls[1][5:8], ['release', 'download', 'build-' + self.target.name])
         self.assertIn('--pattern=manage.py', self.calls[1])
         self.assertIn('--pattern=runtime.py', self.calls[1])
