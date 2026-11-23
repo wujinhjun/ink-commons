@@ -376,7 +376,7 @@ func TestCooperativeWakeRequiresClaimBeforeAnyWork(t *testing.T) {
 	if err := e.WakeTask(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, execution.Delivery{TaskID: "task-1", URL: "https://github.com/acme/project/pull/42"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"not an execution authorization", "ink task claim --task task-1", "first=true", "first=false", "--handoff", "--request-id", "--new-sha", "--review-id", "After handoff, perform no more work", "never repeat code work"} {
+	for _, required := range []string{"not an execution authorization", "ink task claim --task task-1", "--provider 'cc-connect'", "--target 'developer'", "--session 'discord:123'", "first=true", "first=false", "--handoff", "--request-id", "--new-sha", "--review-id", "After handoff, perform no more work", "never repeat code work"} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("missing %q", required)
 		}
@@ -399,7 +399,7 @@ func TestCooperativeWakeRequiresClaimBeforeAnyWork(t *testing.T) {
 	wantHeader := "Ink Commons: GitHub reports a merge conflict after approval.\n" +
 		"PR: https://github.com/acme/project/pull/42\n" +
 		"Target branch: main\n" +
-		"First run: ink task claim --task conflict-task\n"
+		"First run: ink task claim --task conflict-task --provider 'cc-connect' --target 'developer' --session 'discord:123'\n"
 	if !strings.HasPrefix(prompt, wantHeader) {
 		t.Fatalf("unexpected merge conflict wake: %s", prompt)
 	}

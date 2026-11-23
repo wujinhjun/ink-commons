@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -16,16 +17,25 @@ import (
 )
 
 type Service struct {
-	store      *stateStore
-	config     Config
-	up         upstream
-	mu         sync.Mutex
-	lastPoll   atomic.Int64
-	delivering map[string]bool
-	providers  map[string]execution.Executor
+	store              *stateStore
+	workspaceMu        sync.Mutex
+	workspaceRoot      string
+	fullWorkspaceSlots int
+	config             Config
+	up                 upstream
+	mu                 sync.Mutex
+	lastPoll           atomic.Int64
+	delivering         map[string]bool
+	providers          map[string]execution.Executor
 }
 
 func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
+	if config.WorkspaceFullSlots < 0 || config.WorkspaceFullSlots > 32 {
+		return nil, fmt.Errorf("workspace_full_slots must be between 0 and 32")
+	}
+	if config.WorkspaceFullSlots == 0 {
+		config.WorkspaceFullSlots = 2
+	}
 	for _, repo := range append([]Repository{config.RepositoryDefaults}, config.Repositories...) {
 		if err := repo.ValidateReviewFeatures(); err != nil {
 			return nil, err
@@ -124,7 +134,18 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 	}
 	up := newUpstream(config.GitHubToken)
 	up.command = config.GitHubCommand
-	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool)}, nil
+	up.commandDigest = config.GitHubCommandSHA256
+	up.readArgs, up.mergeArgs = config.GitHubReadArgs, config.GitHubMergeArgs
+	up.mergerCommand, up.mergerDigest = config.GitHubMergerCommand, config.GitHubMergerSHA256
+	stateDir := filepath.Dir(path)
+	if resolved, err := filepath.EvalSymlinks(stateDir); err == nil {
+		stateDir = resolved
+	}
+	if absolute, err := filepath.Abs(stateDir); err == nil {
+		stateDir = absolute
+	}
+	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool),
+		workspaceRoot: filepath.Join(stateDir, "workspaces"), fullWorkspaceSlots: config.WorkspaceFullSlots}, nil
 }
 
 func (s *Service) Close() error { return s.store.db.Close() }
@@ -351,7 +372,7 @@ func prunePushes(st *state, now time.Time) {
 	st.Pushes = kept
 }
 
-func (s *Service) beginDelivery(id string) (*Work, error) {
+func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Work, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.store.load()
@@ -373,6 +394,15 @@ func (s *Service) beginDelivery(id string) (*Work, error) {
 		work.Task.Error = "review preparation: " + err.Error()
 		work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 		return nil, s.store.save(st)
+	}
+
+	if current, err := channelCheck.result(s, work); !current || err != nil {
+		if err != nil {
+			work.Task.Error = "review preparation: " + err.Error()
+			work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+			return nil, s.store.save(st)
+		}
+		return nil, nil
 	}
 
 	if err := s.freezeTaskConfig(work); err != nil {
@@ -437,11 +467,15 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 	if ctx.Err() != nil {
 		return nil
 	}
-	if handled, err := s.dispatchHandoff(ctx, repo, number); handled || err != nil {
+	id := key(repo.Repo, number)
+	channelCheck, err := s.checkReviewChannel(ctx, id)
+	if err != nil {
 		return err
 	}
-	id := key(repo.Repo, number)
-	work, err := s.beginDelivery(id)
+	if handled, err := s.dispatchHandoff(ctx, id, channelCheck); handled || err != nil {
+		return err
+	}
+	work, err := s.beginDelivery(id, channelCheck)
 	if err != nil || work == nil {
 		return err
 	}
@@ -482,7 +516,11 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 			task.Error = "invalid preparation context: " + err.Error()
 			return s.saveDelivery(id, work)
 		}
-		session, err := executor.Prepare(ctx, *route, delivery)
+		preparation := delivery
+		if delivery.RequireSameChannel {
+			preparation.ReviewPlacement = channelCheck.placement
+		}
+		session, err := executor.Prepare(ctx, *route, preparation)
 		if err != nil {
 			task.Error = "prepare destination: " + err.Error()
 			return s.saveDelivery(id, work)

@@ -453,3 +453,16 @@ func TestConfigurationExportOmitsLegacyImportArchive(t *testing.T) {
 		t.Fatalf("unexpected scopes in exported declaration: %s", w.Body.Bytes())
 	}
 }
+
+func TestSharedMergeConfigRejectsMissingCommandAndReviewerReuse(t *testing.T) {
+	f := newAutoMergeFixture(t)
+	enable := `{"enabled":true,"reuse_reader_identity":true}`
+	configAPI(t, f.s, "POST", f.repo.Repo, "auto_merge", enable, 400)
+	command := filepath.Join(t.TempDir(), "reader")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.s.up.command = command
+	configAPI(t, f.s, "POST", f.repo.Repo, "reviewer_command", string(jsonValue(command)), 200)
+	configAPI(t, f.s, "POST", f.repo.Repo, "auto_merge", enable, 400)
+}

@@ -12,8 +12,9 @@ import (
 )
 
 // ReviewFeatures is opt-in. An explicit empty object overrides registration
-// defaults; the two features can be enabled independently.
+// defaults; the features can be enabled independently.
 type ReviewFeatures struct {
+	RequireSameChannel     bool                  `json:"require_same_channel,omitempty"`
 	ReuseDevelopmentThread bool                  `json:"reuse_development_thread,omitempty"`
 	Context                ReviewContextFeatures `json:"context,omitempty"`
 }
@@ -26,7 +27,7 @@ func (r Repository) ValidateReviewFeatures() error {
 	if r.TaskMode != "" && r.TaskMode != "legacy" && r.TaskMode != "cooperative" {
 		return fmt.Errorf("task_mode must be legacy or cooperative")
 	}
-	if r.Review != nil && (r.Review.ReuseDevelopmentThread || r.Review.Context.ThreadHistory) && r.ReviewerRoute != nil && r.ReviewerRoute.Provider != ccconnect.Name {
+	if r.Review != nil && (r.Review.RequireSameChannel || r.Review.ReuseDevelopmentThread || r.Review.Context.ThreadHistory) && r.ReviewerRoute != nil && r.ReviewerRoute.Provider != ccconnect.Name {
 		return fmt.Errorf("review thread features require a cc-connect reviewer route")
 	}
 	return nil
@@ -36,7 +37,7 @@ func (r Repository) ValidateReviewFeatures() error {
 // history still needs provenance when an explicit reviewer session/parent means
 // that normal session preparation would otherwise skip the source checks.
 func (s *Service) validateReviewPreparation(w *Work) error {
-	if w.Task.Role != "reviewer" || w.Review == nil || (!w.Review.ReuseDevelopmentThread && !w.Review.Context.ThreadHistory) {
+	if w.Task.Role != "reviewer" || w.Review == nil || (!w.Review.RequireSameChannel && !w.Review.ReuseDevelopmentThread && !w.Review.Context.ThreadHistory) {
 		return nil
 	}
 	if w.Reviewer.Route == nil || w.Reviewer.Route.Provider != ccconnect.Name {
