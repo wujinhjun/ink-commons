@@ -147,6 +147,33 @@ def verify_revision(binary, revision):
         raise DeploymentError('ink artifact revision does not match --revision')
 
 
+def config_drift(data, declaration):
+    if not declaration:
+        return {'status': 'not_configured'}
+    try:
+        expected = json.loads(Path(declaration).read_text())
+    except OSError:
+        return {'status': 'declaration_unavailable'}
+    except (TypeError, ValueError):
+        return {'status': 'invalid_declaration'}
+    if not isinstance(expected, dict) or expected.get('schema') != 1 or not all(
+            isinstance(expected.get(key), dict) for key in ('global', 'repositories')):
+        return {'status': 'invalid_declaration'}
+    try:
+        actual = local_get(data, '/v1/config/export', timeout=2)
+        if not isinstance(actual, dict) or actual.get('schema') != 1 or not all(
+                isinstance(actual.get(key), dict) for key in ('global', 'repositories')):
+            return {'status': 'unavailable'}
+    except (OSError, ValueError, IndexError, DeploymentError):
+        return {'status': 'unavailable'}
+    scopes = sorted(set(expected['repositories']) | set(actual['repositories']))
+    changed = [scope for scope in scopes
+               if expected['repositories'].get(scope) != actual['repositories'].get(scope)]
+    if expected['global'] != actual['global']:
+        changed.insert(0, 'global')
+    return {'status': 'changed' if changed else 'match', 'scopes': changed}
+
+
 def validate_release_repo(repo):
     if not isinstance(repo, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+', repo):
         raise DeploymentError('release repository must be owner/repo')
@@ -230,6 +257,9 @@ def stage(args, *, reuse=False):
     if release.exists() and not reuse:
         raise DeploymentError('release already exists; select an unstaged revision or use set-release-repo to change the active source')
     config = json.loads(Path(args.config).expanduser().read_text())
+    legacy = sorted(config.keys() & {'repositories', 'repository_defaults', 'execution'})
+    if legacy:
+        print('Legacy SQLite first-import fields:', ', '.join(legacy))
     command_path = args.github_command or config.get('github_command')
     if not command_path:
         raise DeploymentError('configure an absolute GitHub reader CLI path')
@@ -250,6 +280,12 @@ def stage(args, *, reuse=False):
         settings['release_repo'] = validate_release_repo(release_repo)
     if service_path is not None:
         settings['service_path'] = validate_service_path(service_path)
+    declaration = getattr(args, 'runtime_declaration', None)
+    if declaration:
+        if isinstance(declaration, str):
+            declaration = os.path.abspath(os.path.expanduser(declaration))
+            settings['runtime_declaration'] = declaration
+        print(json.dumps({'config_drift': config_drift(settings['data'], declaration)}))
     if getattr(args, 'credentials', None):
         settings['credentials'] = str(Path(args.credentials).expanduser().resolve())
     elif args.cc_config:
@@ -398,7 +434,12 @@ def verify_staged_settings(target, config, expected_settings):
         staged_settings = json.loads((target / 'deployment.json').read_text())
     except (OSError, ValueError):
         raise DeploymentError('staged release configuration is missing or invalid') from None
-    if staged_config != config or staged_settings != expected_settings:
+    if not isinstance(staged_settings, dict):
+        raise DeploymentError('staged release configuration is missing or invalid')
+    # The declaration controls diagnostic reporting only.
+    staged_settings.pop('runtime_declaration', None)
+    expected = {key: value for key, value in expected_settings.items() if key != 'runtime_declaration'}
+    if staged_config != config or staged_settings != expected:
         raise DeploymentError('staged release configuration differs from the current deployment; '
                               'archive the staged release before retrying')
 
@@ -484,6 +525,8 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
     if reuse and target != current:
         expected = {key: value for key, value in settings.items() if key != 'cc_binary_sha256'}
         verify_staged_settings(target, config, {**expected, 'revision': revision})
+    if reuse and settings.get('runtime_declaration'):
+        print(json.dumps({'config_drift': config_drift(settings['data'], settings['runtime_declaration'])}))
 
     assets = ('SHA256SUMS',) if reuse else (*BUNDLE_FILES, 'SHA256SUMS')
     allowed_signers = settings.get('allowed_signers')
@@ -507,6 +550,7 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
                 project=settings.get('project'), credentials=settings.get('credentials'),
                 env=proxy_entries, allowed_signers=allowed_signers, release_repo=settings.get('release_repo'),
                 service_path=settings.get('service_path'),
+                runtime_declaration=settings.get('runtime_declaration'),
             ))
 
     if not apply:
@@ -855,6 +899,9 @@ def status(args):
         report['runtime'] = health(data)
     except (OSError, ValueError, IndexError):
         report['runtime'] = {'status': 'unavailable'}
+    if 'manifest' in locals() and manifest.is_file():
+        active_settings = json.loads(manifest.read_text())
+        report['config_drift'] = config_drift(data, active_settings.get('runtime_declaration'))
     print(json.dumps(report, indent=2))
 
 
@@ -867,6 +914,7 @@ def main():
     install = commands.add_parser('deploy', help='install from a GitHub Release bundle')
     for prepare in (build, install):
         prepare.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
+        prepare.add_argument('--runtime-declaration', help='SQLite policy declaration for read-only drift reporting')
         prepare.add_argument('--config', default='~/.config/ink-commons/config.json')
         prepare.add_argument('--allowed-signers', help='OpenSSH allowed_signers trust file for release signatures')
         prepare.add_argument('--credentials', help='private JSON file for configured provider tokens')

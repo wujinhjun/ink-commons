@@ -125,6 +125,16 @@ class ArtifactStageTest(unittest.TestCase):
         with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: runtime.py'):
             m.verify_activation_signature(self.home, self.releases.parent, release, settings)
 
+    def test_stage_reports_invalid_declaration_without_blocking(self):
+        self.write_bundle()
+        declaration = self.home / 'policy.json'
+        declaration.write_text('{unreadable JSON')
+        self.args.runtime_declaration = str(declaration)
+        with patch('builtins.print') as printed:
+            self.stage()
+        printed.assert_any_call(json.dumps({'config_drift': {'status': 'invalid_declaration'}}))
+        self.assertTrue((self.releases / self.revision / 'deployment.json').is_file())
+
     def test_rejects_tampered_binary(self):
         self.write_artifact(self.revision)
         (self.artifact / 'ink').write_bytes(b'tampered')
@@ -527,6 +537,30 @@ class UpgradeTest(unittest.TestCase):
             m.upgrade_system(self.root, self.entry, apply=True)
 
         activate.assert_called_once_with(self.target)
+
+    def test_rollback_reuses_legacy_stage_and_reports_missing_declaration(self):
+        self.make_staged_target()
+        release_manifest = self.make_published_manifest(self.target)
+        deployment = self.current / 'deployment.json'
+        policy = self.root / 'policy.json'
+        declaration = {'schema': 1, 'global': {}, 'repositories': {}}
+        policy.write_text(json.dumps(declaration))
+        deployment.write_text(json.dumps({
+            **json.loads(deployment.read_text()), 'runtime_declaration': str(policy),
+        }))
+        tag = 'build-' + self.target.name
+        for exists in (True, False):
+            with self.subTest(declaration_exists=exists):
+                if not exists:
+                    policy.unlink()
+                with self.mock_manifest_download(release_manifest, self.target.name), \
+                     patch.object(m, 'select_release', return_value=(tag, self.target.name)), \
+                     patch.object(m, 'local_get', return_value=declaration), \
+                     patch.object(m, 'activate_staged') as activate, patch('builtins.print') as printed:
+                    m.upgrade_system(self.root, self.entry, tag=tag, apply=True)
+                activate.assert_called_once_with(self.target)
+                report = {'status': 'match', 'scopes': []} if exists else {'status': 'declaration_unavailable'}
+                printed.assert_any_call(json.dumps({'config_drift': report}))
 
     def test_rejects_tampered_staged_scripts_using_published_manifest(self):
         self.make_staged_target()
@@ -1016,6 +1050,16 @@ class MacOSOutputTest(unittest.TestCase):
         with patch.object(m.fcntl,'flock',side_effect=BlockingIOError()), patch.object(m.time,'monotonic',side_effect=[0,6]):
             with self.assertRaises(m.DeploymentError):
                 m.acquire_state_lock(stream)
+
+    def test_config_drift_reports_changed_scopes_without_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            declaration = Path(tmp) / 'policy.json'
+            declaration.write_text(json.dumps({'schema': 1, 'global': {},
+                                               'repositories': {'acme/demo': {'reviewer_login': 'old'}}}))
+            with patch.object(m, 'local_get', return_value={'schema': 1, 'global': {},
+                        'repositories': {'acme/demo': {'reviewer_login': 'new'}}}):
+                self.assertEqual(m.config_drift(tmp, declaration),
+                                 {'status': 'changed', 'scopes': ['acme/demo']})
 
     def test_no_proxy_rejects_non_host_text(self):
         self.assertEqual(m.parse_env(['NO_PROXY=localhost,127.0.0.1,.example.com,[::1]'])['NO_PROXY'],'localhost,127.0.0.1,.example.com,[::1]')

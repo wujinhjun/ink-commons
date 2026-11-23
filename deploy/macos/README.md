@@ -73,6 +73,14 @@ python3.12 ./manage.py upgrade --apply
 
 激活后通过 `python3.12 ./manage.py status --user "$(id -un)"` 核对系统域、运行 SHA 和已打开的 gate。后续使用已安装的 `ink upgrade`。
 
+## 配置权威与 drift
+
+`~/.config/ink-commons/config.json` 是手动暂存的默认输入。活动 release 的 `config.json` 是服务生效的静态启动配置，也是自动升级继承的来源。要应用新的手工配置，可以在暂存时显式指定文件。
+
+运行期仓库、reviewer、合入策略和执行参数以 SQLite 为准。JSON 中的 `repositories`、`repository_defaults` 和 `execution` 是旧数据库首次导入字段，暂存会逐项标记。SQLite 初始化后，通过 `ink config` 维护这些策略。
+
+执行 `(umask 077; ink config export > runtime-policy.json)` 可导出声明。部署时传 `--runtime-declaration runtime-policy.json`，暂存、升级及 status 会比对并报告有变化的范围。声明仅用于比对。文件缺失、不可读或格式错误时报告诊断，暂存、升级和回滚继续执行。首次安装尚无运行中 daemon 时报告 `unavailable`。声明可能包含本机路由和命令配置，应按私有文件保存。
+
 ## 验收与恢复
 
 - 暂存、激活和失败恢复均不复制 cc-connect，不修改其 plist，不停止或删除 watchdog。配置了 endpoint 时，切换前后会做只读探测。

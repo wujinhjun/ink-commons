@@ -433,6 +433,27 @@ func TestEqualReviewerAssignmentStillPinsPROverride(t *testing.T) {
 	}
 }
 
+func TestConfigurationExportOmitsLegacyImportArchive(t *testing.T) {
+	s, err := NewService(Config{Repositories: []Repository{{Repo: "acme/project", ReviewerLogin: "reviewer"}}},
+		filepath.Join(t.TempDir(), stateDatabase), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/config/export", nil))
+	var result struct {
+		Schema       int                     `json:"schema"`
+		Repositories map[string]ConfigValues `json:"repositories"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != 200 || result.Schema != 1 {
+		t.Fatalf("export: HTTP %d, %v", w.Code, err)
+	}
+	if len(result.Repositories) != 1 || stringConfigValue(result.Repositories["acme/project"]["reviewer_login"]) != "reviewer" {
+		t.Fatalf("unexpected scopes in exported declaration: %s", w.Body.Bytes())
+	}
+}
+
 func TestSharedMergeConfigRejectsMissingCommandAndReviewerReuse(t *testing.T) {
 	f := newAutoMergeFixture(t)
 	enable := `{"enabled":true,"reuse_reader_identity":true}`
