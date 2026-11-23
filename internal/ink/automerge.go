@@ -3,6 +3,7 @@ package ink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,8 +11,9 @@ import (
 )
 
 type AutoMergeConfig struct {
-	Enabled bool   `json:"enabled"`
-	Method  string `json:"method,omitempty"`
+	Enabled             bool   `json:"enabled"`
+	Method              string `json:"method,omitempty"`
+	ReuseReaderIdentity bool   `json:"reuse_reader_identity,omitempty"`
 }
 
 func (c *AutoMergeConfig) method() string {
@@ -32,15 +34,16 @@ func (c *AutoMergeConfig) Validate() error {
 }
 
 type AutoMergeRun struct {
-	RequestID string    `json:"request_id,omitempty"`
-	SHA       string    `json:"sha"`
-	Reviewer  string    `json:"reviewer"`
-	ReviewID  int64     `json:"review_id"`
-	Method    string    `json:"method"`
-	State     string    `json:"state"`
-	Reason    string    `json:"reason,omitempty"`
-	MergeSHA  string    `json:"merge_sha,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	RequestID           string    `json:"request_id,omitempty"`
+	ReuseReaderIdentity bool      `json:"reuse_reader_identity,omitempty"`
+	SHA                 string    `json:"sha"`
+	Reviewer            string    `json:"reviewer"`
+	ReviewID            int64     `json:"review_id"`
+	Method              string    `json:"method"`
+	State               string    `json:"state"`
+	Reason              string    `json:"reason,omitempty"`
+	MergeSHA            string    `json:"merge_sha,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 func (run AutoMergeRun) inFlight() bool {
@@ -191,7 +194,12 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 			return false, nil
 		}
 		current, ok := s.repo(repo.Repo)
-		if !ok || current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method || w.Phase != "approved" || w.Pull.Head.SHA != run.SHA || !strings.EqualFold(w.Reviewer.GitHubLogin, run.Reviewer) {
+		if !ok || current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method ||
+			current.AutoMerge.ReuseReaderIdentity != run.ReuseReaderIdentity || w.Phase != "approved" || w.Pull.Head.SHA != run.SHA || !strings.EqualFold(w.Reviewer.GitHubLogin, run.Reviewer) {
+			return false, nil
+		}
+		merger, err := s.up.merger(run.ReuseReaderIdentity)
+		if err != nil || sameAppCommand(w.Reviewer.GitHubCommand, merger.command) {
 			return false, nil
 		}
 	}
@@ -270,10 +278,11 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 			return nil
 		}
 	}
-	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting"}
-	version, observedPull := w.Version, w.Pull
+	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting", ReuseReaderIdentity: repo.AutoMerge.ReuseReaderIdentity}
+	version, observedPull, reviewerCommand := w.Version, w.Pull, w.Reviewer.GitHubCommand
 	confirmingConflict := w.MergeConflict != nil
 	trackingConflict := confirmingConflict || (w.Task != nil && w.Task.ConflictBase != nil)
+	observedConflictBase := w.conflictBase()
 	s.mu.Unlock()
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo.Repo, number)
 	wait := func(reason string) error {
@@ -286,7 +295,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	if _, _, err := s.up.gitHubJSON(ctx, http.MethodGet, path, "inspect", stackAPIVersion, nil, &pull); err != nil {
 		if confirmingConflict {
 			observedPull.Mergeable = nil
-			if err := s.observeMergeConflict(repo.Repo, number, version, observedPull, false); err != nil {
+			if err := s.observeMergeConflict(repo.Repo, number, version, observedPull, PullBase{}, false); err != nil {
 				return err
 			}
 		}
@@ -299,8 +308,23 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		return wait("waiting for this PR to become the bottom of its GitHub stack")
 	}
 	dirty := pull.Mergeable != nil && !*pull.Mergeable && pull.MergeableState == "dirty"
+	mergeable := pull.Mergeable != nil && *pull.Mergeable
+	var base PullBase
+	if (dirty && repo.TaskMode == "cooperative") || (trackingConflict && mergeable && pull.Base != observedConflictBase) {
+		var err error
+		base, err = s.up.verifyConflictBase(ctx, repo.Repo, pull, dirty)
+		if err != nil {
+			if dirty && confirmingConflict {
+				pull.Mergeable = nil
+				if resetErr := s.observeMergeConflict(repo.Repo, number, version, pull, PullBase{}, false); resetErr != nil {
+					return resetErr
+				}
+			}
+			return wait("cannot confirm mergeability against the current GitHub base ref")
+		}
+	}
 	if trackingConflict || dirty {
-		if err := s.observeMergeConflict(repo.Repo, number, version, pull, dirty); err != nil {
+		if err := s.observeMergeConflict(repo.Repo, number, version, pull, base, dirty); err != nil {
 			return err
 		}
 	}
@@ -309,6 +333,13 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	if pull.Mergeable == nil || !*pull.Mergeable || pull.MergeableState != "clean" {
 		return wait("GitHub has not reported a clean, mergeable PR")
+	}
+	mergeUpstream, err := s.up.merger(run.ReuseReaderIdentity)
+	if err != nil {
+		return wait(err.Error())
+	}
+	if sameAppCommand(reviewerCommand, mergeUpstream.command) {
+		return wait("reviewer and merger must use separate GitHub Apps")
 	}
 	refs := []string{run.SHA}
 	if validSHA(pull.MergeCommitSHA) && pull.MergeCommitSHA != run.SHA {
@@ -347,12 +378,16 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		return err
 	}
 	if fresh.Stack != nil {
-		return s.startStackMerge(ctx, repo, number, run)
+		return s.startStackMerge(ctx, repo, number, run, mergeUpstream)
 	}
-	mergeSHA, err := s.up.merge(ctx, repo.Repo, number, run.SHA, run.Method)
-	if err != nil {
+	mergeSHA, err := mergeUpstream.merge(ctx, repo.Repo, number, run.SHA, run.Method)
+	switch {
+	case errors.Is(err, errAppCommandNotStarted):
+		run.State = "waiting"
+		run.Reason = err.Error()
+	case err != nil:
 		run.Reason = "merge request failed or response was lost: " + err.Error() + "; verify GitHub before taking action"
-	} else {
+	default:
 		run.State = "merged"
 		run.Reason = ""
 		run.MergeSHA = mergeSHA

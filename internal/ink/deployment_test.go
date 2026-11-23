@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,11 +28,13 @@ func TestDeploymentGateBlocksPollingAndWrites(t *testing.T) {
 	defer service.Close()
 	service.up.github = upstream.URL
 	// HTTP mutations must be blocked too, so a concurrent hook cannot be lost on rollback.
-	request := httptest.NewRequest(http.MethodPost, "/v1/pushes", nil)
-	response := httptest.NewRecorder()
-	service.Handler().ServeHTTP(response, request)
-	if response.Code != 503 {
-		t.Fatal(response.Code)
+	handler := service.Handler()
+	for _, path := range []string{"/v1/pushes", "/v1/work/acme/project/42/assign", "/v1/tasks/old/retry"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s: got %d, want 503", path, response.Code)
+		}
 	}
 	if service.pollReady() {
 		t.Fatal("gate is closed")
@@ -97,5 +100,38 @@ func TestServeDeploymentWaitsForGate(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("shutdown timed out")
+	}
+}
+
+func TestConfigOnlyPermitsConfigWritesWithPollingDisabled(t *testing.T) {
+	dir := t.TempDir()
+	gate := filepath.Join(dir, "enabled")
+	if err := os.WriteFile(gate, []byte("ready"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(Config{PollGate: gate, ConfigOnly: true}, filepath.Join(dir, "state.sqlite3"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	handler := service.Handler()
+	const path = "/v1/config?key=reviewer_login"
+	for _, test := range []struct {
+		method, path, body string
+		status             int
+	}{
+		{http.MethodPost, path, `{"value":"reviewer[bot]"}`, http.StatusOK},
+		{http.MethodGet, path, "", http.StatusOK},
+		{http.MethodDelete, path, "", http.StatusOK},
+		{http.MethodPost, "/v1/pushes", "", http.StatusServiceUnavailable},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(test.method, test.path, strings.NewReader(test.body)))
+		if response.Code != test.status {
+			t.Fatalf("%s %s: got %d, want %d (%s)", test.method, test.path, response.Code, test.status, response.Body)
+		}
+	}
+	if service.pollReady() {
+		t.Fatal("a preexisting deployment gate file enabled polling in config-only mode")
 	}
 }

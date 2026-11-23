@@ -54,18 +54,20 @@ def token_environment(cc_token, discord_token):
     return result
 
 
-def main():
+def main(args=()):
     try:
+        if args not in ((), ('--config-only',)):
+            sys.exit('usage: runtime.py [--config-only]')
         release = Path(__file__).resolve().parent
         settings = json.loads((release / 'deployment.json').read_text())
         env = credential_environment(settings)
         os.execve(str(release / 'ink'), [str(release / 'ink'), 'serve', '-config',
                   str(release / 'config.json'), '-data', settings['data'],
-                  '-poll-gate', str(release / 'enabled')], env)
+                  '-poll-gate', str(release / 'enabled'), *args], env)
     except Exception:
         # TOML 解析异常可能包含配置原文，不把它输出到 launchd 日志。
         sys.exit('ink runtime: configuration unavailable; inspect private local configuration')
 
 
 if __name__ == '__main__':
-    main()
+    main(tuple(sys.argv[1:]))

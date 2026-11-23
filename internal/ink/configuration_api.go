@@ -2,7 +2,9 @@ package ink
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -44,6 +46,29 @@ func (s *Service) validateEffective(repo Repository) error {
 		}
 	}
 	return execution.ValidateDestination(s.providers, *repo.ReviewerRoute, true)
+}
+
+func (s *Service) validateAutoMergeIdentity(repo Repository) error {
+	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled {
+		return nil
+	}
+	merger, err := s.up.merger(repo.AutoMerge.ReuseReaderIdentity)
+	if err != nil {
+		return err
+	}
+	if merger.command == "" {
+		return fmt.Errorf("automatic merge requires a dedicated GitHub merger App")
+	}
+	if _, err := exec.LookPath(merger.command); err != nil {
+		return fmt.Errorf("configured GitHub merge command is unavailable")
+	}
+	if err := checkCommandDigest(merger.command, merger.commandDigest); err != nil {
+		return err
+	}
+	if sameAppCommand(repo.ReviewerCommand, merger.command) {
+		return fmt.Errorf("reviewer and merger must use separate GitHub Apps")
+	}
+	return nil
 }
 
 // Configuration is a central daemon API. It never opens a business checkout.

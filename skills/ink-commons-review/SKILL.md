@@ -7,7 +7,7 @@ description: Review an exact GitHub PR revision assigned through Ink Commons; re
 
 New installations should use the complete `ink-commons-workflow` skill installed by `ink init`. This reviewer entry remains for existing installations.
 
-For a cooperative task wake, first run `ink task claim --task TASK_ID`. Only a successful `first:true` authorizes work. On `first:false` or conflict, report the state and end the turn rather than reviewing again.
+For a cooperative task wake, first run the claim command from the wake, including its `--provider` / `--target` / `--session` route flags. Only a successful `first:true` authorizes work. On `first:false` or conflict, report the state and end the turn rather than reviewing again. Older wakes without route flags may use `CC_PROJECT` / `CC_SESSION_KEY`. If an older credential has no `rejected` marker after a confirmed 403, retry the same `--task` and `--claim-file` with `--replace-route` and the explicit route; keep the file for handoff.
 
 Read the returned delivery for the exact SHA, assigned GitHub identity/command and context cutoff. Read enabled background via `ink context`. Inspect that revision and run appropriate checks in an isolated worktree when necessary. Submit a formal APPROVED or CHANGES_REQUESTED GitHub review using the assigned identity and explicit `commit_id`; a conversation reply is not a formal review.
 

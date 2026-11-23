@@ -216,7 +216,7 @@ func TestSQLiteV1RegistrationMigration(t *testing.T) {
 	if err := s.save(original); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec("DROP TABLE runtime_config; DROP TABLE repositories; PRAGMA user_version=1"); err != nil {
+	if _, err := s.db.Exec("DROP TABLE workspace_allocations; DROP TABLE runtime_config; DROP TABLE repositories; PRAGMA user_version=1"); err != nil {
 		t.Fatal(err)
 	}
 	s.db.Close()
