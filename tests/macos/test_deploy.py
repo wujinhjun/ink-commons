@@ -92,7 +92,10 @@ class ArtifactStageTest(unittest.TestCase):
 
 
     def write_bundle(self):
-        self.revision = 'c' * 40
+        self.write_bundle_for('c' * 40)
+
+    def write_bundle_for(self, revision):
+        self.revision = revision
         self.args.revision = self.revision
         self.write_artifact(self.revision)
         (self.artifact / 'REVISION').write_text(self.revision + '\n')
@@ -160,6 +163,63 @@ class ArtifactStageTest(unittest.TestCase):
             self.stage()
         self.assertEqual(list(self.releases.iterdir()), [])
 
+    def stage_active_bundle(self):
+        self.write_bundle()
+        self.args.release_repo = 'old-owner/ink'
+        self.args.service_path = '/custom/bin:/usr/bin:/bin'
+        self.stage()
+        release = self.releases / self.revision
+        (self.releases.parent / 'ink').symlink_to(release / 'ink')
+        return release
+
+    def test_manual_stage_inherits_active_settings_and_honors_explicit_override(self):
+        self.stage_active_bundle()
+        self.args.release_repo = None
+        self.args.service_path = None
+        self.write_bundle_for('d' * 40)
+        self.stage()
+        settings = json.loads((self.releases / self.revision / 'deployment.json').read_text())
+        self.assertEqual(settings['release_repo'], 'old-owner/ink')
+        self.assertEqual(settings['service_path'], '/custom/bin:/usr/bin:/bin')
+        self.args.release_repo = 'new-owner/fork'
+        self.write_bundle_for('e' * 40)
+        self.stage()
+        settings = json.loads((self.releases / self.revision / 'deployment.json').read_text())
+        self.assertEqual(settings['release_repo'], 'new-owner/fork')
+        self.assertEqual(settings['service_path'], '/custom/bin:/usr/bin:/bin')
+
+    def test_stage_rejects_unreadable_active_metadata_instead_of_using_defaults(self):
+        active = self.stage_active_bundle()
+        (active / 'deployment.json').write_text('{corrupt')
+        self.args.release_repo = None
+        self.args.service_path = None
+        self.write_bundle_for('d' * 40)
+        with self.assertRaisesRegex(m.DeploymentError, 'active deployment metadata'):
+            self.stage()
+        self.assertFalse((self.releases / self.revision).exists())
+
+    def test_set_release_repo_switches_source_in_place_only_after_release_lookup(self):
+        active = self.stage_active_bundle()
+        manifest = active / 'deployment.json'
+        entry = self.releases.parent / 'ink'
+        before = manifest.read_bytes()
+        binary = (active / 'ink').read_bytes()
+        args = SimpleNamespace(repo='new-owner/fork')
+        with patch.object(m.Path, 'home', return_value=self.home), \
+             patch.object(m.os, 'geteuid', return_value=501), \
+             patch.object(m, 'output', return_value='missing') as output, \
+             patch.object(m, 'activate_staged') as activate:
+            with self.assertRaisesRegex(m.DeploymentError, 'did not return the installed revision'):
+                m.set_release_repo(args)
+            self.assertEqual(manifest.read_bytes(), before)
+            output.return_value = 'build-' + self.revision
+            m.set_release_repo(args)
+            activate.assert_not_called()
+        self.assertIn(f'repos/new-owner/fork/releases/tags/build-{self.revision}', output.call_args.args[0])
+        self.assertEqual(json.loads(manifest.read_text()), {**json.loads(before), 'release_repo': args.repo})
+        self.assertEqual(entry.resolve(), active / 'ink')
+        self.assertEqual((active / 'ink').read_bytes(), binary)
+        self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
 
 class UpgradeTest(unittest.TestCase):
     def setUp(self):

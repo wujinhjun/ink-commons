@@ -17,7 +17,7 @@ python3.12 manage.py deploy --config ./config.example.json \
 
 以服务用户运行部署命令。脚本通过 `sudo` 安装由 `root:wheel` 所有的 `/Library/LaunchDaemons/com.ink-commons.daemon.plist` 并管理系统域服务。构建、配置、状态和凭据操作由服务用户完成。运行 `ink init` 可为 Agent 用户安装 skill。激活会探测已配置的 provider endpoint，并验证同砚版本和 GitHub 读取权限。执行端服务及其 watchdog 由各自的运维方管理。
 
-首次部署 fork 的发布包时，给 `deploy` 加上 `--release-repo owner/repo`。该仓库应在 `main` 发布与提交 SHA 对应的 `build-<SHA>` Release。服务用户的读取客户端需要能访问此发布仓库和受管仓库。省略参数时使用官方发布仓库。已有安装要切换发布源时，按下方的手动暂存流程操作。
+首次部署 fork 的发布包时，给 `deploy` 加上 `--release-repo owner/repo`。该仓库应在 `main` 发布与提交 SHA 对应的 `build-<SHA>` Release。服务用户的读取客户端需要能访问此发布仓库和受管仓库。省略参数时使用官方发布仓库。已有安装可按下文切换发布源。
 
 如果读取客户端或其他子命令依赖不同的工具目录，可在 `deploy` 或 `stage` 时指定 `--service-path '/absolute/bin:/usr/bin:/bin'`。`ink upgrade` 会继承已保存的发布仓库和服务 PATH。服务依然使用 macOS LaunchDaemon 和部署账户下的版本、状态目录。
 
@@ -25,9 +25,9 @@ python3.12 manage.py deploy --config ./config.example.json \
 
 从任意目录可运行 `~/.local/lib/ink-commons/ink upgrade`。暂存的部署文件先按 GitHub Release 校验，校验后再请求管理员授权以切换同砚。
 
-手动指定版本或切换发布源时，以服务用户从目标仓库取得发布包，再执行 `stage` 和 `activate`。已有安装会拒绝 `deploy`。请选择尚未暂存的 SHA，其 `~/.local/lib/ink-commons/releases/<SHA>` 目录必须不存在。若目标仓库只发布了已经安装或暂存的同一 SHA，等它发布另一个尚未暂存的 SHA 再切换。保留活动 release 及其入口，供当前服务和回滚使用。
+手动安装另一版本时，以服务用户从目标仓库取得发布包，再执行 `stage` 和 `activate`。已有安装会拒绝 `deploy`。手动暂存要求对应的 `~/.local/lib/ink-commons/releases/<SHA>` 目录尚不存在。保留活动 release 及其入口，供当前服务和回滚使用。
 
-手动 `stage` 时，传入已有私有配置，并按需重传 `--credentials`（或 `--cc-config` 和 `--project`）以及代理的 `--env` 选项。要保留自定义发布仓库和服务 PATH，须重传 `--release-repo` 和 `--service-path`。下面的示例同时设置两项，实际值可从当前 release 的 `deployment.json` 中核对。省略 `--release-repo` 会让新版本的后续自动升级查询官方仓库。省略 `--service-path` 会让新版本使用默认的 `~/.local/bin:/opt/homebrew/bin:/usr/bin:/bin`。
+手动 `stage` 时，传入已有私有配置，并按需重传 `--credentials`（或 `--cc-config` 和 `--project`）以及代理的 `--env` 选项。省略 `--release-repo` 或 `--service-path` 时，暂存会继承活动版本保存的对应设置。传入参数可以覆盖它们。活动部署清单无效时，继承会报错。活动版本未保存对应设置时，沿用官方发布仓库或默认的 `~/.local/bin:/opt/homebrew/bin:/usr/bin:/bin`。
 
 ```sh
 revision="$(cat REVISION)"
@@ -39,6 +39,16 @@ shasum -a 256 -c SHA256SUMS &&
     --service-path '/absolute/bin:/usr/bin:/bin' &&
   python3.12 manage.py activate --release "$release" --user "$(id -un)"
 ```
+
+### 保留当前 SHA 并切换发布源
+
+目标仓库已经发布当前 SHA 的 `build-<SHA>` 时，以服务用户从支持该命令的版本运行：
+
+```sh
+python3.12 manage.py set-release-repo fork-owner/ink-fork
+```
+
+命令用当前部署的 GitHub 读取客户端确认目标发布可读，然后原子更新活动版本的发布仓库设置。运行的二进制、LaunchDaemon、服务 PATH 和状态继续沿用当前版本。将仓库参数设回原值可切回原发布源。如果活动版本自带的升级脚本早于此功能，首次升级请从支持该功能且已校验的发布包运行 `manage.py upgrade`。
 
 ## 从旧版本升级
 
