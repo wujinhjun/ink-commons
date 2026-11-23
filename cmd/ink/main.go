@@ -96,6 +96,7 @@ func serve(args []string) error {
 	configPath := flags.String("config", "config.json", "configuration file")
 	data := flags.String("data", dir, "private state directory")
 	gate := flags.String("poll-gate", "", "delay polling until this deployment gate file exists")
+	configOnly := flags.Bool("config-only", false, "allow local configuration and work item migration without polling or dispatch")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -107,6 +108,7 @@ func serve(args []string) error {
 		return err
 	}
 	config.PollGate = *gate
+	config.ConfigOnly = *configOnly
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return ink.Serve(ctx, config, *data, providers)

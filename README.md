@@ -322,6 +322,8 @@ cc-connect 当前 webhook 不支持执行级状态查询、停止或持久化去
 
 ## 状态、备份与回滚
 
+换机器、服务用户或部署仓库时，参见 [迁移部署](docs/migration.md)。
+
 daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 4（兼容迁移 version 1 / 2 / 3，并新增中心配置表）。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
 
 状态读写与执行账本的日常查询由 sqlc 生成类型化 Go 方法。状态保存仍使用完整快照接口，在同一事务中比较已有记录，仅插入新增记录、更新 payload 有变化的记录，并按主键删除已移除记录；未变化的记录不写入。push 保留原有 position 顺序，删除或重排会更新受影响的位置。读取和比较仍为全量，仍依赖进程内串行修改与 daemon 文件锁，不提供多 writer 并发合并。任务、交接和配置快照保存在 JSON payload 内；version 4 的 runtime_config 表通过专用查询更新，不参与工作流快照保存。

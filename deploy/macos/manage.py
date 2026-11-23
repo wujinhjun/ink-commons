@@ -22,7 +22,7 @@ import time
 
 LABEL = 'com.ink-commons.daemon'
 SYSTEM_DIR = Path('/Library/LaunchDaemons')
-REPOSITORY = 'wujinhjun/ink-commons'
+DEFAULT_RELEASE_REPO = 'wujinhjun/ink-commons'
 BUNDLE_FILES = ('ink', 'manage.py', 'runtime.py', 'config.example.json', 'REVISION')
 
 
@@ -134,6 +134,44 @@ def verify_revision(binary, revision):
         raise DeploymentError('ink artifact revision does not match --revision')
 
 
+def validate_release_repo(repo):
+    if not isinstance(repo, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+', repo):
+        raise DeploymentError('release repository must be owner/repo')
+    if repo.split('/')[1] in ('.', '..'):
+        raise DeploymentError('invalid release repository name')
+    return repo
+
+
+def validate_service_path(path):
+    if not isinstance(path, str) or any(ch in path for ch in ('\0', '\r', '\n')):
+        raise DeploymentError('service PATH must contain only absolute directories')
+    if not all(Path(directory).is_absolute() for directory in path.split(':')):
+        raise DeploymentError('service PATH must contain only absolute directories')
+    return path
+
+
+def active_deployment(home, root, *, allow_legacy_entry=False):
+    entry = root / 'ink'
+    if not entry.exists() and not entry.is_symlink():
+        return None
+    if allow_legacy_entry and not entry.is_symlink() and entry.is_file() and os.access(entry, os.X_OK):
+        return None
+    try:
+        binary = entry.resolve(strict=True)
+        release = binary.parent
+        if (not entry.is_symlink() or binary.name != 'ink' or not binary.is_file()
+                or release.parent != root / 'releases'
+                or not re.fullmatch(r'[0-9a-f]{40}', release.name)):
+            raise ValueError
+        settings = json.loads((release / 'deployment.json').read_text())
+        if (not isinstance(settings, dict) or settings.get('home') != str(home)
+                or settings.get('revision') != release.name):
+            raise ValueError
+    except (OSError, RuntimeError, ValueError):
+        raise DeploymentError('active deployment metadata is invalid or unavailable') from None
+    return release, settings
+
+
 def stage(args, *, reuse=False):
     if os.geteuid() == 0:
         raise DeploymentError('stage must run as the service user, without sudo')
@@ -150,10 +188,11 @@ def stage(args, *, reuse=False):
         revision = output(['git', '-C', repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{commit}'])
     home = Path.home().resolve()
     extra_env = parse_env(args.env)
-    root = home / '.local/lib/ink-commons/releases'
-    release = root / revision
+    root = home / '.local/lib/ink-commons'
+    releases = root / 'releases'
+    release = releases / revision
     if release.exists() and not reuse:
-        raise DeploymentError('release already exists; reuse it or explicitly archive it before restaging')
+        raise DeploymentError('release already exists; select an unstaged revision or use set-release-repo to change the active source')
     config = json.loads(Path(args.config).expanduser().read_text())
     command_path = args.github_command or config.get('github_command')
     if not command_path:
@@ -171,6 +210,23 @@ def stage(args, *, reuse=False):
     settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
                 'data': str(home / '.local/state/ink-commons'),
                 'environment': extra_env}
+    release_repo = getattr(args, 'release_repo', None)
+    service_path = getattr(args, 'service_path', None)
+    if release_repo is None or service_path is None:
+        active = active_deployment(home, root, allow_legacy_entry=True)
+        if active is not None:
+            _, previous = active
+            if release_repo is None and 'release_repo' in previous:
+                release_repo = validate_release_repo(previous['release_repo'])
+            if service_path is None and 'service_path' in previous:
+                service_path = validate_service_path(previous['service_path'])
+        elif (root / 'ink').exists() or releases.is_dir():
+            print('No versioned Ink entry to inherit from. Omitted release repository and service PATH use defaults.',
+                  file=sys.stderr)
+    if release_repo is not None:
+        settings['release_repo'] = validate_release_repo(release_repo)
+    if service_path is not None:
+        settings['service_path'] = validate_service_path(service_path)
     if getattr(args, 'credentials', None):
         settings['credentials'] = str(Path(args.credentials).expanduser().resolve())
     elif args.cc_config:
@@ -185,8 +241,8 @@ def stage(args, *, reuse=False):
         verify_staged_settings(release, config, settings)
         verify_artifact(artifact, release, revision, bundled)
         return release
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.TemporaryDirectory(dir=root) as temp:
+    releases.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(dir=releases) as temp:
         temp = Path(temp)
         candidate = temp / 'release'
         candidate.mkdir(mode=0o700)
@@ -264,6 +320,43 @@ def upgrade():
         upgrade_system(root, entry)
 
 
+def release_client(config, repo):
+    prefix = config.get('github_read_args')
+    if prefix is None:
+        return [config['github_command'], '--profile', 'inspect', '-R', repo], []
+    if not isinstance(prefix, list) or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in prefix):
+        raise DeploymentError('invalid github_read_args')
+    return ([config['github_command'], *[arg.replace('{repo}', repo) for arg in prefix]],
+            ['--repo', repo])
+
+
+def set_release_repo(args):
+    if os.geteuid() == 0:
+        raise DeploymentError('set-release-repo must run as the service user, without sudo')
+    repo = validate_release_repo(args.repo)
+    home = Path.home().resolve()
+    root = home / '.local/lib/ink-commons'
+    with deployment_lock(root):
+        active = active_deployment(home, root)
+        if active is None:
+            raise DeploymentError('set-release-repo requires an existing Ink deployment')
+        release, settings = active
+        config = json.loads((release / 'config.json').read_text())
+        app, _ = release_client(config, repo)
+        proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
+        network_env = {**os.environ, **parse_env(proxy_entries)}
+        tag = 'build-' + release.name
+        try:
+            published_tag = output([*app, 'api', f'repos/{repo}/releases/tags/{tag}',
+                                    '--jq', '.tag_name'], env=network_env, stderr=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            raise DeploymentError('cannot read the installed revision release from the new repository') from None
+        if published_tag != tag:
+            raise DeploymentError('the new repository did not return the installed revision release')
+        atomic(release / 'deployment.json', json.dumps({**settings, 'release_repo': repo}).encode())
+    print('Release repository:', repo)
+
+
 def verify_staged_settings(target, config, expected_settings):
     try:
         staged_config = json.loads((target / 'config.json').read_text())
@@ -285,16 +378,9 @@ def upgrade_system(root, entry):
     config = json.loads(config_path.read_text())
     proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
     network_env = {**os.environ, **parse_env(proxy_entries)}
-    prefix = config.get('github_read_args')
-    if prefix is None:
-        app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
-        release_scope = []
-    else:
-        if not isinstance(prefix, list) or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in prefix):
-            raise DeploymentError('invalid github_read_args')
-        app = [config['github_command'], *[arg.replace('{repo}', REPOSITORY) for arg in prefix]]
-        release_scope = ['--repo', REPOSITORY]
-    revision = output([*app, 'api', f'repos/{REPOSITORY}/git/ref/heads/main',
+    repo = validate_release_repo(settings.get('release_repo', DEFAULT_RELEASE_REPO))
+    app, release_scope = release_client(config, repo)
+    revision = output([*app, 'api', f'repos/{repo}/git/ref/heads/main',
                        '--jq', '.object.sha'], env=network_env)
     if not re.fullmatch(r'[0-9a-f]{40}', revision):
         raise DeploymentError('GitHub did not return a valid main revision')
@@ -332,7 +418,8 @@ def upgrade_system(root, entry):
                 revision=revision, artifact_dir=artifact, config=str(config_path),
                 github_command=config['github_command'], cc_config=settings.get('cc_config'),
                 project=settings.get('project'), credentials=settings.get('credentials'),
-                env=proxy_entries,
+                env=proxy_entries, release_repo=settings.get('release_repo'),
+                service_path=settings.get('service_path'),
             ))
 
     try:
@@ -352,8 +439,8 @@ def activate_staged(release):
 
 def ink_plist(release, settings, user):
     data = Path(settings['data'])
-    env = {'HOME': settings['home'],
-           'PATH': str(Path(settings['home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'}
+    default_path = str(Path(settings['home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'
+    env = {'HOME': settings['home'], 'PATH': validate_service_path(settings.get('service_path', default_path))}
     env.update(parse_env([key + '=' + value for key, value in settings.get('environment', {}).items()]))
     return {'Label': LABEL, 'UserName': user,
             'ProgramArguments': [settings['python'], str(release / 'runtime.py')],
@@ -680,7 +767,11 @@ def main():
         prepare.add_argument('--cc-config', help='explicit legacy TOML credential source')
         prepare.add_argument('--project', help='project in the legacy TOML credential source')
         prepare.add_argument('--github-command', help='absolute GitHub reader CLI path')
+        prepare.add_argument('--release-repo', help='owner/repo for upgrades (inherits active setting, else ' + DEFAULT_RELEASE_REPO + ')')
+        prepare.add_argument('--service-path', help='absolute LaunchDaemon PATH entries separated by colons (inherits active setting)')
     commands.add_parser('upgrade', help='download and activate the verified main build')
+    source = commands.add_parser('set-release-repo', help='change the release source for the installed revision')
+    source.add_argument('repo', metavar='owner/repo')
     apply = commands.add_parser('activate')
     apply.add_argument('--release', required=True)
     apply.add_argument('--user', required=True)
@@ -695,7 +786,8 @@ def main():
         if args.action == 'upgrade':
             upgrade()
         else:
-            {'stage': stage, 'deploy': deploy, 'activate': activate_from_cli, 'status': status}[args.action](args)
+            {'stage': stage, 'deploy': deploy, 'activate': activate_from_cli,
+             'set-release-repo': set_release_repo, 'status': status}[args.action](args)
     except DeploymentError as error:
         print('Deployment failed:', str(error), file=sys.stderr)
         return 1

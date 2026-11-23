@@ -39,6 +39,8 @@ func (e apiError) Error() string { return e.message }
 var BuildRevision = "development"
 
 func (s *Service) Handler() http.Handler {
+	const workPath = "/v1/work/{owner}/{repo}/{number}"
+	const taskPath = "/v1/tasks/{task}"
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		gate := "closed"
@@ -58,24 +60,45 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/workspaces", s.workspaces)
 	mux.HandleFunc("POST /v1/workspaces", s.workspaces)
 	mux.HandleFunc("POST /v1/workspaces/{workspace}/{action}", s.workspaces)
-	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}", s.work)
-	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}/context", s.reviewContext)
-	mux.HandleFunc("POST /v1/work/{owner}/{repo}/{number}/{action}", s.work)
-	mux.HandleFunc("GET /v1/tasks/{task}", s.handoffTask)
-	mux.HandleFunc("POST /v1/tasks/{task}/{action}", s.handoffTask)
+	mux.HandleFunc("GET "+workPath, s.work)
+	mux.HandleFunc("GET "+workPath+"/context", s.reviewContext)
+	mux.HandleFunc("POST "+workPath+"/{action}", s.work)
+	mux.HandleFunc("GET "+taskPath, s.handoffTask)
+	mux.HandleFunc("POST "+taskPath+"/{action}", s.handoffTask)
 	mux.HandleFunc("POST /v1/pushes", s.pushes)
 	mux.HandleFunc("POST /v1/notifications/ack", s.ackNotification)
 	mux.HandleFunc("GET /v1/notifications/status", s.notificationStatus)
+
+	pausedWrites := map[string]bool{"POST /v1/config": true, "DELETE /v1/config": true}
+	allowWhilePaused := func(path, action string, handle http.HandlerFunc) {
+		pattern := "POST " + path + "/" + action
+		pausedWrites[pattern] = true
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			r.SetPathValue("action", action)
+			handle(w, r)
+		})
+	}
+	allowWhilePaused(workPath, "assign", s.work)
+	allowWhilePaused(workPath, "confirm-stopped", s.work)
+	allowWhilePaused(taskPath, "submit", s.handoffTask)
+	allowWhilePaused(taskPath, "retry", s.handoffTask)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && !s.pollReady() {
-			fail(w, apiError{503, "deployment verification in progress"})
-			return
+			_, pattern := mux.Handler(r)
+			if !s.config.ConfigOnly || !pausedWrites[pattern] {
+				fail(w, apiError{503, "deployment verification in progress"})
+				return
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
 
 func (s *Service) pollReady() bool {
+	if s.config.ConfigOnly {
+		return false
+	}
 	if s.config.PollGate == "" {
 		return true
 	}

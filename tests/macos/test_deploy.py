@@ -2,6 +2,7 @@ import importlib.util
 import fcntl
 import os
 import hashlib
+import io
 import json
 from pathlib import Path
 import plistlib
@@ -92,7 +93,10 @@ class ArtifactStageTest(unittest.TestCase):
 
 
     def write_bundle(self):
-        self.revision = 'c' * 40
+        self.write_bundle_for('c' * 40)
+
+    def write_bundle_for(self, revision):
+        self.revision = revision
         self.args.revision = self.revision
         self.write_artifact(self.revision)
         (self.artifact / 'REVISION').write_text(self.revision + '\n')
@@ -160,6 +164,88 @@ class ArtifactStageTest(unittest.TestCase):
             self.stage()
         self.assertEqual(list(self.releases.iterdir()), [])
 
+    def stage_active_bundle(self):
+        self.write_bundle()
+        self.args.release_repo = 'old-owner/ink'
+        self.args.service_path = '/custom/bin:/usr/bin:/bin'
+        self.stage()
+        release = self.releases / self.revision
+        (self.releases.parent / 'ink').symlink_to(release / 'ink')
+        return release
+
+    def test_manual_stage_inherits_active_settings_and_honors_explicit_override(self):
+        self.stage_active_bundle()
+        self.args.release_repo = None
+        self.args.service_path = None
+        self.write_bundle_for('d' * 40)
+        self.stage()
+        settings = json.loads((self.releases / self.revision / 'deployment.json').read_text())
+        self.assertEqual(settings['release_repo'], 'old-owner/ink')
+        self.assertEqual(settings['service_path'], '/custom/bin:/usr/bin:/bin')
+        self.args.release_repo = 'new-owner/fork'
+        self.write_bundle_for('e' * 40)
+        self.stage()
+        settings = json.loads((self.releases / self.revision / 'deployment.json').read_text())
+        self.assertEqual(settings['release_repo'], 'new-owner/fork')
+        self.assertEqual(settings['service_path'], '/custom/bin:/usr/bin:/bin')
+
+    def test_stage_rejects_unreadable_active_metadata_instead_of_using_defaults(self):
+        active = self.stage_active_bundle()
+        (active / 'deployment.json').write_text('{corrupt')
+        self.args.release_repo = None
+        self.args.service_path = None
+        self.write_bundle_for('d' * 40)
+        with self.assertRaisesRegex(m.DeploymentError, 'active deployment metadata'):
+            self.stage()
+        self.assertFalse((self.releases / self.revision).exists())
+
+    def test_manual_stage_accepts_legacy_executable_entry_without_saved_settings(self):
+        self.write_bundle()
+        entry = self.releases.parent / 'ink'
+        entry.parent.mkdir(parents=True)
+        entry.write_text('#!/bin/sh\nexit 0\n')
+        entry.chmod(0o700)
+        before = entry.read_bytes()
+        with patch.object(m.sys, 'stderr', new_callable=io.StringIO) as stderr:
+            self.stage()
+        self.assertIn('Omitted release repository and service PATH use defaults.', stderr.getvalue())
+        settings = json.loads((self.releases / self.revision / 'deployment.json').read_text())
+        self.assertNotIn('release_repo', settings)
+        self.assertNotIn('service_path', settings)
+        self.assertEqual(entry.read_bytes(), before)
+        self.assertFalse(entry.is_symlink())
+
+    def test_manual_stage_rejects_broken_versioned_entry(self):
+        self.write_bundle()
+        entry = self.releases.parent / 'ink'
+        entry.parent.mkdir(parents=True)
+        entry.symlink_to(self.releases / ('d' * 40) / 'ink')
+        with self.assertRaisesRegex(m.DeploymentError, 'active deployment metadata'):
+            self.stage()
+        self.assertFalse((self.releases / self.revision).exists())
+
+    def test_set_release_repo_switches_source_in_place_only_after_release_lookup(self):
+        active = self.stage_active_bundle()
+        manifest = active / 'deployment.json'
+        entry = self.releases.parent / 'ink'
+        before = manifest.read_bytes()
+        binary = (active / 'ink').read_bytes()
+        args = SimpleNamespace(repo='new-owner/fork')
+        with patch.object(m.Path, 'home', return_value=self.home), \
+             patch.object(m.os, 'geteuid', return_value=501), \
+             patch.object(m, 'output', return_value='missing') as output, \
+             patch.object(m, 'activate_staged') as activate:
+            with self.assertRaisesRegex(m.DeploymentError, 'did not return the installed revision'):
+                m.set_release_repo(args)
+            self.assertEqual(manifest.read_bytes(), before)
+            output.return_value = 'build-' + self.revision
+            m.set_release_repo(args)
+            activate.assert_not_called()
+        self.assertIn(f'repos/new-owner/fork/releases/tags/build-{self.revision}', output.call_args.args[0])
+        self.assertEqual(json.loads(manifest.read_text()), {**json.loads(before), 'release_repo': args.repo})
+        self.assertEqual(entry.resolve(), active / 'ink')
+        self.assertEqual((active / 'ink').read_bytes(), binary)
+        self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
 
 class UpgradeTest(unittest.TestCase):
     def setUp(self):
@@ -242,16 +328,21 @@ class UpgradeTest(unittest.TestCase):
 
         staged.assert_called_once()
         activate.assert_called_once_with(self.target)
-        self.assertEqual(self.calls[0][:6], ['/test/github-app-cli', '--profile', 'inspect', '-R', m.REPOSITORY, 'api'])
+        self.assertEqual(self.calls[0][:6], ['/test/github-app-cli', '--profile', 'inspect', '-R', m.DEFAULT_RELEASE_REPO, 'api'])
         self.assertEqual(self.calls[1][5:8], ['release', 'download', 'build-' + self.target.name])
         self.assertIn('--pattern=manage.py', self.calls[1])
         self.assertIn('--pattern=runtime.py', self.calls[1])
 
-    def test_upgrade_accepts_cli_without_global_profile_or_repo_flags(self):
+    def test_upgrade_uses_configured_repo_and_preserves_deployment_settings(self):
         config_file = self.current / 'config.json'
         config_file.write_text(json.dumps({
             'github_command': '/test/github-app-cli', 'github_read_args': [],
         }))
+
+        settings_file = self.current / 'deployment.json'
+        settings = json.loads(settings_file.read_text())
+        settings.update(release_repo='fork-owner/ink-fork', service_path='/custom/bin:/usr/bin:/bin')
+        settings_file.write_text(json.dumps(settings))
 
         def run(args, **kwargs):
             self.calls.append(args)
@@ -260,15 +351,29 @@ class UpgradeTest(unittest.TestCase):
             directory = Path(args[args.index('--dir') + 1])
             (directory / 'REVISION').write_text(self.target.name)
 
-        with patch.object(m, 'run', side_effect=run), patch.object(m, 'stage'), \
+        with patch.object(m, 'run', side_effect=run), patch.object(m, 'stage') as staged, \
              patch.object(m, 'activate_staged'):
             m.upgrade_system(self.root, self.entry)
 
         self.assertEqual(self.calls[0][:3], [
-            '/test/github-app-cli', 'api', f'repos/{m.REPOSITORY}/git/ref/heads/main',
+            '/test/github-app-cli', 'api', 'repos/fork-owner/ink-fork/git/ref/heads/main',
         ])
         self.assertEqual(self.calls[1][1:4], ['release', 'download', 'build-' + self.target.name])
-        self.assertEqual(self.calls[1][6:8], ['--repo', m.REPOSITORY])
+        self.assertEqual(self.calls[1][6:8], ['--repo', 'fork-owner/ink-fork'])
+        staged.assert_called_once()
+        self.assertEqual(staged.call_args.args[0].release_repo, 'fork-owner/ink-fork')
+        self.assertEqual(staged.call_args.args[0].service_path, settings['service_path'])
+        plist = m.ink_plist(self.current, {**settings, 'python': '/usr/bin/python3'}, 'operator')
+        self.assertEqual(plist['EnvironmentVariables']['PATH'], settings['service_path'])
+
+    def test_upgrade_rejects_invalid_release_repository_before_network(self):
+        settings_file = self.current / 'deployment.json'
+        settings = json.loads(settings_file.read_text())
+        settings_file.write_text(json.dumps({**settings, 'release_repo': 'org/..'}))
+        with patch.object(m, 'output') as output:
+            with self.assertRaisesRegex(m.DeploymentError, 'invalid release repository'):
+                m.upgrade_system(self.root, self.entry)
+        output.assert_not_called()
 
     def test_unpublished_build_does_not_stage_or_activate(self):
         with patch.object(m, 'run', side_effect=subprocess.CalledProcessError(1, 'release download')) as run, \
@@ -727,6 +832,17 @@ class DeployTest(unittest.TestCase):
              patch.object(runtime.os, 'execve') as start:
             runtime.main()
         self.assertEqual(start.call_args.args[2]['INK_HTTP_PROVIDER_TOKEN'], 'fixture')
+        self.assertNotIn('--config-only', start.call_args.args[1])
+
+    def test_runtime_forwards_explicit_config_only_mode(self):
+        (self.release / 'deployment.json').write_text(json.dumps({'data': str(self.data)}))
+        with patch.object(runtime, '__file__', str(self.release / 'runtime.py')), \
+             patch.object(runtime.os, 'execve') as start:
+            runtime.main(('--config-only',))
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[1][-3:], [
+            '-poll-gate', str(self.release / 'enabled'), '--config-only',
+        ])
 
     def test_no_provider_means_no_external_service_probe(self):
         with patch.object(m.socket, 'create_connection') as connect:

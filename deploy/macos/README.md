@@ -17,13 +17,42 @@ python3.12 manage.py deploy --config ./config.example.json \
 
 以服务用户运行部署命令。脚本通过 `sudo` 安装由 `root:wheel` 所有的 `/Library/LaunchDaemons/com.ink-commons.daemon.plist` 并管理系统域服务。构建、配置、状态和凭据操作由服务用户完成。运行 `ink init` 可为 Agent 用户安装 skill。激活会探测已配置的 provider endpoint，并验证同砚版本和 GitHub 读取权限。执行端服务及其 watchdog 由各自的运维方管理。
 
+首次部署 fork 的发布包时，给 `deploy` 加上 `--release-repo owner/repo`。该仓库应在 `main` 发布与提交 SHA 对应的 `build-<SHA>` Release。服务用户的读取客户端需要能访问此发布仓库和受管仓库。省略参数时使用官方发布仓库。已有安装可按下文切换发布源。
+
+如果读取客户端或其他子命令依赖不同的工具目录，可在 `deploy` 或 `stage` 时指定 `--service-path '/absolute/bin:/usr/bin:/bin'`。`ink upgrade` 会继承已保存的发布仓库和服务 PATH。服务依然使用 macOS LaunchDaemon 和部署账户下的版本、状态目录。
+
 ## 已有部署
 
-从任意目录可运行 `~/.local/lib/ink-commons/ink upgrade`。暂存的部署文件先按 GitHub Release 校验，校验后再请求管理员授权以切换同砚。需要手动指定版本时，从对应 Release 执行 `manage.py stage --revision "$(cat REVISION)" --artifact-dir .`，然后以登录用户执行 `manage.py activate --release DIR --user "$(id -un)"`。
+从任意目录可运行 `~/.local/lib/ink-commons/ink upgrade`。暂存的部署文件先按 GitHub Release 校验，校验后再请求管理员授权以切换同砚。
+
+手动安装另一版本时，以服务用户从目标仓库取得发布包，再执行 `stage` 和 `activate`。已有安装会拒绝 `deploy`。手动暂存要求对应的 `~/.local/lib/ink-commons/releases/<SHA>` 目录尚不存在。保留活动 release 及其入口，供当前服务和回滚使用。
+
+手动 `stage` 时，传入已有私有配置，并按需重传 `--credentials`（或 `--cc-config` 和 `--project`）以及代理的 `--env` 选项。省略 `--release-repo` 或 `--service-path` 时，暂存会继承活动版本保存的对应设置。传入参数可以覆盖它们。活动版本链接或部署清单损坏时，继承会报错。旧式普通可执行文件入口没有版本清单，暂存会提示省略的选项将使用默认值。活动版本未保存对应设置时，也使用官方发布仓库或默认的 `~/.local/bin:/opt/homebrew/bin:/usr/bin:/bin`。
+
+```sh
+revision="$(cat REVISION)"
+release="$HOME/.local/lib/ink-commons/releases/$revision"
+shasum -a 256 -c SHA256SUMS &&
+  python3.12 manage.py stage --revision "$revision" --artifact-dir . \
+    --config /absolute/path/to/current-config.json \
+    --release-repo fork-owner/ink-fork \
+    --service-path '/absolute/bin:/usr/bin:/bin' &&
+  python3.12 manage.py activate --release "$release" --user "$(id -un)"
+```
+
+### 保留当前 SHA 并切换发布源
+
+目标仓库已经发布当前 SHA 的 `build-<SHA>` 时，以服务用户从支持该命令的版本运行：
+
+```sh
+python3.12 manage.py set-release-repo fork-owner/ink-fork
+```
+
+命令用当前部署的 GitHub 读取客户端确认目标发布可读，然后原子更新活动版本的发布仓库设置。运行的二进制、LaunchDaemon、服务 PATH 和状态继续沿用当前版本。将仓库参数设回原值可切回原发布源。如果活动版本自带的升级脚本早于此功能，首次升级请从支持该功能且已校验的发布包运行 `manage.py upgrade`。
 
 ## 从旧版本升级
 
-旧版 LaunchAgent 和 LaunchDaemon 都从已校验的新版发布包启动第一次升级。保留当前 `~/.local/lib/ink-commons/ink` 链接及其指向的 release。升级脚本从该版本读取部署配置，并在切换时备份和移除旧同砚 LaunchAgent 的 plist。旧 LaunchDaemon 可在原系统域更新。cc-connect 等外部服务若仍引用旧 release 的程序，清理旧 release 前先为对应服务配置独立的安装路径。
+旧版 LaunchAgent 和 LaunchDaemon 都从已校验的新版发布包启动第一次升级。若 `~/.local/lib/ink-commons/ink` 是普通可执行文件，使用上文的 `stage` 和 `activate` 手动迁移。若入口是版本链接，保留链接及其指向的 release，再运行下方的 `upgrade`。升级脚本从该版本读取部署配置，并在切换时备份和移除旧同砚 LaunchAgent 的 plist。旧 LaunchDaemon 可在原系统域更新。cc-connect 等外部服务若仍引用旧 release 的程序，清理旧 release 前先为对应服务配置独立的安装路径。
 
 ```sh
 cd ink-deploy &&
