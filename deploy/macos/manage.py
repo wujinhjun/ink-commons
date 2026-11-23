@@ -872,6 +872,26 @@ def activate_from_cli(args):
         activate(args)
 
 
+def repository_status(data, entry, checkouts):
+    try:
+        repos = local_get(data, '/v1/repositories', timeout=2)
+        work = local_get(data, '/v1/work', timeout=2)
+    except (OSError, ValueError, IndexError, DeploymentError):
+        return None
+    linked = {item['repo'] for item in work if item.get('linked')}
+    result = []
+    for repo in sorted(item['repo'] for item in repos):
+        hook = 'unknown'
+        if repo in checkouts and entry.is_file():
+            try:
+                hook = output([entry, 'hook', 'status', '--checkout', checkouts[repo], '--repo', repo],
+                              stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.CalledProcessError):
+                pass
+        result.append({'repo': repo, 'hook': hook, 'linked_work': repo in linked})
+    return result
+
+
 def status(args):
     account = pwd.getpwnam(args.user)
     home = Path(account.pw_dir).resolve()
@@ -895,6 +915,13 @@ def status(args):
         'cc-connect': bool(config.get('cc_connect_url')),
         'http': bool(config.get('http_provider_url')),
     }}
+    checkouts = {}
+    for mapping in getattr(args, 'checkout', []):
+        repo, separator, checkout = mapping.partition('=')
+        if not separator or not repo or not checkout:
+            raise DeploymentError('checkout must have the form OWNER/REPO=DIR')
+        checkouts[repo.lower()] = str(Path(checkout).expanduser().resolve())
+    report['repositories'] = repository_status(data, home / '.local/lib/ink-commons/ink', checkouts)
     try:
         report['runtime'] = health(data)
     except (OSError, ValueError, IndexError):
@@ -940,6 +967,7 @@ def main():
     apply.add_argument('--user', required=True)
     inspect = commands.add_parser('status')
     inspect.add_argument('--user', required=True)
+    inspect.add_argument('--checkout', action='append', default=[], help='OWNER/REPO=DIR for managed hook inspection')
     args = parser.parse_args()
     if sys.version_info < (3,11,8):
         parser.error('Python 3.11.8+ required for all commands')

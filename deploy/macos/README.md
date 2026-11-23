@@ -81,6 +81,12 @@ python3.12 ./manage.py upgrade --apply
 
 执行 `(umask 077; ink config export > runtime-policy.json)` 可导出声明。部署时传 `--runtime-declaration runtime-policy.json`，暂存、升级及 status 会比对并报告有变化的范围。声明仅用于比对。文件缺失、不可读或格式错误时报告诊断，暂存、升级和回滚继续执行。首次安装尚无运行中 daemon 时报告 `unavailable`。声明可能包含本机路由和命令配置，应按私有文件保存。
 
+## 关联开发会话
+
+在每个开发 checkout 运行 `ink hook install`，或用 `--checkout DIR` 指定目录。安装器遵循 Git 的 hook 路径。已有自定义 hook 时，请按 [根 README 的 pre-push 接入示例](../../README.md#接入-pre-push-hook) 缓存 ref 更新流，分别传给原检查和同砚，或使用工作项 `link` 关联 PR。
+
+`status --checkout OWNER/REPO=DIR` 可多次传入。每个运行期仓库显示指定 checkout 的受管 hook 状态和是否已有已关联工作项。未提供 checkout 或指定仓库不在 `origin` 的实际 push URL 中时显示 `unknown`。已关联工作项只表示既有证据。
+
 ## 验收与恢复
 
 - 暂存、激活和失败恢复均不复制 cc-connect，不修改其 plist，不停止或删除 watchdog。配置了 endpoint 时，切换前后会做只读探测。
