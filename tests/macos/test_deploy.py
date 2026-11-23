@@ -92,6 +92,34 @@ class ArtifactStageTest(unittest.TestCase):
         with self.assertRaisesRegex(m.DeploymentError, 'signature verification failed'):
             m.verify_signature(self.artifact, trust)
 
+    def test_manual_stage_inherits_signing_policy_from_active_release(self):
+        self.write_bundle()
+        trust = self.home / 'allowed_signers'
+        key = self.home / 'test-key'
+        m.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', key])
+        trust.write_text('ink-release ' + key.with_suffix('.pub').read_text())
+        previous = self.releases / ('a' * 40)
+        previous.mkdir(parents=True)
+        (previous / 'ink').touch()
+        (previous / 'deployment.json').write_text(json.dumps({
+            'revision': previous.name, 'home': str(self.home), 'allowed_signers': str(trust),
+        }))
+        (self.releases.parent / 'ink').symlink_to(previous / 'ink')
+        signature = self.artifact / 'SHA256SUMS.sig'
+        for bad_signature in (None, b'invalid signature'):
+            with self.subTest(signature=bad_signature):
+                if bad_signature is not None:
+                    signature.write_bytes(bad_signature)
+                with self.assertRaisesRegex(m.DeploymentError, 'signature verification failed'):
+                    self.stage()
+                self.assertFalse((self.releases / self.revision).exists())
+        signature.unlink()
+        m.run(['/usr/bin/ssh-keygen', '-Y', 'sign', '-f', key, '-n', 'ink-commons',
+               self.artifact / 'SHA256SUMS'], capture_output=True)
+        self.stage()
+        settings = json.loads((self.releases / self.revision / 'deployment.json').read_text())
+        self.assertEqual(settings['allowed_signers'], str(trust))
+
     def test_rejects_tampered_binary(self):
         self.write_artifact(self.revision)
         (self.artifact / 'ink').write_bytes(b'tampered')
@@ -355,12 +383,49 @@ class UpgradeTest(unittest.TestCase):
         run.assert_not_called()
         activate.assert_not_called()
 
+    def test_explicit_tag_dry_run_requires_a_matching_published_release(self):
+        tag = 'build-' + self.target.name
+        for metadata, expected_error in (
+            (subprocess.CalledProcessError(1, 'release lookup'), 'cannot read'),
+            ({'tag_name': tag, 'draft': True}, 'no matching published release'),
+            ({'tag_name': tag, 'draft': False}, 'no matching published release'),
+        ):
+            with self.subTest(metadata=metadata), patch.object(m, 'output') as query, \
+                 patch.object(m, 'run') as run, patch.object(m, 'stage') as stage:
+                if isinstance(metadata, Exception):
+                    query.side_effect = metadata
+                else:
+                    query.return_value = json.dumps(metadata)
+                with self.assertRaisesRegex(m.DeploymentError, expected_error):
+                    m.upgrade_system(self.root, self.entry, tag=tag, dry_run=True)
+                query.assert_called_once()
+                self.assertIn(f'repos/{m.DEFAULT_RELEASE_REPO}/releases/tags/{tag}', query.call_args.args[0])
+                run.assert_not_called()
+                stage.assert_not_called()
+
+    def test_preview_selection_skips_stable_page_and_unpublished_or_invalid_tags(self):
+        tag = 'build-' + self.target.name
+        stable = {'tag_name': 'build-' + self.current.name, 'draft': False, 'published_at': 'date'}
+        preview = {'tag_name': tag, 'draft': False, 'prerelease': True, 'published_at': 'date'}
+        pages = [json.dumps([stable] * 100), json.dumps([
+            {**preview, 'draft': True}, {**preview, 'tag_name': 'preview-1'}, preview,
+        ])]
+        with patch.object(m, 'output', side_effect=pages) as query, patch.object(m, 'run') as run:
+            result = m.select_release(['/example/reader'], {}, None, 'preview', 'acme/ink')
+        self.assertEqual(result, (tag, self.target.name))
+        self.assertEqual([call.args[0][-1] for call in query.call_args_list],
+                         ['repos/acme/ink/releases?per_page=100&page=1',
+                          'repos/acme/ink/releases?per_page=100&page=2'])
+        run.assert_not_called()
+
     def test_prepare_without_apply_does_not_activate(self):
         self.make_staged_target()
         manifest = self.make_published_manifest(self.target)
         tag = 'build-' + self.target.name
         with self.mock_manifest_download(manifest, self.target.name), \
-             patch.object(m, 'activate_staged') as activate:
+             patch.object(m, 'output', return_value=json.dumps({
+                 'tag_name': tag, 'draft': False, 'published_at': 'date',
+             })), patch.object(m, 'activate_staged') as activate:
             m.upgrade_system(self.root, self.entry, tag=tag)
         activate.assert_not_called()
 

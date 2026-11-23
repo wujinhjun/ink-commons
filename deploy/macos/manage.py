@@ -192,8 +192,28 @@ def stage(args, *, reuse=False):
         raise DeploymentError('Python 3.11.8+ required')
     artifact = Path(args.artifact_dir).expanduser() if args.artifact_dir else None
     bundled = artifact is not None and (artifact / 'REVISION').is_file()
+    home = Path.home().resolve()
+    root = home / '.local/lib/ink-commons'
+    releases = root / 'releases'
+    release_repo = getattr(args, 'release_repo', None)
+    service_path = getattr(args, 'service_path', None)
     allowed_signers = getattr(args, 'allowed_signers', None)
-    if allowed_signers:
+    if release_repo is None or service_path is None or allowed_signers is None:
+        active = active_deployment(home, root, allow_legacy_entry=True)
+        if active is not None:
+            _, previous = active
+            if release_repo is None and 'release_repo' in previous:
+                release_repo = validate_release_repo(previous['release_repo'])
+            if service_path is None and 'service_path' in previous:
+                service_path = validate_service_path(previous['service_path'])
+            if allowed_signers is None:
+                allowed_signers = previous.get('allowed_signers')
+        elif (root / 'ink').exists() or releases.is_dir():
+            print('No versioned Ink entry to inherit from. Omitted release repository and service PATH use defaults.',
+                  file=sys.stderr)
+    if allowed_signers is not None:
+        if not isinstance(allowed_signers, str) or not allowed_signers.strip():
+            raise DeploymentError('invalid release signing trust file path')
         allowed_signers = str(Path(allowed_signers).expanduser().resolve())
         if not bundled:
             raise DeploymentError('signature verification requires a complete release bundle')
@@ -205,10 +225,7 @@ def stage(args, *, reuse=False):
     else:
         repo = Path(__file__).resolve().parents[2]
         revision = output(['git', '-C', repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{commit}'])
-    home = Path.home().resolve()
     extra_env = parse_env(args.env)
-    root = home / '.local/lib/ink-commons'
-    releases = root / 'releases'
     release = releases / revision
     if release.exists() and not reuse:
         raise DeploymentError('release already exists; select an unstaged revision or use set-release-repo to change the active source')
@@ -229,19 +246,6 @@ def stage(args, *, reuse=False):
     settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
                 'data': str(home / '.local/state/ink-commons'),
                 'environment': extra_env}
-    release_repo = getattr(args, 'release_repo', None)
-    service_path = getattr(args, 'service_path', None)
-    if release_repo is None or service_path is None:
-        active = active_deployment(home, root, allow_legacy_entry=True)
-        if active is not None:
-            _, previous = active
-            if release_repo is None and 'release_repo' in previous:
-                release_repo = validate_release_repo(previous['release_repo'])
-            if service_path is None and 'service_path' in previous:
-                service_path = validate_service_path(previous['service_path'])
-        elif (root / 'ink').exists() or releases.is_dir():
-            print('No versioned Ink entry to inherit from. Omitted release repository and service PATH use defaults.',
-                  file=sys.stderr)
     if release_repo is not None:
         settings['release_repo'] = validate_release_repo(release_repo)
     if service_path is not None:
@@ -392,16 +396,48 @@ def verify_staged_settings(target, config, expected_settings):
                               'archive the staged release before retrying')
 
 
+BUILD_TAG = re.compile(r'build-([0-9a-f]{40})')
+
+
+def published_build(release):
+    return (isinstance(release, dict) and isinstance(release.get('tag_name'), str)
+            and BUILD_TAG.fullmatch(release['tag_name'])
+            and release.get('draft') is False and bool(release.get('published_at')))
+
+
+def select_preview(app, network_env, repo):
+    page = 1
+    while True:
+        path = f'repos/{repo}/releases?per_page=100&page={page}'
+        releases = json.loads(output([*app, 'api', path], env=network_env))
+        if not isinstance(releases, list):
+            raise DeploymentError('invalid GitHub release listing')
+        for release in releases:
+            if published_build(release) and release.get('prerelease') is True:
+                return release['tag_name']
+        if len(releases) < 100:
+            raise DeploymentError('no published preview build found')
+        page += 1
+
+
 def select_release(app, network_env, tag, channel, repo):
-    if tag is None:
-        if channel == 'preview':
-            tag = output([*app, 'api', f'repos/{repo}/releases',
-                          '--jq', '[.[] | select(.prerelease and (.draft | not))][0].tag_name // ""'],
-                         env=network_env)
-        else:
-            tag = output([*app, 'api', f'repos/{repo}/releases/latest',
-                          '--jq', '.tag_name'], env=network_env)
-    match = re.fullmatch(r'build-([0-9a-f]{40})', tag)
+    if tag is not None:
+        if BUILD_TAG.fullmatch(tag) is None:
+            raise DeploymentError('specify a published build-<SHA> tag')
+        try:
+            path = f'repos/{repo}/releases/tags/{tag}'
+            release = json.loads(output([*app, 'api', path], env=network_env,
+                                        stderr=subprocess.DEVNULL, timeout=30))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise DeploymentError('cannot read the selected GitHub release tag') from None
+        if not published_build(release) or release['tag_name'] != tag:
+            raise DeploymentError('the selected tag has no matching published release')
+    elif channel == 'preview':
+        tag = select_preview(app, network_env, repo)
+    else:
+        tag = output([*app, 'api', f'repos/{repo}/releases/latest',
+                      '--jq', '.tag_name'], env=network_env)
+    match = BUILD_TAG.fullmatch(tag)
     if match is None:
         raise DeploymentError('no deployment release found; specify a published build-<SHA> tag')
     return tag, match[1]
