@@ -6,16 +6,7 @@
 
 需要接续既有 PR 时，在停机前盘点已投递、正在运行和待交接的任务。让原领取者完成能结清的交接。对仍需提交交接或显式重试的 cooperative 任务，安全保留执行侧的原领取凭据。SQLite 备份和 JSON 导出只含领取凭据的哈希，原凭据位于领取侧状态目录的 `claims/TASK_UUID.json`，或当时通过 `--claim-file` 指定的路径。保持文件归原领取者所有、权限为 `0600`，默认 `claims` 目录权限为 `0700`。更换领取侧路径时，将原文件安全移到新默认位置，或在后续命令中通过 `--claim-file` 指向保留的文件。之后用原凭据提交交接或重试已阻塞的任务。参见 [领取与交接](handoff.md#agent-操作)。
 
-停机前，在仍可操作的源 daemon 上处理必须改派的工作项。用 [工作项 API](../README.md#本地-api) 逐个核对 PR 的显式负责人和会话，以及待领取、已冻结和等待重试的任务实际使用的路由。对于要停用的路由，先确认旧执行已结束且不会被延迟请求重新启动。已领取的 cooperative 任务由原领取者按原规则交接。随后在源端用 `ink review` 改派 reviewer，或用工作项的 `assign` 接口改派 developer。源端还无法使用新执行端时，可先转给能接续的人工负责人。需要解除 cooperative 任务的显式阻塞时，由原领取者按 [阻塞和重试流程](handoff.md#阻塞和重试) 使用原凭据操作，并先确认重试将使用预期指派。
-
-例如，在源端把 PR 的 reviewer 改派到已验证的新 cc-connect 项目。替换以下示例值，并按需用 `--github-command` 指定该 reviewer 的客户端。
-
-```sh
-ink review --github-login 'reviewer[bot]' --target new-review-project \
-  https://github.com/example/project/pull/42
-```
-
-核对源端工作项，确认旧路由上的待办已结束或被安全替换，当前待办或其后继可以在目标环境接续，再停止源 daemon。停机时核对是否有新增领取凭据需要保留。迁移窗口内只允许一套 daemon 处理这些 PR。使用 [状态备份流程](../README.md#状态备份与回滚) 生成完整备份，并在目标服务用户下恢复。将 SQLite 备份和 JSON 导出当作私有运行数据保存。里面可能含有真实账号、执行路由、文件路径、会话标识和历史配置，即使当前全局配置已经替换。
+停止源 daemon 时，核对是否有新增领取凭据需要保留。迁移窗口内只允许一套 daemon 处理这些 PR。使用 [状态备份流程](../README.md#状态备份与回滚) 生成完整备份，并在目标服务用户下恢复。将 SQLite 备份和 JSON 导出当作私有运行数据保存。里面可能含有真实账号、执行路由、文件路径、会话标识和历史配置，即使当前全局配置已经替换。
 
 ## 重建启动环境
 
@@ -25,7 +16,7 @@ ink review --github-login 'reviewer[bot]' --target new-review-project \
 
 ## 核对运行期配置和在途任务
 
-恢复后先以目标服务用户启动配置核查模式。该模式暂停轮询和工作流写入，本地 socket 仍可用来检查工作项和修正 SQLite 中的运行期配置。以下命令中的路径应替换为目标环境的实际路径。
+恢复后先以目标服务用户启动配置核查模式。该模式暂停轮询和派发。本地 socket 支持修改运行期配置、改派工作项、记录旧执行停止确认，以及使用原凭据交接或重试 cooperative 任务。领取新任务仍然关闭。以下命令中的路径应替换为目标环境的实际路径。
 
 ```sh
 ink serve -config /private/ink/config.json -data /private/ink/state -config-only
@@ -45,9 +36,22 @@ ink config list --repo example/project --pr 42 --effective
 
 核对 `reviewer_login`、`reviewer_command`、`human_developer` 和 `reviewer_route`，用 [`ink config set` 或 `unset`](configuration.md#cli) 修正相应作用域。PR 的显式指派可覆盖仓库设置。将 `postApproval.command` 指向目标主机上可执行的绝对路径，并在恢复批准处理前部署该文件。另行检查 `task_blocked.discord_channel_id` 或它回退使用的开发会话。
 
-已冻结的任务配置、投递回执、PR 负责人、会话绑定和已准备的批准事件会随备份恢复。逐项对照当前工作项的 `config_snapshot`、显式指派和运行状态。改全局或仓库默认值只会影响后续配置解析。已保留的批准事件继续沿用其已记录的命令和去重记录。参见 [任务生效边界](configuration.md#任务生效边界)。
+已冻结的任务配置、投递回执、PR 负责人、会话绑定和已准备的批准事件会随备份恢复。用 [工作项 API](../README.md#本地-api) 逐项核对 `config_snapshot`、显式指派和运行状态。改全局或仓库默认值只会影响后续配置解析。已保留的批准事件继续沿用其已记录的命令和去重记录。参见 [任务生效边界](configuration.md#任务生效边界)。
 
-**放行条件**。确认每个恢复的工作项都可继续使用已记录的路由和会话，或者已在源端完成必须的交接、改派和重试处理。配置核查模式会拒绝 `assign` 和任务 `retry`。如果首轮轮询仍可能向待停用或未经核对的旧项目发出唤醒或重试，保持目标端轮询关闭，暂缓激活。可回到源端完成处理，然后重新备份和恢复。也可先恢复原执行端和会话的可用性，经核对可安全接续后再放行。
+发现旧路由时，可在目标端保持核查模式，按下面的顺序处理：
+
+1. 确认旧执行已停止且延迟请求无法重启。已领取的 cooperative 任务由原领取者使用原凭据提交交接。对需要迁移路由且无法继续的任务，可提交 `blocked`。旧版执行使用工作项 API 的 `confirm-stopped` 记录已核实的停止。
+2. 用 `ink review` 改派 reviewer，或用工作项 API 的 `assign` 改派 developer。改派会替换该角色的当前待办并保留旧记录，仍在等待交接的任务会继续阻塞后继待办。
+3. 对主动交回为 `blocked` 的旧任务，在核对新指派后，用原凭据执行 `ink task retry` 解除阻塞。已经提交的 GitHub 结果由正式服务恢复轮询后核验。参见 [阻塞和重试](handoff.md#阻塞和重试)。
+
+例如，把 reviewer 改派到已验证的新 cc-connect 项目。替换示例值，并按需用 `--github-command` 指定 reviewer 的客户端。
+
+```sh
+ink review --github-login 'reviewer[bot]' --target new-review-project \
+  https://github.com/example/project/pull/42
+```
+
+**放行条件**。确认每个恢复的工作项可以继续使用已核对的路由，或已经改派到可用的新路由。只要首轮轮询仍可能向待停用或未经核对的旧项目发出唤醒或重试，就保持轮询关闭。
 
 满足放行条件后先停止核查进程，再省略 `-config-only` 启动正式服务。macOS 停止前台核查进程后，用 `manage.py activate` 激活暂存版本。正常激活会在验证后自动创建 `enabled` 并开始轮询。
 

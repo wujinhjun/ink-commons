@@ -96,7 +96,7 @@ func serve(args []string) error {
 	configPath := flags.String("config", "config.json", "configuration file")
 	data := flags.String("data", dir, "private state directory")
 	gate := flags.String("poll-gate", "", "delay polling until this deployment gate file exists")
-	configOnly := flags.Bool("config-only", false, "allow local configuration changes while polling and workflow writes are disabled")
+	configOnly := flags.Bool("config-only", false, "allow local configuration and work item migration without polling or dispatch")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

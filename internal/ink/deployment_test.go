@@ -28,11 +28,13 @@ func TestDeploymentGateBlocksPollingAndWrites(t *testing.T) {
 	defer service.Close()
 	service.up.github = upstream.URL
 	// HTTP mutations must be blocked too, so a concurrent hook cannot be lost on rollback.
-	request := httptest.NewRequest(http.MethodPost, "/v1/pushes", nil)
-	response := httptest.NewRecorder()
-	service.Handler().ServeHTTP(response, request)
-	if response.Code != 503 {
-		t.Fatal(response.Code)
+	handler := service.Handler()
+	for _, path := range []string{"/v1/pushes", "/v1/work/acme/project/42/assign", "/v1/tasks/old/retry"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s: got %d, want 503", path, response.Code)
+		}
 	}
 	if service.pollReady() {
 		t.Fatal("gate is closed")

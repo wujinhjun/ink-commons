@@ -426,6 +426,75 @@ func TestCooperativeBlockedHandoffRequiresExplicitRetry(t *testing.T) {
 	f.claim(t, w.Task, claimB, 200)
 }
 
+func assignMigratedReviewer(t *testing.T, f *handoffFixture) {
+	t.Helper()
+	body := strings.NewReader(`{"role":"reviewer","github_login":"reviewer","route":{"provider":"test","target":"new-project","session":"new-session"}}`)
+	request := httptest.NewRequest(http.MethodPost, "/v1/work/acme/project/42/assign", body)
+	response := httptest.NewRecorder()
+	f.s.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("assign during migration: %d %s", response.Code, response.Body)
+	}
+}
+
+func TestConfigOnlyReplacesFrozenPendingRouteBeforePollingResumes(t *testing.T) {
+	f := newHandoffFixture(t)
+	if err := f.s.dispatch(context.Background(), f.repo, 42); err != nil {
+		t.Fatal(err)
+	}
+	old := f.work(t).Task
+	if old.ConfigSnapshot == nil || len(f.executor.wakes) != 1 {
+		t.Fatal("expected a frozen pending task with one wake")
+	}
+	f.s.config.ConfigOnly = true
+	f.restart(t)
+	assignMigratedReviewer(t, f)
+	work := f.work(t)
+	if work.Task.ID == old.ID || work.ReviewerOverride.Route.Target != "new-project" ||
+		len(work.History) != 1 || work.History[0].Handoff.State != "superseded" ||
+		work.History[0].ConfigSnapshot.Reviewer.Route.Target != old.ConfigSnapshot.Reviewer.Route.Target {
+		t.Fatal("reassignment did not replace the task and retain its old snapshot")
+	}
+	f.claim(t, work.Task, claimA, http.StatusServiceUnavailable)
+	if f.s.pollReady() || len(f.executor.wakes) != 1 {
+		t.Fatal("migration triggered polling or a wake")
+	}
+	f.s.config.ConfigOnly = false
+	f.restart(t)
+	f.claim(t, old, claimA, http.StatusConflict)
+	if err := f.s.dispatch(context.Background(), f.repo, 42); err != nil {
+		t.Fatal(err)
+	}
+	pending := f.work(t).Task
+	if len(f.executor.wakes) != 2 || pending.ConfigSnapshot.Reviewer.Route.Target != "new-project" ||
+		f.executor.wakes[1].route.Target != "new-project" || f.executor.wakes[1].route.Session != "new-session" {
+		t.Fatal("resumed task did not dispatch with the replacement route")
+	}
+}
+
+func TestConfigOnlyReassignmentPreservesClaimUntilAuthorizedHandoffAndRetry(t *testing.T) {
+	f := newHandoffFixture(t)
+	old := f.work(t).Task
+	f.claim(t, old, claimA, http.StatusOK)
+	f.s.config.ConfigOnly = true
+	assignMigratedReviewer(t, f)
+	work := f.work(t)
+	if !work.executionBlocked() || work.History[0].Handoff.State != "claimed" {
+		t.Fatal("reassignment released the existing owner")
+	}
+	f.call(t, "retry", old.ID, handoffInput{Token: claimA}, http.StatusConflict)
+	result := HandoffSubmission{RequestID: "migration-stopped", Handoff: true, Outcome: "blocked", Reason: "old runner stopped"}
+	f.submit(t, old, claimB, result, http.StatusForbidden)
+	f.submit(t, old, claimA, result, http.StatusOK)
+	f.call(t, "retry", old.ID, handoffInput{Token: claimB}, http.StatusForbidden)
+	f.call(t, "retry", old.ID, handoffInput{Token: claimA}, http.StatusOK)
+	work = f.work(t)
+	if work.executionBlocked() || work.Task.ID == old.ID ||
+		work.Task.Handoff.Assignee.Route.Target != "new-project" || len(f.executor.wakes) != 0 {
+		t.Fatal("expected an undispatched replacement after the original owner's handoff")
+	}
+}
+
 func TestCooperativeNeverClearsLegacyUnknown(t *testing.T) {
 	f := newHandoffFixture(t)
 	st, _ := f.s.store.load()
