@@ -117,8 +117,13 @@ class ArtifactStageTest(unittest.TestCase):
         m.run(['/usr/bin/ssh-keygen', '-Y', 'sign', '-f', key, '-n', 'ink-commons',
                self.artifact / 'SHA256SUMS'], capture_output=True)
         self.stage()
-        settings = json.loads((self.releases / self.revision / 'deployment.json').read_text())
+        release = self.releases / self.revision
+        settings = json.loads((release / 'deployment.json').read_text())
         self.assertEqual(settings['allowed_signers'], str(trust))
+        m.verify_activation_signature(self.home, self.releases.parent, release, settings)
+        (release / 'runtime.py').write_bytes(b'changed after staging')
+        with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: runtime.py'):
+            m.verify_activation_signature(self.home, self.releases.parent, release, settings)
 
     def test_rejects_tampered_binary(self):
         self.write_artifact(self.revision)
@@ -676,6 +681,34 @@ class DeployTest(unittest.TestCase):
             raise m.DeploymentError('daemon App command exited (status 1)')
         return {'status':'ok'}
 
+    def test_active_signing_policy_blocks_unsigned_candidate_before_sudo(self):
+        previous = self.release.with_name('b' * 40)
+        previous.mkdir()
+        (previous / 'ink').touch()
+        trust = str(self.home / 'allowed_signers')
+        (previous / 'deployment.json').write_text(json.dumps({
+            **self.settings, 'revision': previous.name, 'allowed_signers': trust,
+        }))
+        self.link.unlink()
+        self.link.symlink_to(previous / 'ink')
+        self.jobs.discard(('gui/501', m.LABEL))
+        self.jobs.add(('system', m.LABEL))
+        old_plist = plistlib.dumps({'Label': m.LABEL, 'UserName': 'service',
+                                   'ProgramArguments': [sys.executable, str(previous / 'runtime.py')]})
+        self.plist.write_bytes(old_plist)
+        for settings, message in (
+            (self.settings, 'active signing policy requires a signed candidate'),
+            ({**self.settings, 'allowed_signers': trust}, 'signature verification failed'),
+        ):
+            with self.subTest(message=message):
+                (self.release / 'deployment.json').write_text(json.dumps(settings))
+                with self.assertRaisesRegex(m.DeploymentError, message):
+                    self.activate()
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.plist.read_bytes(), old_plist)
+                self.assertEqual(self.link.resolve(), previous / 'ink')
+                self.assertIn(('system', m.LABEL), self.jobs)
+
     def test_login_migration_preserves_cc_connect_and_watchdog(self):
         external = {name: (self.agents / (name + '.plist')).read_bytes()
                     for name in (EXTERNAL_CC, EXTERNAL_WATCHDOG)}
@@ -829,7 +862,10 @@ class DeployTest(unittest.TestCase):
             m.validate_state_directory(self.data, self.home, self.data.stat().st_uid)
 
     def test_rollback_preserves_original_entrypoint_symlink(self):
-        target=self.link.with_name('old-binary')
+        previous = self.release.with_name('b' * 40)
+        previous.mkdir()
+        (previous / 'deployment.json').write_text(json.dumps({**self.settings, 'revision': previous.name}))
+        target = previous / 'ink'
         self.link.rename(target)
         self.link.symlink_to(target)
         self.fail=True

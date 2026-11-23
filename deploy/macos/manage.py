@@ -265,6 +265,9 @@ def stage(args, *, reuse=False):
     if release.exists():
         verify_staged_settings(release, config, settings)
         verify_artifact(artifact, release, revision, bundled)
+        if allowed_signers:
+            verify_signature(release, allowed_signers)
+            verify_artifact(release, release, revision, bundled=True)
         return release
     releases.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(dir=releases) as temp:
@@ -275,7 +278,11 @@ def stage(args, *, reuse=False):
             for name in (BUNDLE_FILES if bundled else ('ink',)):
                 shutil.copyfile(artifact / name, candidate / name)
             (candidate / 'ink').chmod(0o700)
-            verify_artifact(artifact, candidate, revision, bundled)
+            if allowed_signers:
+                for name in ('SHA256SUMS', 'SHA256SUMS.sig'):
+                    shutil.copyfile(artifact / name, candidate / name)
+                verify_signature(candidate, allowed_signers)
+            verify_artifact(candidate if allowed_signers else artifact, candidate, revision, bundled)
             if not bundled:
                 for name in ('runtime.py', 'manage.py'):
                     script = run(['git', '-C', repo, 'show', revision + ':deploy/macos/' + name],
@@ -655,6 +662,20 @@ def activate(args):
         activate_system(args, account)
 
 
+def verify_activation_signature(home, root, release, settings):
+    # A legacy standalone executable has no release manifest or signing policy.
+    active = active_deployment(home, root) if (root / 'ink').is_symlink() else None
+    active_signers = active[1].get('allowed_signers') if active else None
+    candidate_signers = settings.get('allowed_signers')
+    if active_signers and not candidate_signers:
+        raise DeploymentError('active signing policy requires a signed candidate; restage the release')
+    if candidate_signers:
+        if active_signers and active_signers != candidate_signers:
+            verify_signature(release, active_signers)
+        verify_signature(release, candidate_signers)
+        verify_artifact(release, release, settings['revision'], bundled=True)
+
+
 def activate_system(args, account):
     home = Path(account.pw_dir).resolve()
     root = home / '.local/lib/ink-commons'
@@ -664,6 +685,7 @@ def activate_system(args, account):
     settings = json.loads((release / 'deployment.json').read_text())
     if settings['home'] != str(home) or settings.get('revision') != release.name:
         raise DeploymentError('release home or revision differs from the deployment manifest')
+    verify_activation_signature(home, root, release, settings)
     data = Path(settings['data'])
     validate_state_directory(data, home, account.pw_uid)
     gui = 'gui/' + str(account.pw_uid)
