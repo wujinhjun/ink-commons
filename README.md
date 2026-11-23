@@ -355,7 +355,7 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 
 ## macOS 服务与版本部署
 
-Apple Silicon Mac 可从 GitHub Release 安装系统级 LaunchDaemon，同砚以普通用户身份运行。已安装的系统版可用 `ink upgrade` 更新。从旧版升级时，从校验过的新版发布包运行 `manage.py upgrade`，沿用已有部署配置。通过 `/healthz` 的 `revision` 核对实际运行版本。见 [macOS 部署与恢复](deploy/macos/README.md)。
+Apple Silicon Mac 可从 GitHub Release 安装系统级 LaunchDaemon，同砚以普通用户身份运行。已安装的系统版可用 `ink upgrade` 暂存新版，再用 `ink upgrade --apply` 切换。从旧版升级时，从校验过的新版发布包运行 `manage.py upgrade --apply`，沿用已有部署配置。通过 `/healthz` 的 `revision` 核对实际运行版本。见 [macOS 部署与恢复](deploy/macos/README.md)。
 
 ### 自动合入身份
 

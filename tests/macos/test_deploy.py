@@ -78,6 +78,53 @@ class ArtifactStageTest(unittest.TestCase):
         with self.assertRaisesRegex(m.DeploymentError, 'release already exists'):
             self.stage()
 
+    def test_signature_rejects_changed_manifest(self):
+        trust = self.home / 'allowed_signers'
+        key = self.home / 'test-key'
+        m.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', key])
+        trust.write_text('ink-release ' + key.with_suffix('.pub').read_text())
+        manifest = self.artifact / 'SHA256SUMS'
+        manifest.write_bytes(b'approved manifest')
+        m.run(['/usr/bin/ssh-keygen', '-Y', 'sign', '-f', key, '-n', 'ink-commons', manifest],
+              capture_output=True)
+        m.verify_signature(self.artifact, trust)
+        manifest.write_bytes(b'changed manifest')
+        with self.assertRaisesRegex(m.DeploymentError, 'signature verification failed'):
+            m.verify_signature(self.artifact, trust)
+
+    def test_manual_stage_inherits_signing_policy_from_active_release(self):
+        self.write_bundle()
+        trust = self.home / 'allowed_signers'
+        key = self.home / 'test-key'
+        m.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', key])
+        trust.write_text('ink-release ' + key.with_suffix('.pub').read_text())
+        previous = self.releases / ('a' * 40)
+        previous.mkdir(parents=True)
+        (previous / 'ink').touch()
+        (previous / 'deployment.json').write_text(json.dumps({
+            'revision': previous.name, 'home': str(self.home), 'allowed_signers': str(trust),
+        }))
+        (self.releases.parent / 'ink').symlink_to(previous / 'ink')
+        signature = self.artifact / 'SHA256SUMS.sig'
+        for bad_signature in (None, b'invalid signature'):
+            with self.subTest(signature=bad_signature):
+                if bad_signature is not None:
+                    signature.write_bytes(bad_signature)
+                with self.assertRaisesRegex(m.DeploymentError, 'signature verification failed'):
+                    self.stage()
+                self.assertFalse((self.releases / self.revision).exists())
+        signature.unlink()
+        m.run(['/usr/bin/ssh-keygen', '-Y', 'sign', '-f', key, '-n', 'ink-commons',
+               self.artifact / 'SHA256SUMS'], capture_output=True)
+        self.stage()
+        release = self.releases / self.revision
+        settings = json.loads((release / 'deployment.json').read_text())
+        self.assertEqual(settings['allowed_signers'], str(trust))
+        m.verify_activation_signature(self.home, self.releases.parent, release, settings)
+        (release / 'runtime.py').write_bytes(b'changed after staging')
+        with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: runtime.py'):
+            m.verify_activation_signature(self.home, self.releases.parent, release, settings)
+
     def test_rejects_tampered_binary(self):
         self.write_artifact(self.revision)
         (self.artifact / 'ink').write_bytes(b'tampered')
@@ -308,7 +355,7 @@ class UpgradeTest(unittest.TestCase):
                 self.assertEqual(kwargs['env']['NODE_OPTIONS'], '--use-env-proxy')
                 self.assertEqual(kwargs['env']['PATH'], '/usr/bin:/bin')
                 if args[5] == 'api':
-                    return SimpleNamespace(stdout=self.target.name.encode())
+                    return SimpleNamespace(stdout=('build-' + self.target.name).encode())
                 directory = Path(args[args.index('--dir') + 1])
                 (directory / 'REVISION').write_text(self.target.name)
 
@@ -324,7 +371,7 @@ class UpgradeTest(unittest.TestCase):
              patch.object(m, 'run', side_effect=run), \
              patch.object(m, 'stage', side_effect=stage) as staged, \
              patch.object(m, 'activate_staged') as activate:
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         staged.assert_called_once()
         activate.assert_called_once_with(self.target)
@@ -332,6 +379,60 @@ class UpgradeTest(unittest.TestCase):
         self.assertEqual(self.calls[1][5:8], ['release', 'download', 'build-' + self.target.name])
         self.assertIn('--pattern=manage.py', self.calls[1])
         self.assertIn('--pattern=runtime.py', self.calls[1])
+
+    def test_dry_run_selects_published_release_without_download_or_activation(self):
+        with patch.object(m, 'output', return_value='build-' + self.target.name) as query, \
+             patch.object(m, 'run') as run, patch.object(m, 'activate_staged') as activate:
+            m.upgrade_system(self.root, self.entry, channel='stable', dry_run=True)
+        self.assertIn('repos/' + m.DEFAULT_RELEASE_REPO + '/releases/latest', query.call_args.args[0])
+        run.assert_not_called()
+        activate.assert_not_called()
+
+    def test_explicit_tag_dry_run_requires_a_matching_published_release(self):
+        tag = 'build-' + self.target.name
+        for metadata, expected_error in (
+            (subprocess.CalledProcessError(1, 'release lookup'), 'cannot read'),
+            ({'tag_name': tag, 'draft': True}, 'no matching published release'),
+            ({'tag_name': tag, 'draft': False}, 'no matching published release'),
+        ):
+            with self.subTest(metadata=metadata), patch.object(m, 'output') as query, \
+                 patch.object(m, 'run') as run, patch.object(m, 'stage') as stage:
+                if isinstance(metadata, Exception):
+                    query.side_effect = metadata
+                else:
+                    query.return_value = json.dumps(metadata)
+                with self.assertRaisesRegex(m.DeploymentError, expected_error):
+                    m.upgrade_system(self.root, self.entry, tag=tag, dry_run=True)
+                query.assert_called_once()
+                self.assertIn(f'repos/{m.DEFAULT_RELEASE_REPO}/releases/tags/{tag}', query.call_args.args[0])
+                run.assert_not_called()
+                stage.assert_not_called()
+
+    def test_preview_selection_skips_stable_page_and_unpublished_or_invalid_tags(self):
+        tag = 'build-' + self.target.name
+        stable = {'tag_name': 'build-' + self.current.name, 'draft': False, 'published_at': 'date'}
+        preview = {'tag_name': tag, 'draft': False, 'prerelease': True, 'published_at': 'date'}
+        pages = [json.dumps([stable] * 100), json.dumps([
+            {**preview, 'draft': True}, {**preview, 'tag_name': 'preview-1'}, preview,
+        ])]
+        with patch.object(m, 'output', side_effect=pages) as query, patch.object(m, 'run') as run:
+            result = m.select_release(['/example/reader'], {}, None, 'preview', 'acme/ink')
+        self.assertEqual(result, (tag, self.target.name))
+        self.assertEqual([call.args[0][-1] for call in query.call_args_list],
+                         ['repos/acme/ink/releases?per_page=100&page=1',
+                          'repos/acme/ink/releases?per_page=100&page=2'])
+        run.assert_not_called()
+
+    def test_prepare_without_apply_does_not_activate(self):
+        self.make_staged_target()
+        manifest = self.make_published_manifest(self.target)
+        tag = 'build-' + self.target.name
+        with self.mock_manifest_download(manifest, self.target.name), \
+             patch.object(m, 'output', return_value=json.dumps({
+                 'tag_name': tag, 'draft': False, 'published_at': 'date',
+             })), patch.object(m, 'activate_staged') as activate:
+            m.upgrade_system(self.root, self.entry, tag=tag)
+        activate.assert_not_called()
 
     def test_upgrade_uses_configured_repo_and_preserves_deployment_settings(self):
         config_file = self.current / 'config.json'
@@ -347,7 +448,7 @@ class UpgradeTest(unittest.TestCase):
         def run(args, **kwargs):
             self.calls.append(args)
             if args[1] == 'api':
-                return SimpleNamespace(stdout=self.target.name.encode())
+                return SimpleNamespace(stdout=('build-' + self.target.name).encode())
             directory = Path(args[args.index('--dir') + 1])
             (directory / 'REVISION').write_text(self.target.name)
 
@@ -356,7 +457,7 @@ class UpgradeTest(unittest.TestCase):
             m.upgrade_system(self.root, self.entry)
 
         self.assertEqual(self.calls[0][:3], [
-            '/test/github-app-cli', 'api', 'repos/fork-owner/ink-fork/git/ref/heads/main',
+            '/test/github-app-cli', 'api', 'repos/fork-owner/ink-fork/releases/latest',
         ])
         self.assertEqual(self.calls[1][1:4], ['release', 'download', 'build-' + self.target.name])
         self.assertEqual(self.calls[1][6:8], ['--repo', 'fork-owner/ink-fork'])
@@ -377,10 +478,10 @@ class UpgradeTest(unittest.TestCase):
 
     def test_unpublished_build_does_not_stage_or_activate(self):
         with patch.object(m, 'run', side_effect=subprocess.CalledProcessError(1, 'release download')) as run, \
-             patch.object(m, 'output', return_value=self.target.name), \
+             patch.object(m, 'select_release', return_value=('build-' + self.target.name, self.target.name)), \
              patch.object(m, 'stage') as staged:
             with self.assertRaisesRegex(m.DeploymentError, 'check the GitHub Actions publish job'):
-                m.upgrade_system(self.root, self.entry)
+                m.upgrade_system(self.root, self.entry, apply=True)
 
         run.assert_called_once()
         staged.assert_not_called()
@@ -390,9 +491,9 @@ class UpgradeTest(unittest.TestCase):
         with patch.object(m, 'SYSTEM_DIR', self.root), \
              patch.object(m, 'loaded', side_effect=lambda domain, label: domain == 'system'), \
              patch.object(m, 'run') as run, \
-             patch.object(m, 'output', return_value=self.current.name), \
+             patch.object(m, 'select_release', return_value=('build-' + self.current.name, self.current.name)), \
              patch.object(m, 'health', return_value={'revision': self.current.name, 'gate': 'open'}):
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         run.assert_not_called()
 
@@ -400,20 +501,20 @@ class UpgradeTest(unittest.TestCase):
         manifest = self.make_published_manifest(self.current)
         with self.mock_manifest_download(manifest, self.current.name), \
              patch.object(m, 'loaded', side_effect=lambda domain, label: domain != 'system'), \
-             patch.object(m, 'output', return_value=self.current.name), \
+             patch.object(m, 'output', return_value='build-' + self.current.name), \
              patch.object(m, 'health', return_value={'revision': self.current.name, 'gate': 'open'}), \
              patch.object(m, 'activate_staged') as activate:
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         activate.assert_called_once_with(self.current)
 
     def test_missing_health_socket_reactivates_installed_target(self):
         manifest = self.make_published_manifest(self.current)
         with self.mock_manifest_download(manifest, self.current.name), \
-             patch.object(m, 'output', return_value=self.current.name), \
+             patch.object(m, 'select_release', return_value=('build-' + self.current.name, self.current.name)), \
              patch.object(m, 'health', side_effect=FileNotFoundError), \
              patch.object(m, 'activate_staged') as activate:
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         activate.assert_called_once_with(self.current)
 
@@ -421,9 +522,9 @@ class UpgradeTest(unittest.TestCase):
         self.make_staged_target()
         manifest = self.make_published_manifest(self.target)
         with self.mock_manifest_download(manifest, self.target.name), \
-             patch.object(m, 'output', return_value=self.target.name), \
+             patch.object(m, 'select_release', return_value=('build-' + self.target.name, self.target.name)), \
              patch.object(m, 'activate_staged') as activate:
-            m.upgrade_system(self.root, self.entry)
+            m.upgrade_system(self.root, self.entry, apply=True)
 
         activate.assert_called_once_with(self.target)
 
@@ -436,10 +537,10 @@ class UpgradeTest(unittest.TestCase):
                 original = script.read_bytes()
                 script.write_bytes(b'changed after staging')
                 with self.mock_manifest_download(manifest, self.target.name), \
-                     patch.object(m, 'output', return_value=self.target.name), \
+                     patch.object(m, 'select_release', return_value=('build-' + self.target.name, self.target.name)), \
                      patch.object(m, 'activate_staged') as activate:
                     with self.assertRaisesRegex(m.DeploymentError, 'checksum mismatch: ' + name):
-                        m.upgrade_system(self.root, self.entry)
+                        m.upgrade_system(self.root, self.entry, apply=True)
                 activate.assert_not_called()
                 script.write_bytes(original)
 
@@ -456,9 +557,9 @@ class UpgradeTest(unittest.TestCase):
                 original = file.read_bytes()
                 file.write_bytes(content)
                 with patch.object(m, 'run') as run, \
-                     patch.object(m, 'output', return_value=self.target.name):
+                     patch.object(m, 'select_release', return_value=('build-' + self.target.name, self.target.name)):
                     with self.assertRaisesRegex(m.DeploymentError, diagnostic):
-                        m.upgrade_system(self.root, self.entry)
+                        m.upgrade_system(self.root, self.entry, apply=True)
                 run.assert_not_called()
                 file.write_bytes(original)
 
@@ -579,6 +680,34 @@ class DeployTest(unittest.TestCase):
         if self.fail:
             raise m.DeploymentError('daemon App command exited (status 1)')
         return {'status':'ok'}
+
+    def test_active_signing_policy_blocks_unsigned_candidate_before_sudo(self):
+        previous = self.release.with_name('b' * 40)
+        previous.mkdir()
+        (previous / 'ink').touch()
+        trust = str(self.home / 'allowed_signers')
+        (previous / 'deployment.json').write_text(json.dumps({
+            **self.settings, 'revision': previous.name, 'allowed_signers': trust,
+        }))
+        self.link.unlink()
+        self.link.symlink_to(previous / 'ink')
+        self.jobs.discard(('gui/501', m.LABEL))
+        self.jobs.add(('system', m.LABEL))
+        old_plist = plistlib.dumps({'Label': m.LABEL, 'UserName': 'service',
+                                   'ProgramArguments': [sys.executable, str(previous / 'runtime.py')]})
+        self.plist.write_bytes(old_plist)
+        for settings, message in (
+            (self.settings, 'active signing policy requires a signed candidate'),
+            ({**self.settings, 'allowed_signers': trust}, 'signature verification failed'),
+        ):
+            with self.subTest(message=message):
+                (self.release / 'deployment.json').write_text(json.dumps(settings))
+                with self.assertRaisesRegex(m.DeploymentError, message):
+                    self.activate()
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.plist.read_bytes(), old_plist)
+                self.assertEqual(self.link.resolve(), previous / 'ink')
+                self.assertIn(('system', m.LABEL), self.jobs)
 
     def test_login_migration_preserves_cc_connect_and_watchdog(self):
         external = {name: (self.agents / (name + '.plist')).read_bytes()
@@ -733,7 +862,10 @@ class DeployTest(unittest.TestCase):
             m.validate_state_directory(self.data, self.home, self.data.stat().st_uid)
 
     def test_rollback_preserves_original_entrypoint_symlink(self):
-        target=self.link.with_name('old-binary')
+        previous = self.release.with_name('b' * 40)
+        previous.mkdir()
+        (previous / 'deployment.json').write_text(json.dumps({**self.settings, 'revision': previous.name}))
+        target = previous / 'ink'
         self.link.rename(target)
         self.link.symlink_to(target)
         self.fail=True

@@ -103,6 +103,19 @@ def bundle_revision(artifact):
     return revision
 
 
+def verify_signature(artifact, allowed_signers):
+    if not allowed_signers:
+        return
+    manifest = artifact / 'SHA256SUMS'
+    try:
+        with manifest.open('rb') as stream:
+            run(['/usr/bin/ssh-keygen', '-Y', 'verify', '-f', allowed_signers,
+                 '-I', 'ink-release', '-n', 'ink-commons', '-s', artifact / 'SHA256SUMS.sig'],
+                stdin=stream, capture_output=True)
+    except (OSError, subprocess.CalledProcessError):
+        raise DeploymentError('release checksum signature verification failed') from None
+
+
 def verify_artifact(artifact, release, revision, bundled):
     names = BUNDLE_FILES if bundled else ('ink',)
     checksums = {}
@@ -179,6 +192,32 @@ def stage(args, *, reuse=False):
         raise DeploymentError('Python 3.11.8+ required')
     artifact = Path(args.artifact_dir).expanduser() if args.artifact_dir else None
     bundled = artifact is not None and (artifact / 'REVISION').is_file()
+    home = Path.home().resolve()
+    root = home / '.local/lib/ink-commons'
+    releases = root / 'releases'
+    release_repo = getattr(args, 'release_repo', None)
+    service_path = getattr(args, 'service_path', None)
+    allowed_signers = getattr(args, 'allowed_signers', None)
+    if release_repo is None or service_path is None or allowed_signers is None:
+        active = active_deployment(home, root, allow_legacy_entry=True)
+        if active is not None:
+            _, previous = active
+            if release_repo is None and 'release_repo' in previous:
+                release_repo = validate_release_repo(previous['release_repo'])
+            if service_path is None and 'service_path' in previous:
+                service_path = validate_service_path(previous['service_path'])
+            if allowed_signers is None:
+                allowed_signers = previous.get('allowed_signers')
+        elif (root / 'ink').exists() or releases.is_dir():
+            print('No versioned Ink entry to inherit from. Omitted release repository and service PATH use defaults.',
+                  file=sys.stderr)
+    if allowed_signers is not None:
+        if not isinstance(allowed_signers, str) or not allowed_signers.strip():
+            raise DeploymentError('invalid release signing trust file path')
+        allowed_signers = str(Path(allowed_signers).expanduser().resolve())
+        if not bundled:
+            raise DeploymentError('signature verification requires a complete release bundle')
+        verify_signature(artifact, allowed_signers)
     if bundled:
         revision = bundle_revision(artifact)
         if revision != args.revision:
@@ -186,10 +225,7 @@ def stage(args, *, reuse=False):
     else:
         repo = Path(__file__).resolve().parents[2]
         revision = output(['git', '-C', repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{commit}'])
-    home = Path.home().resolve()
     extra_env = parse_env(args.env)
-    root = home / '.local/lib/ink-commons'
-    releases = root / 'releases'
     release = releases / revision
     if release.exists() and not reuse:
         raise DeploymentError('release already exists; select an unstaged revision or use set-release-repo to change the active source')
@@ -210,19 +246,6 @@ def stage(args, *, reuse=False):
     settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
                 'data': str(home / '.local/state/ink-commons'),
                 'environment': extra_env}
-    release_repo = getattr(args, 'release_repo', None)
-    service_path = getattr(args, 'service_path', None)
-    if release_repo is None or service_path is None:
-        active = active_deployment(home, root, allow_legacy_entry=True)
-        if active is not None:
-            _, previous = active
-            if release_repo is None and 'release_repo' in previous:
-                release_repo = validate_release_repo(previous['release_repo'])
-            if service_path is None and 'service_path' in previous:
-                service_path = validate_service_path(previous['service_path'])
-        elif (root / 'ink').exists() or releases.is_dir():
-            print('No versioned Ink entry to inherit from. Omitted release repository and service PATH use defaults.',
-                  file=sys.stderr)
     if release_repo is not None:
         settings['release_repo'] = validate_release_repo(release_repo)
     if service_path is not None:
@@ -234,12 +257,17 @@ def stage(args, *, reuse=False):
             raise DeploymentError('--cc-config requires an explicit --project')
         settings['cc_config'] = str(Path(args.cc_config).expanduser().resolve())
         settings['project'] = args.project
+    if allowed_signers:
+        settings['allowed_signers'] = allowed_signers
     env = credential_environment(settings)
     if config.get('cc_connect_url') and not env.get('INK_CC_CONNECT_TOKEN'):
         raise DeploymentError('configured cc-connect provider requires a webhook token')
     if release.exists():
         verify_staged_settings(release, config, settings)
         verify_artifact(artifact, release, revision, bundled)
+        if allowed_signers:
+            verify_signature(release, allowed_signers)
+            verify_artifact(release, release, revision, bundled=True)
         return release
     releases.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(dir=releases) as temp:
@@ -250,7 +278,11 @@ def stage(args, *, reuse=False):
             for name in (BUNDLE_FILES if bundled else ('ink',)):
                 shutil.copyfile(artifact / name, candidate / name)
             (candidate / 'ink').chmod(0o700)
-            verify_artifact(artifact, candidate, revision, bundled)
+            if allowed_signers:
+                for name in ('SHA256SUMS', 'SHA256SUMS.sig'):
+                    shutil.copyfile(artifact / name, candidate / name)
+                verify_signature(candidate, allowed_signers)
+            verify_artifact(candidate if allowed_signers else artifact, candidate, revision, bundled)
             if not bundled:
                 for name in ('runtime.py', 'manage.py'):
                     script = run(['git', '-C', repo, 'show', revision + ':deploy/macos/' + name],
@@ -309,15 +341,18 @@ def deployment_lock(root):
         yield
 
 
-def upgrade():
+def upgrade(args):
     if os.geteuid() == 0:
         raise DeploymentError('upgrade must run as the service user, without sudo')
     root = Path.home().resolve() / '.local/lib/ink-commons'
     entry = root / 'ink'
     if not entry.is_symlink():
         raise DeploymentError('upgrade requires an existing Ink deployment')
+    if args.dry_run:
+        upgrade_system(root, entry, tag=args.tag, channel=args.channel, dry_run=True)
+        return
     with deployment_lock(root):
-        upgrade_system(root, entry)
+        upgrade_system(root, entry, tag=args.tag, channel=args.channel, apply=args.apply)
 
 
 def release_client(config, repo):
@@ -368,7 +403,54 @@ def verify_staged_settings(target, config, expected_settings):
                               'archive the staged release before retrying')
 
 
-def upgrade_system(root, entry):
+BUILD_TAG = re.compile(r'build-([0-9a-f]{40})')
+
+
+def published_build(release):
+    return (isinstance(release, dict) and isinstance(release.get('tag_name'), str)
+            and BUILD_TAG.fullmatch(release['tag_name'])
+            and release.get('draft') is False and bool(release.get('published_at')))
+
+
+def select_preview(app, network_env, repo):
+    page = 1
+    while True:
+        path = f'repos/{repo}/releases?per_page=100&page={page}'
+        releases = json.loads(output([*app, 'api', path], env=network_env))
+        if not isinstance(releases, list):
+            raise DeploymentError('invalid GitHub release listing')
+        for release in releases:
+            if published_build(release) and release.get('prerelease') is True:
+                return release['tag_name']
+        if len(releases) < 100:
+            raise DeploymentError('no published preview build found')
+        page += 1
+
+
+def select_release(app, network_env, tag, channel, repo):
+    if tag is not None:
+        if BUILD_TAG.fullmatch(tag) is None:
+            raise DeploymentError('specify a published build-<SHA> tag')
+        try:
+            path = f'repos/{repo}/releases/tags/{tag}'
+            release = json.loads(output([*app, 'api', path], env=network_env,
+                                        stderr=subprocess.DEVNULL, timeout=30))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise DeploymentError('cannot read the selected GitHub release tag') from None
+        if not published_build(release) or release['tag_name'] != tag:
+            raise DeploymentError('the selected tag has no matching published release')
+    elif channel == 'preview':
+        tag = select_preview(app, network_env, repo)
+    else:
+        tag = output([*app, 'api', f'repos/{repo}/releases/latest',
+                      '--jq', '.tag_name'], env=network_env)
+    match = BUILD_TAG.fullmatch(tag)
+    if match is None:
+        raise DeploymentError('no deployment release found; specify a published build-<SHA> tag')
+    return tag, match[1]
+
+
+def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=False):
     releases = root / 'releases'
     current = entry.resolve().parent
     if current.parent != releases or not (current / 'deployment.json').is_file():
@@ -380,10 +462,11 @@ def upgrade_system(root, entry):
     network_env = {**os.environ, **parse_env(proxy_entries)}
     repo = validate_release_repo(settings.get('release_repo', DEFAULT_RELEASE_REPO))
     app, release_scope = release_client(config, repo)
-    revision = output([*app, 'api', f'repos/{repo}/git/ref/heads/main',
-                       '--jq', '.object.sha'], env=network_env)
-    if not re.fullmatch(r'[0-9a-f]{40}', revision):
-        raise DeploymentError('GitHub did not return a valid main revision')
+    tag, revision = select_release(app, network_env, tag, channel, repo)
+    if dry_run:
+        print(json.dumps({'current': current.name, 'tag': tag, 'revision': revision,
+                          'staged': (releases / revision).is_dir()}))
+        return
     target = releases / revision
     if (target == current and loaded('system', LABEL)
             and (SYSTEM_DIR / (LABEL + '.plist')).is_file()
@@ -403,25 +486,32 @@ def upgrade_system(root, entry):
         verify_staged_settings(target, config, {**expected, 'revision': revision})
 
     assets = ('SHA256SUMS',) if reuse else (*BUNDLE_FILES, 'SHA256SUMS')
+    allowed_signers = settings.get('allowed_signers')
+    if allowed_signers:
+        assets += ('SHA256SUMS.sig',)
     with tempfile.TemporaryDirectory() as artifact:
         try:
-            run([*app, 'release', 'download', 'build-' + revision, '--dir', artifact, *release_scope,
+            run([*app, 'release', 'download', tag, '--dir', artifact, *release_scope,
                  *[f'--pattern={name}' for name in assets]], env=network_env)
         except subprocess.CalledProcessError:
-            raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
+            raise DeploymentError('unable to download the selected release; check the GitHub Actions publish job') from None
         if reuse:
+            verify_signature(Path(artifact), allowed_signers)
             verify_artifact(Path(artifact), target, revision, bundled=True)
         else:
             if bundle_revision(Path(artifact)) != revision:
-                raise DeploymentError('downloaded bundle does not match the main revision')
+                raise DeploymentError('downloaded bundle does not match the selected release')
             stage(argparse.Namespace(
                 revision=revision, artifact_dir=artifact, config=str(config_path),
                 github_command=config['github_command'], cc_config=settings.get('cc_config'),
                 project=settings.get('project'), credentials=settings.get('credentials'),
-                env=proxy_entries, release_repo=settings.get('release_repo'),
+                env=proxy_entries, allowed_signers=allowed_signers, release_repo=settings.get('release_repo'),
                 service_path=settings.get('service_path'),
             ))
 
+    if not apply:
+        print('Prepared:', target)
+        return
     try:
         activate_staged(target)
     except (OSError, subprocess.CalledProcessError):
@@ -572,6 +662,20 @@ def activate(args):
         activate_system(args, account)
 
 
+def verify_activation_signature(home, root, release, settings):
+    # A legacy standalone executable has no release manifest or signing policy.
+    active = active_deployment(home, root) if (root / 'ink').is_symlink() else None
+    active_signers = active[1].get('allowed_signers') if active else None
+    candidate_signers = settings.get('allowed_signers')
+    if active_signers and not candidate_signers:
+        raise DeploymentError('active signing policy requires a signed candidate; restage the release')
+    if candidate_signers:
+        if active_signers and active_signers != candidate_signers:
+            verify_signature(release, active_signers)
+        verify_signature(release, candidate_signers)
+        verify_artifact(release, release, settings['revision'], bundled=True)
+
+
 def activate_system(args, account):
     home = Path(account.pw_dir).resolve()
     root = home / '.local/lib/ink-commons'
@@ -581,6 +685,7 @@ def activate_system(args, account):
     settings = json.loads((release / 'deployment.json').read_text())
     if settings['home'] != str(home) or settings.get('revision') != release.name:
         raise DeploymentError('release home or revision differs from the deployment manifest')
+    verify_activation_signature(home, root, release, settings)
     data = Path(settings['data'])
     validate_state_directory(data, home, account.pw_uid)
     gui = 'gui/' + str(account.pw_uid)
@@ -763,13 +868,23 @@ def main():
     for prepare in (build, install):
         prepare.add_argument('--env', action='append', default=[], help='non-secret proxy environment KEY=VALUE')
         prepare.add_argument('--config', default='~/.config/ink-commons/config.json')
+        prepare.add_argument('--allowed-signers', help='OpenSSH allowed_signers trust file for release signatures')
         prepare.add_argument('--credentials', help='private JSON file for configured provider tokens')
         prepare.add_argument('--cc-config', help='explicit legacy TOML credential source')
         prepare.add_argument('--project', help='project in the legacy TOML credential source')
         prepare.add_argument('--github-command', help='absolute GitHub reader CLI path')
         prepare.add_argument('--release-repo', help='owner/repo for upgrades (inherits active setting, else ' + DEFAULT_RELEASE_REPO + ')')
         prepare.add_argument('--service-path', help='absolute LaunchDaemon PATH entries separated by colons (inherits active setting)')
-    commands.add_parser('upgrade', help='download and activate the verified main build')
+    update = commands.add_parser('upgrade', help='prepare a published release')
+    selection = update.add_mutually_exclusive_group()
+    selection.add_argument('--tag', help='published build-<SHA> tag')
+    selection.add_argument('--channel', choices=('stable', 'preview'))
+    update.add_argument('--dry-run', action='store_true')
+    update.add_argument('--apply', action='store_true', help='explicitly activate the prepared release')
+    rollback = commands.add_parser('rollback', help='select a prior release and preserve current SQLite state')
+    rollback.add_argument('--tag', required=True)
+    rollback.add_argument('--dry-run', action='store_true')
+    rollback.set_defaults(apply=True, channel=None)
     source = commands.add_parser('set-release-repo', help='change the release source for the installed revision')
     source.add_argument('repo', metavar='owner/repo')
     apply = commands.add_parser('activate')
@@ -783,8 +898,8 @@ def main():
     if sys.platform != 'darwin':
         parser.error('macOS only')
     try:
-        if args.action == 'upgrade':
-            upgrade()
+        if args.action in ('upgrade', 'rollback'):
+            upgrade(args)
         else:
             {'stage': stage, 'deploy': deploy, 'activate': activate_from_cli,
              'set-release-repo': set_release_repo, 'status': status}[args.action](args)

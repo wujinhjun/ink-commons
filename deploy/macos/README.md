@@ -23,7 +23,18 @@ python3.12 manage.py deploy --config ./config.example.json \
 
 ## 已有部署
 
-从任意目录可运行 `~/.local/lib/ink-commons/ink upgrade`。暂存的部署文件先按 GitHub Release 校验，校验后再请求管理员授权以切换同砚。
+升级以 GitHub Release 为准。默认选择 stable channel，可显式指定 `--channel preview` 或 `--tag build-<SHA>`。默认下载、校验并暂存，切换需要 `--apply`。`--dry-run` 只打印版本计划。
+
+```sh
+ink upgrade --channel stable --dry-run
+ink upgrade --tag build-<SHA>
+ink upgrade --tag build-<SHA> --apply
+ink rollback --tag build-<previous-SHA> --dry-run
+```
+
+明确确认目标版本兼容现有 SQLite 后，可省略 rollback 的 `--dry-run` 切换。回滚保留最新状态，激活自检失败时会恢复原版本和切换前快照。回滚前保存最新状态。旧二进制没有新命令时，从发布包调用 `manage.py upgrade` 或 `manage.py rollback` 并传相同参数。
+
+发布包包含 SHA-256 校验清单。为 CI 配置 `INK_RELEASE_SIGNING_KEY` 可发布 OpenSSH 签名。首次安装用 `--allowed-signers` 指向通过独立渠道取得的信任文件，签名身份为 `ink-release`，命名空间为 `ink-commons`。手动暂存和自动升级都会沿用活动版本的信任文件；传入新的 `--allowed-signers` 可显式更换。启用签名校验后，激活同样会重新校验候选目录中保留的签名和所有发布文件。此前按无签名策略暂存的版本需要重新暂存。更换信任文件时，待切换版本的签名须同时被活动版本和新版本的信任文件接受。已发布的早期无签名版本仍可按摘要验证。
 
 手动安装另一版本时，以服务用户从目标仓库取得发布包，再执行 `stage` 和 `activate`。已有安装会拒绝 `deploy`。手动暂存要求对应的 `~/.local/lib/ink-commons/releases/<SHA>` 目录尚不存在。保留活动 release 及其入口，供当前服务和回滚使用。
 
@@ -57,7 +68,7 @@ python3.12 manage.py set-release-repo fork-owner/ink-fork
 ```sh
 cd ink-deploy &&
 shasum -a 256 -c SHA256SUMS &&
-python3.12 ./manage.py upgrade
+python3.12 ./manage.py upgrade --apply
 ```
 
 激活后通过 `python3.12 ./manage.py status --user "$(id -un)"` 核对系统域、运行 SHA 和已打开的 gate。后续使用已安装的 `ink upgrade`。
