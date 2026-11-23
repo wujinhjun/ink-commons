@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"ink-commons/internal/ink"
 )
 
 const prePushHook = `#!/bin/sh
@@ -20,10 +22,11 @@ exit 0
 
 func hookCommand(args []string) error {
 	if len(args) == 0 || (args[0] != "install" && args[0] != "status") {
-		return errors.New("usage: ink hook install|status [--checkout DIR]")
+		return errors.New("usage: ink hook install|status [--checkout DIR] [--repo OWNER/REPO]")
 	}
 	flags := flag.NewFlagSet("hook "+args[0], flag.ContinueOnError)
 	checkout := flags.String("checkout", ".", "Git checkout to inspect or install into")
+	repo := flags.String("repo", "", "only report status if origin pushes to OWNER/REPO")
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -32,6 +35,16 @@ func hookCommand(args []string) error {
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected hook arguments")
+	}
+	if *repo != "" {
+		name := strings.ToLower(strings.TrimSpace(*repo))
+		if args[0] != "status" || !ink.ValidRepository(name) {
+			return errors.New("--repo requires hook status and a valid owner/repo")
+		}
+		if !checkoutPushesTo(*checkout, name) {
+			fmt.Println("unknown")
+			return nil
+		}
 	}
 	output, err := exec.Command("git", "-C", *checkout, "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push").Output()
 	if err != nil {
@@ -70,6 +83,19 @@ func hookCommand(args []string) error {
 	}
 	fmt.Println("installed")
 	return nil
+}
+
+func checkoutPushesTo(checkout, repo string) bool {
+	urls, err := exec.Command("git", "-C", checkout, "remote", "get-url", "--push", "--all", "origin").Output()
+	if err != nil {
+		return false
+	}
+	for _, remote := range strings.Split(string(urls), "\n") {
+		if ink.GitHubRepository(remote) == repo {
+			return true
+		}
+	}
+	return false
 }
 
 func hookStatus(path string) (string, error) {

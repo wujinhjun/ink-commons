@@ -884,11 +884,8 @@ def repository_status(data, entry, checkouts):
         hook = 'unknown'
         if repo in checkouts and entry.is_file():
             try:
-                checkout = checkouts[repo]
-                origin = output(['git', '-C', checkout, 'remote', 'get-url', 'origin'], stderr=subprocess.DEVNULL)
-                if re.fullmatch(r'(?:https://github\.com/|git@github\.com:)' + re.escape(repo)
-                                + r'(?:\.git)?/?', origin, re.IGNORECASE):
-                    hook = output([entry, 'hook', 'status', '--checkout', checkout], stderr=subprocess.DEVNULL)
+                hook = output([entry, 'hook', 'status', '--checkout', checkouts[repo], '--repo', repo],
+                              stderr=subprocess.DEVNULL)
             except (OSError, subprocess.CalledProcessError):
                 pass
         result.append({'repo': repo, 'hook': hook, 'linked_work': repo in linked})

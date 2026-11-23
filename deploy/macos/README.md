@@ -83,9 +83,9 @@ python3.12 ./manage.py upgrade --apply
 
 ## 关联开发会话
 
-在每个开发 checkout 运行 `ink hook install`，或用 `--checkout DIR` 指定目录。安装器遵循 Git 的 hook 路径。已有自定义 hook 时，保留原脚本，可将 `"$HOME/.local/lib/ink-commons/ink" pre-push "$2"` 接入现有 hook，或在同砚用工作项 `link` 明确关联 PR。
+在每个开发 checkout 运行 `ink hook install`，或用 `--checkout DIR` 指定目录。安装器遵循 Git 的 hook 路径。已有自定义 hook 时，请按 [根 README 的 pre-push 接入示例](../../README.md#接入-pre-push-hook) 缓存 ref 更新流，分别传给原检查和同砚，或使用工作项 `link` 关联 PR。
 
-`status --checkout OWNER/REPO=DIR` 可多次传入。每个运行期仓库显示指定 checkout 的受管 hook 状态和是否已有已关联工作项。未提供 checkout 或无法匹配 remote 时显示 unknown。已关联工作项只表示既有证据。
+`status --checkout OWNER/REPO=DIR` 可多次传入。每个运行期仓库显示指定 checkout 的受管 hook 状态和是否已有已关联工作项。未提供 checkout 或指定仓库不在 `origin` 的实际 push URL 中时显示 `unknown`。已关联工作项只表示既有证据。
 
 ## 验收与恢复
 

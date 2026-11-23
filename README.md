@@ -24,7 +24,18 @@ cp config.example.json config.json
 
 默认状态目录是 `$XDG_STATE_HOME/ink-commons` 或 `~/.local/state/ink-commons`。daemon 与 hook 可以通过同一个 `INK_DATA_DIR` 覆盖。HTTP API 通过仅当前用户可访问的 `ink.sock` 提供。配置文件使用 `config.example.json` 的结构，凭据从环境变量读取。
 
-如果需要通过可选 hook 自动记录开发会话来源，受管仓库从 `git rev-parse --git-path hooks/pre-push` 确认默认 hook 位置。使用 `core.hooksPath` 的工作区按该设置安装。没有现有 hook 时，把 `scripts/ink-pre-push` 安装为可执行的 `pre-push`。已有 hook 时，从现有 hook 为同砚和原检查分别传入同一份标准输入。让执行 Git 命令的进程能在 PATH 找到 `ink`，或通过 `INK_BIN` 指定绝对路径。
+### 接入 pre-push hook
+
+如果需要自动记录开发会话来源，在受管 checkout 运行 `ink hook install`。安装器使用 Git 配置的 hook 路径。已有 hook 时可保留原脚本，并在入口缓存 Git 传入的 ref 更新流。让原检查和同砚分别读取同一缓存，并保留原检查的退出状态。
+
+```sh
+updates=$(mktemp) || exit 1
+trap 'rm -f "$updates"' EXIT
+cat > "$updates" || exit 1
+/absolute/path/to/existing-pre-push "$@" < "$updates" || exit "$?"
+"$HOME/.local/lib/ink-commons/ink" pre-push "$2" < "$updates" || :
+```
+
 
 ## 初始化 Agent 协作指令
 
