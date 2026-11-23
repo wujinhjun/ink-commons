@@ -79,7 +79,7 @@ python3.12 ./manage.py upgrade --apply
 
 运行期仓库、reviewer、合入策略和执行参数以 SQLite 为准。JSON 中的 `repositories`、`repository_defaults` 和 `execution` 是旧数据库首次导入字段，暂存会逐项标记。SQLite 初始化后，通过 `ink config` 维护这些策略。
 
-执行 `(umask 077; ink config export > runtime-policy.json)` 可导出声明。部署时传 `--runtime-declaration runtime-policy.json`，暂存、升级及 status 会比对并报告有变化的范围。声明仅用于比对，首次安装尚无运行中 daemon 时报告 unavailable。声明可能包含本机路由和命令配置，应按私有文件保存。
+执行 `(umask 077; ink config export > runtime-policy.json)` 可导出声明。部署时传 `--runtime-declaration runtime-policy.json`，暂存、升级及 status 会比对并报告有变化的范围。声明仅用于比对。文件缺失、不可读或格式错误时报告诊断，暂存、升级和回滚继续执行。首次安装尚无运行中 daemon 时报告 `unavailable`。声明可能包含本机路由和命令配置，应按私有文件保存。
 
 ## 验收与恢复
 

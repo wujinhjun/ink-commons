@@ -150,10 +150,15 @@ def verify_revision(binary, revision):
 def config_drift(data, declaration):
     if not declaration:
         return {'status': 'not_configured'}
-    expected = json.loads(Path(declaration).read_text())
+    try:
+        expected = json.loads(Path(declaration).read_text())
+    except OSError:
+        return {'status': 'declaration_unavailable'}
+    except (TypeError, ValueError):
+        return {'status': 'invalid_declaration'}
     if not isinstance(expected, dict) or expected.get('schema') != 1 or not all(
             isinstance(expected.get(key), dict) for key in ('global', 'repositories')):
-        raise DeploymentError('invalid runtime configuration declaration')
+        return {'status': 'invalid_declaration'}
     try:
         actual = local_get(data, '/v1/config/export', timeout=2)
         if not isinstance(actual, dict) or actual.get('schema') != 1 or not all(
@@ -277,8 +282,10 @@ def stage(args, *, reuse=False):
         settings['service_path'] = validate_service_path(service_path)
     declaration = getattr(args, 'runtime_declaration', None)
     if declaration:
-        settings['runtime_declaration'] = str(Path(declaration).expanduser().resolve())
-        print(json.dumps({'config_drift': config_drift(settings['data'], settings['runtime_declaration'])}))
+        if isinstance(declaration, str):
+            declaration = os.path.abspath(os.path.expanduser(declaration))
+            settings['runtime_declaration'] = declaration
+        print(json.dumps({'config_drift': config_drift(settings['data'], declaration)}))
     if getattr(args, 'credentials', None):
         settings['credentials'] = str(Path(args.credentials).expanduser().resolve())
     elif args.cc_config:
@@ -427,7 +434,12 @@ def verify_staged_settings(target, config, expected_settings):
         staged_settings = json.loads((target / 'deployment.json').read_text())
     except (OSError, ValueError):
         raise DeploymentError('staged release configuration is missing or invalid') from None
-    if staged_config != config or staged_settings != expected_settings:
+    if not isinstance(staged_settings, dict):
+        raise DeploymentError('staged release configuration is missing or invalid')
+    # The declaration controls diagnostic reporting only.
+    staged_settings.pop('runtime_declaration', None)
+    expected = {key: value for key, value in expected_settings.items() if key != 'runtime_declaration'}
+    if staged_config != config or staged_settings != expected:
         raise DeploymentError('staged release configuration differs from the current deployment; '
                               'archive the staged release before retrying')
 
@@ -513,8 +525,8 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
     if reuse and target != current:
         expected = {key: value for key, value in settings.items() if key != 'cc_binary_sha256'}
         verify_staged_settings(target, config, {**expected, 'revision': revision})
-        if settings.get('runtime_declaration'):
-            print(json.dumps({'config_drift': config_drift(settings['data'], settings['runtime_declaration'])}))
+    if reuse and settings.get('runtime_declaration'):
+        print(json.dumps({'config_drift': config_drift(settings['data'], settings['runtime_declaration'])}))
 
     assets = ('SHA256SUMS',) if reuse else (*BUNDLE_FILES, 'SHA256SUMS')
     allowed_signers = settings.get('allowed_signers')
@@ -889,10 +901,7 @@ def status(args):
         report['runtime'] = {'status': 'unavailable'}
     if 'manifest' in locals() and manifest.is_file():
         active_settings = json.loads(manifest.read_text())
-        try:
-            report['config_drift'] = config_drift(data, active_settings.get('runtime_declaration'))
-        except (OSError, ValueError, DeploymentError):
-            report['config_drift'] = {'status': 'invalid_declaration'}
+        report['config_drift'] = config_drift(data, active_settings.get('runtime_declaration'))
     print(json.dumps(report, indent=2))
 
 
