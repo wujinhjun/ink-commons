@@ -39,6 +39,8 @@ func (e apiError) Error() string { return e.message }
 var BuildRevision = "development"
 
 func (s *Service) Handler() http.Handler {
+	const workPath = "/v1/work/{owner}/{repo}/{number}"
+	const taskPath = "/v1/tasks/{task}"
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		gate := "closed"
@@ -55,24 +57,48 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/repositories", s.listRepositories)
 	mux.HandleFunc("POST /v1/repositories", s.registerRepository)
 	mux.HandleFunc("GET /v1/work", s.listWork)
-	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}", s.work)
-	mux.HandleFunc("GET /v1/work/{owner}/{repo}/{number}/context", s.reviewContext)
-	mux.HandleFunc("POST /v1/work/{owner}/{repo}/{number}/{action}", s.work)
-	mux.HandleFunc("GET /v1/tasks/{task}", s.handoffTask)
-	mux.HandleFunc("POST /v1/tasks/{task}/{action}", s.handoffTask)
+	mux.HandleFunc("GET /v1/workspaces", s.workspaces)
+	mux.HandleFunc("POST /v1/workspaces", s.workspaces)
+	mux.HandleFunc("POST /v1/workspaces/{workspace}/{action}", s.workspaces)
+	mux.HandleFunc("GET "+workPath, s.work)
+	mux.HandleFunc("GET "+workPath+"/context", s.reviewContext)
+	mux.HandleFunc("POST "+workPath+"/{action}", s.work)
+	mux.HandleFunc("GET "+taskPath, s.handoffTask)
+	mux.HandleFunc("POST "+taskPath+"/{action}", s.handoffTask)
 	mux.HandleFunc("POST /v1/pushes", s.pushes)
 	mux.HandleFunc("POST /v1/notifications/ack", s.ackNotification)
 	mux.HandleFunc("GET /v1/notifications/status", s.notificationStatus)
+
+	pausedWrites := map[string]bool{"POST /v1/config": true, "DELETE /v1/config": true}
+	allowWhilePaused := func(path, action string, handle http.HandlerFunc) {
+		pattern := "POST " + path + "/" + action
+		pausedWrites[pattern] = true
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			r.SetPathValue("action", action)
+			handle(w, r)
+		})
+	}
+	allowWhilePaused(workPath, "assign", s.work)
+	allowWhilePaused(workPath, "confirm-stopped", s.work)
+	allowWhilePaused(taskPath, "submit", s.handoffTask)
+	allowWhilePaused(taskPath, "retry", s.handoffTask)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && !s.pollReady() {
-			fail(w, apiError{503, "deployment verification in progress"})
-			return
+			_, pattern := mux.Handler(r)
+			if !s.config.ConfigOnly || !pausedWrites[pattern] {
+				fail(w, apiError{503, "deployment verification in progress"})
+				return
+			}
 		}
 		mux.ServeHTTP(w, r)
 	})
 }
 
 func (s *Service) pollReady() bool {
+	if s.config.ConfigOnly {
+		return false
+	}
 	if s.config.PollGate == "" {
 		return true
 	}
@@ -250,7 +276,10 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if action == "assign" && change.Role == "reviewer" && change.Route != nil {
+		route := *change.Route
+		preparation := execution.Delivery{Role: "reviewer", Source: reviewSource(work)}
 		if repository, ok := s.repo(repo); ok {
+			route = allocationRoute(repository, route)
 			repository.ReviewerRoute = change.Route
 			if err := repository.ValidateReviewFeatures(); err != nil {
 				fail(w, apiError{400, err.Error()})
@@ -260,20 +289,16 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 				fail(w, apiError{400, "thread history requires a Discord development source"})
 				return
 			}
+			if repository.Review != nil {
+				preparation.RequireSameChannel = repository.Review.RequireSameChannel
+				preparation.ReuseDevelopmentThread = repository.Review.ReuseDevelopmentThread
+			}
 		}
-	}
-	if action == "assign" && change.Role == "reviewer" && change.Route != nil && change.Route.Session == "" {
-		route := *change.Route
-		if repository, ok := s.repo(repo); ok {
-			route = allocationRoute(repository, route)
-		}
-		preparation := execution.Delivery{Role: "reviewer", Source: reviewSource(work)}
-		if repository, ok := s.repo(repo); ok && repository.Review != nil {
-			preparation.ReuseDevelopmentThread = repository.Review.ReuseDevelopmentThread
-		}
-		if err := execution.ValidatePreparation(s.providers, route, preparation); err != nil {
-			fail(w, apiError{400, err.Error()})
-			return
+		if route.Session == "" || preparation.RequireSameChannel {
+			if err := execution.ValidatePreparation(s.providers, route, preparation); err != nil {
+				fail(w, apiError{400, err.Error()})
+				return
+			}
 		}
 	}
 	if err := applyChange(work, action, change); err != nil {

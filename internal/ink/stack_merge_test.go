@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -298,5 +300,93 @@ func TestStackMergeAlreadyMergedResponseRequiresMatchingClosedHead(t *testing.T)
 				t.Fatalf("attributed an unverified merge: run=%+v, notifications=%d", run, notifications)
 			}
 		})
+	}
+}
+
+func TestSharedMergeAppIsOptInAndPollingUsesRecordedMode(t *testing.T) {
+	f := newAutoMergeFixture(t)
+	f.setStack(1, "main")
+	ctx := context.Background()
+	dir := t.TempDir()
+	write := func(name string, value any) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), jsonValue(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("pull", f.pull)
+	write("reviews", f.reviews)
+	write("checks", map[string]any{"check_runs": []any{}})
+	write("accepted", map[string]any{"status": "pending", "details": map[string]string{"uuid": testStackRequestID}})
+	write("result", map[string]any{"status": "merged", "details": map[string]string{"sha": strings.Repeat("d", 40)}})
+	t.Setenv("INK_TEST_SHARED_APP_DIR", dir)
+	command := filepath.Join(dir, "reader")
+	script := `#!/bin/sh
+set -eu
+dir=$INK_TEST_SHARED_APP_DIR
+test "$1" = "--profile"
+test "$3" = "-R" && test "$4" = "acme/project"
+test "$5" = "api" && test "$6" = "--include" && test "$7" = "--method"
+case "$2 $8 $9" in
+    'inspect GET /repos/acme/project/pulls/42') file=pull ;;
+    'inspect GET /repos/acme/project/pulls/42/reviews?'*) file=reviews ;;
+    'inspect GET /repos/acme/project/commits/'*'/check-runs?'*) file=checks ;;
+    'code PUT /repos/acme/project/pulls/42/merge-async')
+        cat > "$dir/submission"
+        printf 'HTTP/1.1 202 Accepted\r\n\r\n'
+        cat "$dir/accepted"
+        exit 0 ;;
+    'code GET /repos/acme/project/pulls/42/merge-async/630b9d5e-3f2a-4f7e-8b0c-2d5f9a8c1e42')
+        file=result ;;
+    *) exit 2 ;;
+esac
+printf 'HTTP/1.1 200 OK\r\n\r\n'
+cat "$dir/$file"
+`
+	if err := os.WriteFile(command, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.s.up.command = command
+	if err := f.s.autoMerge(ctx, f.repo, 42); err != nil {
+		t.Fatal(err)
+	}
+	run := notificationWork(t, f.s, f.repo, f.pull).AutoMerges[0]
+	if run.State != "waiting" || !strings.Contains(run.Reason, "dedicated") {
+		t.Fatalf("default used or failed to require dedicated identity: %+v", run)
+	}
+	optIn := `{"enabled":true,"reuse_reader_identity":true}`
+	configAPI(t, f.s, "POST", f.repo.Repo, "auto_merge", optIn, 200)
+	shared, _ := f.s.repo(f.repo.Repo)
+	if err := f.s.autoMerge(ctx, shared, 42); err != nil {
+		t.Fatal(err)
+	}
+	run = notificationWork(t, f.s, f.repo, f.pull).AutoMerges[0]
+	if run.State != "pending" || !run.ReuseReaderIdentity || run.RequestID != testStackRequestID {
+		t.Fatalf("shared identity did not reserve a pending request: %+v", run)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "submission"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var submission map[string]any
+	if err := json.Unmarshal(body, &submission); err != nil || submission["sha"] != f.pull.Head.SHA ||
+		submission["merge_action"] != stackMergeAction || submission["bypass_rules"] != nil {
+		t.Fatalf("unexpected submission: %s (%v)", body, err)
+	}
+
+	configAPI(t, f.s, "POST", f.repo.Repo, "auto_merge", `{"enabled":false}`, 200)
+	f.s.Close()
+	s, err := NewService(Config{GitHubCommand: command}, f.path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.s = s
+	disabled, _ := s.repo(f.repo.Repo)
+	if err := s.autoMerge(ctx, disabled, 42); err != nil {
+		t.Fatal(err)
+	}
+	run = notificationWork(t, s, f.repo, f.pull).AutoMerges[0]
+	if run.State != "merged" || run.MergeSHA != strings.Repeat("d", 40) || !run.ReuseReaderIdentity {
+		t.Fatalf("pending request lost its original mode after policy change and restart: %+v", run)
 	}
 }

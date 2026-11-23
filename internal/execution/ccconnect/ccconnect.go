@@ -22,6 +22,7 @@ type Executor struct {
 }
 
 var _ execution.Executor = (*Executor)(nil)
+var _ execution.ConversationAllocator = (*Executor)(nil)
 var _ execution.PreparationValidator = (*Executor)(nil)
 var _ execution.Notifier = (*Executor)(nil)
 
@@ -67,59 +68,34 @@ func (e *Executor) Prepare(ctx context.Context, route execution.Route, task exec
 	if route.Session != "" {
 		return route.Session, nil
 	}
-	if task.ReuseDevelopmentThread && route.Parent == "" {
-		if err := e.ValidatePreparation(route, task); err != nil {
-			return "", err
-		}
-		id, err := e.publicDevelopmentThread(ctx, *task.Source)
+	placement := task.ReviewPlacement
+	if placement == nil {
+		var err error
+		placement, err = e.resolveReviewPlacement(ctx, route, task)
 		if err != nil {
-			return "", fmt.Errorf("reuse development thread: %w", err)
-		}
-		return "discord:" + id, nil
-	}
-	parent := route.Parent
-	name := fmt.Sprintf("Review %s #%d", task.Repository, task.Number)
-	if source := task.Source; source != nil && source.Provider == Name {
-		sourceParent, sourceName, err := e.developmentConversation(ctx, source.Session)
-		if err != nil && parent == "" {
 			return "", err
 		}
-		if err == nil {
-			if parent == "" {
-				parent = sourceParent
-			}
-			// Keep the PR identifier even when a long Unicode title must be truncated.
-			prefix := fmt.Sprintf("Review %s #%d · ", task.Repository, task.Number)
-			if len([]rune(prefix)) > 90 {
-				prefix = fmt.Sprintf("Review #%d · ", task.Number)
-			}
-			title := []rune(sourceName)
-			name = prefix + string(title[:min(len(title), 100-len([]rune(prefix)))])
-		}
 	}
-	if !snowflake(parent) {
-		return "", fmt.Errorf("new review session needs a Discord development conversation or an explicit parent")
+	if placement.Session != "" {
+		return placement.Session, nil
 	}
-	if len([]rune(name)) > 100 {
-		name = string([]rune(name)[:100])
-	}
-	body := map[string]any{"name": name, "type": 11}
-	var thread struct {
-		ID string `json:"id"`
-	}
-	err := execution.PostJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+parent+"/threads", "Bot "+e.discordToken, body, &thread)
-	if err != nil {
-		return "", err
-	}
-	if !snowflake(thread.ID) {
-		return "", fmt.Errorf("Discord returned an invalid thread ID")
-	}
-	return "discord:" + thread.ID, nil
+	return e.CreateConversation(ctx, threadAllocation(*placement, task, ""))
 }
 
 // ValidatePreparation performs the local checks that can be reported immediately
 // by assignment, without a Discord request or allocating a session.
 func (e *Executor) ValidatePreparation(route execution.Route, task execution.Delivery) error {
+	if task.RequireSameChannel {
+		if e.discordToken == "" {
+			return fmt.Errorf("require_same_channel needs INK_DISCORD_TOKEN")
+		}
+		if task.Source == nil || task.Source.Provider != Name {
+			return fmt.Errorf("require_same_channel needs a Discord development conversation")
+		}
+		if _, err := discordChannel(task.Source.Session); err != nil {
+			return fmt.Errorf("invalid development conversation: %w", err)
+		}
+	}
 	if route.Session == "" && route.Parent == "" && task.ReuseDevelopmentThread {
 		if task.Source == nil || task.Source.Provider != Name {
 			return fmt.Errorf("thread reuse requires a Discord development source")
@@ -142,21 +118,107 @@ func (e *Executor) ValidatePreparation(route execution.Route, task execution.Del
 	return nil
 }
 
+// ResolveReviewPlacement performs Discord reads before reserving an execution
+// or sending a thread creation request.
+func (e *Executor) ResolveReviewPlacement(ctx context.Context, route execution.Route, task execution.Delivery) (*execution.ReviewPlacement, error) {
+	if err := e.ValidatePreparation(route, task); err != nil {
+		return nil, err
+	}
+	if route.Session == "" {
+		return e.resolveReviewPlacement(ctx, route, task)
+	}
+	expected, _, err := e.developmentConversation(ctx, task.Source.Session)
+	if err != nil {
+		return nil, err
+	}
+	actual, err := e.reviewSessionChannel(ctx, route.Session)
+	if err != nil {
+		return nil, err
+	}
+	if actual != expected {
+		return nil, fmt.Errorf("require_same_channel: expected development channel %s, got review channel %s", expected, actual)
+	}
+	return &execution.ReviewPlacement{Session: route.Session}, nil
+}
+
+func (e *Executor) resolveReviewPlacement(ctx context.Context, route execution.Route, task execution.Delivery) (*execution.ReviewPlacement, error) {
+	if task.ReuseDevelopmentThread && route.Parent == "" {
+		if err := e.ValidatePreparation(route, task); err != nil {
+			return nil, err
+		}
+		id, err := e.publicDevelopmentThread(ctx, *task.Source)
+		if err != nil {
+			return nil, fmt.Errorf("reuse development thread: %w", err)
+		}
+		return &execution.ReviewPlacement{Session: "discord:" + id}, nil
+	}
+	placement := &execution.ReviewPlacement{Parent: route.Parent}
+	if source := task.Source; source != nil && source.Provider == Name {
+		parent, name, err := e.developmentConversation(ctx, source.Session)
+		if err != nil {
+			if task.RequireSameChannel || route.Parent == "" {
+				return nil, err
+			}
+			return placement, nil
+		}
+		if task.RequireSameChannel && route.Parent != "" && route.Parent != parent {
+			return nil, fmt.Errorf("require_same_channel: expected development channel %s, got review channel %s", parent, route.Parent)
+		}
+		if placement.Parent == "" {
+			placement.Parent = parent
+		}
+		placement.DevelopmentName = name
+	}
+	return placement, nil
+}
+
+func (e *Executor) reviewSessionChannel(ctx context.Context, session string) (string, error) {
+	id, err := discordChannel(session)
+	if err != nil {
+		return "", err
+	}
+	channel, err := e.readDiscordChannel(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("read review conversation: %w", err)
+	}
+	switch channel.Type {
+	case 0:
+		return id, nil
+	case 10, 11, 12:
+		if snowflake(channel.Parent) {
+			return channel.Parent, nil
+		}
+	}
+	return "", fmt.Errorf("review conversation has no valid text-channel destination")
+}
+
+type discordConversation struct {
+	Guild  string `json:"guild_id"`
+	ID     string `json:"id"`
+	Type   int    `json:"type"`
+	Parent string `json:"parent_id"`
+	Name   string `json:"name"`
+}
+
+func (e *Executor) readDiscordChannel(ctx context.Context, id string) (discordConversation, error) {
+	var channel discordConversation
+	err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+id, "Bot "+e.discordToken, &channel)
+	if err == nil && channel.ID != id {
+		err = fmt.Errorf("Discord returned an invalid conversation")
+	}
+	return channel, err
+}
+
 func (e *Executor) developmentConversation(ctx context.Context, session string) (string, string, error) {
 	channelID, err := discordChannel(session)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid development conversation: %w", err)
 	}
-	var channel struct {
-		ID     string `json:"id"`
-		Type   int    `json:"type"`
-		Parent string `json:"parent_id"`
-		Name   string `json:"name"`
+	channel, err := e.readDiscordChannel(ctx, channelID)
+	if err != nil {
+		return "", "", fmt.Errorf("read development conversation %s: %w", channelID, err)
 	}
-	if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+channelID, "Bot "+e.discordToken, &channel); err != nil {
-		return "", "", fmt.Errorf("read development conversation: %w", err)
-	}
-	if channel.ID != channelID || strings.TrimSpace(channel.Name) == "" {
+	if strings.TrimSpace(channel.Name) == "" {
 		return "", "", fmt.Errorf("Discord returned an invalid development conversation")
 	}
 	parent := channel.ID
@@ -175,14 +237,11 @@ func (e *Executor) developmentConversation(ctx context.Context, session string) 
 		return "", "", fmt.Errorf("development conversation has no valid parent channel")
 	}
 	if channel.Type == 11 {
-		var parentChannel struct {
-			ID   string `json:"id"`
-			Type int    `json:"type"`
+		parentChannel, err := e.readDiscordChannel(ctx, parent)
+		if err != nil {
+			return "", "", fmt.Errorf("read development parent channel %s: %w", parent, err)
 		}
-		if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+parent, "Bot "+e.discordToken, &parentChannel); err != nil {
-			return "", "", fmt.Errorf("read development parent channel: %w", err)
-		}
-		if parentChannel.ID != parent || parentChannel.Type != 0 {
+		if parentChannel.Type != 0 {
 			return "", "", fmt.Errorf("automatic review placement requires a text-channel parent; forum, media and announcement parents are unsupported")
 		}
 	}
@@ -269,6 +328,20 @@ func discordChannel(session string) (string, error) {
 	return channel, nil
 }
 
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+// taskClaimCommand carries the assigned route explicitly so ACP runtimes that
+// do not inject CC_PROJECT/CC_SESSION_KEY can still claim their task.
+func taskClaimCommand(taskID string, route execution.Route) string {
+	command := "ink task claim --task " + taskID
+	if route.Provider != "" && route.Target != "" && route.Session != "" {
+		command += " --provider " + shellQuote(route.Provider) + " --target " + shellQuote(route.Target) + " --session " + shellQuote(route.Session)
+	}
+	return command
+}
+
 func (e *Executor) WakeTask(ctx context.Context, route execution.Route, task execution.Delivery) error {
 	if err := e.ValidateDelivery(); err != nil {
 		return err
@@ -282,7 +355,7 @@ func (e *Executor) WakeTask(ctx context.Context, route execution.Route, task exe
 		header = fmt.Sprintf("Ink Commons: GitHub reports a merge conflict after approval.\nPR: %s\nTarget branch: %s\n", task.URL, task.ConflictBaseRef)
 		developerInstructions = "Developer: Read conflict_base_ref and conflict_base_sha from the claimed delivery. Verify that both PR refs still match the delivered SHAs and try merging the two commits locally. If there is an actual conflict, resolve it on the PR branch, run the relevant checks, and push a new head for review. If the refs changed or the local merge succeeds, submit a blocked handoff describing what you observed."
 	}
-	prompt := header + fmt.Sprintf("First run: ink task claim --task %s\nUse the installed Ink Commons executable if ink is not on PATH. The command binds to CC_PROJECT and CC_SESSION_KEY. Do not edit, run checks, submit reviews or push before a successful claim with first=true. On first=false or conflict, do not execute again; report the status if needed. Read the returned delivery for the exact SHA, role, GitHub identity/command, review URL and context cutoff. Reviewer: inspect that exact SHA, verify the configured identity, and submit a formal APPROVED or CHANGES_REQUESTED review. %s Read enabled history with ink context before reviewing. After all task tools and writes have finished, explicitly hand off using ink task submit --task %s --handoff --request-id <stable-id> with --new-sha <pushed-sha> for a developer, or --review-id <id> --outcome APPROVED|CHANGES_REQUESTED for a reviewer. If blocked, submit --outcome blocked --reason <reason> --handoff. After handoff, perform no more work for this task. Check ink task status --task %s; if verification is pending, Ink retries it. Then report the result and end this turn. Do not sleep, poll in a loop, start background waiters, or immediately claim successor tasks to wait for review or CI. Retry a lost submit response with the same request ID and evidence; never repeat code work solely because the PR still says changes_requested.\n", task.TaskID, developerInstructions, task.TaskID, task.TaskID)
+	prompt := header + fmt.Sprintf("First run: %s\nUse the installed Ink Commons executable if ink is not on PATH. The command carries the assigned route flags and does not depend on CC_PROJECT/CC_SESSION_KEY. If the installed CLI is older and rejects these flags, set CC_PROJECT and CC_SESSION_KEY from the same route before running the claim. Do not edit, run checks, submit reviews or push before a successful claim with first=true. On first=false or conflict, do not execute again; report the status if needed. Read the returned delivery for the exact SHA, role, GitHub identity/command, review URL and context cutoff. Reviewer: inspect that exact SHA, verify the configured identity, and submit a formal APPROVED or CHANGES_REQUESTED review. %s Read enabled history with ink context before reviewing. After all task tools and writes have finished, explicitly hand off using ink task submit --task %s --handoff --request-id <stable-id> with --new-sha <pushed-sha> for a developer, or --review-id <id> --outcome APPROVED|CHANGES_REQUESTED for a reviewer. If blocked, submit --outcome blocked --reason <reason> --handoff. After handoff, perform no more work for this task. Check ink task status --task %s; if verification is pending, Ink retries it. Then report the result and end this turn. Do not sleep, poll in a loop, start background waiters, or immediately claim successor tasks to wait for review or CI. Retry a lost submit response with the same request ID and evidence; never repeat code work solely because the PR still says changes_requested.\n", taskClaimCommand(task.TaskID, route), developerInstructions, task.TaskID, task.TaskID)
 	return e.sendPrompt(ctx, route, "ink-commons:task-wake", prompt)
 }
 

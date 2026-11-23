@@ -24,6 +24,18 @@ ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PRO
 
 任务 UUID 是该次领取的 generation。主动 blocked 后显式 retry 生成新 UUID；旧 credential 不能完成新任务。此模式不创建执行 `runs`，也不把业务交接伪装成 executor 的 `succeeded/stopped` 回执。
 
+### Discord 审查线程分配
+
+同砚在发送建帖请求前保存分配时间、目标频道与带任务标识的线程标题。查询开发会话遇到暂时的网络错误会退避重试。建帖结果不明时，同砚会查询同一频道的活跃和已归档公开线程，按标题、父频道及创建 bot 匹配。归档查询扫到分配时间前五分钟时结束，给时钟偏差留出余量。唯一匹配时保存该线程并继续唤醒。查询需要 bot 能读取目标频道及其公开归档线程。
+
+可通过工作项状态或 `ink task status --task TASK_UUID` 检查以下进度：
+
+- `task.handoff.wake.preparation = prepared` 表示已保存目标会话。
+- `task.handoff.wake.accepted_at` 表示 cc-connect 最近一次受理唤醒的时间。
+- `task.handoff.claimed_at` 表示 reviewer 已领取任务。
+
+初次请求错误保存在 `task.handoff.wake.allocation_error`，最近的失败显示在 `task.handoff.wake.error`。连续六次查询仍无法确认唯一线程、Discord 明确拒绝创建，或旧任务缺少分配记录时，先核实 Discord 端的线程，再用 `ink review --session discord:THREAD_ID` 指定已核实的会话。结果不明期间，同砚只查询已有线程。
+
 ## Agent 初始化与回合边界
 
 在 Agent 所属用户下执行 `ink init` 和 `ink init --check`，安装完整协作 skill；具体位置、自定义目录及冲突处理见 [初始化说明](../README.md#初始化-agent-协作指令)。升级 CLI 后重新初始化。安装和链接不会刷新活跃会话，首次送审应明确要求 Agent 读取 `ink-commons-workflow`。
@@ -38,7 +50,9 @@ ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PRO
 ink task claim --task TASK_UUID
 ```
 
-cc-connect 使用进程环境中的 `CC_PROJECT` / `CC_SESSION_KEY`，通用路由可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
+wake 会给出带路由的完整命令，例如 `--provider cc-connect --target PROJECT --session discord:THREAD`。ACP 等未注入 `CC_PROJECT` / `CC_SESSION_KEY` 的运行时直接使用这些参数；显式路由必须三项齐全，claim 成功后保存到私有 credential，后续 submit 无需重复。旧格式 wake 或兼容环境仍可使用进程环境中的 `CC_PROJECT` / `CC_SESSION_KEY`，通用路由可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
+
+如果旧版 CLI 在一次已确认的 HTTP 403 后留下了 credential（旧文件没有 `rejected` 或 `attempt_id`），不要删除文件。用同一个 `--task` 和同一个 `--claim-file` 重新 claim，并加 `--replace-route --provider ... --target ... --session ...`；CLI 保留原 token、替换路由，后续 submit 继续使用这个文件。只在确认收到 403 后使用；网络结果不明时保留原 credential 并原样重试，不能删除或重建。
 
 CLI 在发送请求前，先生成私有随机 credential，保存到状态目录 `claims/TASK_UUID.json`（文件 `0600`，目录 `0700`）；daemon 只保存其哈希。可用 `--claim-file /private/path/credential.json` 指定另一个私有文件。不要把这些文件提交到 Git、打印或放入唤醒消息；更换状态目录时应保留仍有未决任务的 credential。
 

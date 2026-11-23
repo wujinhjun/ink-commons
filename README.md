@@ -143,7 +143,12 @@ ink notification status --event '通知中的事件 ID'
 "auto_merge": {"enabled": true, "method": "merge"}
 ```
 
-`method` 可选 `merge`（默认）、`squash` 或 `rebase`。也可用 `ink config set auto_merge '{"enabled":true,"method":"squash"}' --global` 设置动态继承的全局默认值，或通过 `ink register --auto-merge-after-approval --merge-method squash owner/repository` 注册。显式 `"auto_merge": {"enabled": false}` 或注册参数 `--auto-merge-after-approval=false` 覆盖注册默认值；缺省动态继承，迁移来的旧覆盖项需 unset 后才恢复继承。
+`method` 可选 `merge`（默认）、`squash` 或 `rebase`。在具体仓库开启时，可以显式设置 `reuse_reader_identity: true`，让同砚复用读取 GitHub 的 App 执行合入。省略或设为 `false` 时使用专用合入 App。全局配置不会为仓库开启自动合入。
+
+```sh
+ink config set auto_merge '{"enabled":true,"method":"merge","reuse_reader_identity":true}' --repo owner/repository
+ink register --auto-merge-after-approval --reuse-reader-identity owner/repository
+```
 
 开启后，同砚仅处理已关联、打开、非 Draft 且由指定 reviewer 正式批准当前 head SHA 的 PR。每次尝试前重新读取 PR、review 和检查结果；需要 GitHub 报告 `mergeable: true`、`mergeable_state: clean`，并要求 head 和可用的 test-merge SHA 上当前已发现的 check runs 全部结束且为 success、neutral 或 skipped。检查未完成、失败、无权限读取、合并冲突或状态未知时保留 `waiting` 和原因，后续轮询重新检查。cooperative 模式下，指定 reviewer 已完成批准交接后，同一 base 和 head 间隔至少 30 秒仍被 GitHub 报告为冲突时，同砚给开发会话派一个可领取的核查任务。开发者本地试合，处理实际冲突并推送后由同砚重新送审。若本地试合成功，用 blocked handoff 记录 GitHub 与本地结果的差异。**需要保证等待特定 CI 时，应在 GitHub 分支规则中将其设为必需检查**；当前尚未出现的非必需检查不能由同砚保证等待。
 
@@ -151,7 +156,7 @@ ink notification status --event '通知中的事件 ID'
 
 GitHub 原生 Stack PR 使用异步合入。只有当前目标分支已经是 stack 目标分支的栈底 PR 才能发起请求。GitHub 将下一条推进到栈底后，同砚会按它当时的 head SHA 重新核验批准与检查。合入请求 ID 持久化在 `auto_merges` 的 `request_id` 中，服务重启后继续查询。GitHub 确认合入后才发合入通知。遇到没有可核验请求 ID 的历史 `unknown` 记录，仍按下述对账规则处理。
 
-读取使用配置的 GitHub App `inspect` profile；实际 merge 请求和异步合入结果查询使用同一 CLI 的 `code` profile，并以 JSON stdin 传入 SHA 和方法。App 需要相应仓库的 contents 写权限、PR/checks 读取权限，且 broker 允许 code profile；使用 `INK_GITHUB_TOKEN` 部署时同样需要相应权限。不会回退个人 gh 凭据，不自动扩大 App 权限。
+读取使用配置的 GitHub App 的 `inspect` profile。实际 merge 请求和异步结果查询，使用所选合入 App 命令的 `code` profile。App 需要相应仓库的 contents 写权限，且 broker 必须允许对应的 profile。仓库选定的身份模式随合入请求记录保存，配置变更后仍用原模式查询已发出的异步请求。
 
 工作项 API 的 `auto_merges` 保存 SHA、reviewer、review ID、方式、状态、merge SHA、更新时间及原因。merge 发出前持久化 `unknown` 预留；同一 PR 的并发轮询和重启不会重复发请求。响应丢失、中断或结果无法判定时保留 unknown 并产生诊断，不自动重放。GitHub 对 Stack 合入返回明确的 HTTP 400 拒绝时，后续轮询会从预检开始；**任何历史 SHA 仍有 unknown 时，都继续告警并阻止该 PR 的新 head 自动合入**，避免后续 push 掩盖未决结果。仍然打开且结果不明的 PR 需人工核查和处理，当前没有自动重放/重置接口。
 
@@ -191,9 +196,9 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
 
 `target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。单条 PR 指派中的显式 `parent` 可以覆盖创建位置；仓库及 `repository_defaults` 路由中的 `parent` 不再用于新建 cc-connect 审查会话，遗留配置无需清理即可默认跟随开发频道。已有工作项保存的路由和审查会话保持原位；需要迁移时，应先确认旧执行结束，再按 PR 重新指派。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
 
-### 开发 thread 复用与原始交流上下文（可选）
+### 审查频道、开发 thread 复用与原始交流上下文（可选）
 
-在仓库配置中设置 `review`，两个开关默认均关闭，可以分别启用：
+在仓库配置中设置 `review`，这些开关默认均关闭，可以分别启用：
 
 ```json
 {
@@ -201,6 +206,7 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
   "reviewer_login": "your-reviewer[bot]",
   "reviewer_route": {"provider": "cc-connect", "target": "reviewer-project"},
   "review": {
+    "require_same_channel": true,
     "reuse_development_thread": true,
     "context": {"thread_history": true}
   }
@@ -208,6 +214,8 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
 ```
 
 `reuse_development_thread` 让**尚未分配会话**的 reviewer 复用开发 thread 的 Discord ID，同时保留 reviewer 的 project 和 GitHub 身份；自动复用要求 reviewer project 与 developer project 不同，避免共享同一个 Agent 上下文。已有 reviewer 会话保持原位。`ink review --session` 仍选择指定的已有会话；单条 PR 的显式 `--parent` 仍创建独立审查 thread。关闭此开关时保留原来的独立 thread 行为。
+
+`require_same_channel` 要求自动派审与开发会话位于同一个 Discord 文本频道。同砚在预留执行或创建会话前读取开发来源，并校验显式传入的 `--parent` 或 `--session`。目标跨频道或频道无法验证时，任务保留为待派发，诊断会显示错误。同一频道内可以新建或指定 Review thread，也可以搭配 `reuse_development_thread` 复用开发 thread。此开关需要已关联的开发会话和能够读取相关频道的 `INK_DISCORD_TOKEN`。
 
 `context.thread_history` 允许读取工作项绑定的开发 thread 中的原始用户和 bot 消息，不依赖 developer 的总结，也不共享其他 Agent 的内部思考或会话文件。派审 prompt 会要求 reviewer 先运行：
 
@@ -219,9 +227,11 @@ ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
 
 消息保留作者、时间、正文、编辑时间、常见 embed 文本及附件名称/URL；不会自动下载或理解图片、附件和外部链接。时间边界限制**消息创建时间**，不是不可变聊天快照：历史编辑与删除仍反映 Discord 当前状态，已删除消息无法恢复。API 可能因缺少 `READ_MESSAGE_HISTORY` 返回空列表，或因 `MESSAGE_CONTENT` 未配置而返回空正文；响应的 `warnings` 会提示这些歧义。即使消息有附件/embed，空正文也会提示可能是纯附件、系统消息或正文被隐藏；保留已取得的其他内容，reviewer 不应据此宣称已经读取全部背景。
 
-启用任一 review 开关后，可本地判断的来源、目标和会话准备配置会在创建执行轮次/会话之前统一校验。包括仅开启复用且无来源/项目冲突，以及开启历史读取且无来源（即使显式指定 session/parent）的情况；校验失败保留 pending、attempts 为 0，并记录 `review_preparation_invalid` 诊断。补齐配置后可进行首次真实投递，不会仅因本地准备配置错误而制造需要人工停止确认的 unknown 执行。显式 session/parent 在只开启复用时仍允许不依赖开发来源；历史读取则始终需要来源。
+启用 review 开关后，可本地判断的来源、目标和会话准备配置会在创建执行轮次/会话之前统一校验。包括仅开启复用且无来源/项目冲突，以及开启历史读取且无来源（即使显式指定 session/parent）的情况；校验失败保留 pending、attempts 为 0，并记录 `review_preparation_invalid` 诊断。补齐配置后可进行首次真实投递，不会仅因本地准备配置错误而制造需要人工停止确认的 unknown 执行。显式 session/parent 在只开启复用时仍允许不依赖开发来源；历史读取则始终需要来源。
 
 首版只支持普通文本频道下的公开开发 thread；普通频道、私有 thread、公告及论坛来源均拒绝读取/自动复用。读取使用 daemon 的 `INK_DISCORD_TOKEN` 身份，需要 `VIEW_CHANNEL`、`READ_MESSAGE_HISTORY` 和适用的 `MESSAGE_CONTENT` 配置；reviewer 的 Discord bot 还需能够访问、发言于目标 thread。开关不会修改 Discord 权限。reviewer 必须与同砚在同机、能使用新版 `ink` CLI 和该用户的私有 socket；这不是远端/跨用户的历史读取接口，也不是额外的 per-bot 认证机制。
+
+只开启同频道约束可用 `ink config set review '{"require_same_channel":true}' --repo owner/repository`，或在注册时传 `--require-same-channel`。配置命令会替换整个 `review` 对象，如已启用其他开关，请一起传入。
 
 可用 `ink config set review '{"reuse_development_thread":true,"context":{"thread_history":true}}' --global` 设置中心默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。缺省动态继承，迁移来的旧覆盖项保持原值；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取同时受任务快照和当前仓库开关约束：实时关闭可以撤销权限，之后开启或改派开发者不能扩大已派发任务的权限或改变其来源 thread。功能开关仅适用于 cc-connect，人工 reviewer 不会收到 bot 任务。
 
@@ -312,6 +322,8 @@ cc-connect 当前 webhook 不支持执行级状态查询、停止或持久化去
 
 ## 状态、备份与回滚
 
+换机器、服务用户或部署仓库时，参见 [迁移部署](docs/migration.md)。
+
 daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 4（兼容迁移 version 1 / 2 / 3，并新增中心配置表）。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
 
 状态读写与执行账本的日常查询由 sqlc 生成类型化 Go 方法。状态保存仍使用完整快照接口，在同一事务中比较已有记录，仅插入新增记录、更新 payload 有变化的记录，并按主键删除已移除记录；未变化的记录不写入。push 保留原有 position 顺序，删除或重排会更新受影响的位置。读取和比较仍为全量，仍依赖进程内串行修改与 daemon 文件锁，不提供多 writer 并发合并。任务、交接和配置快照保存在 JSON payload 内；version 4 的 runtime_config 表通过专用查询更新，不参与工作流快照保存。
@@ -343,4 +355,27 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
 
 ## macOS 服务与版本部署
 
-安装、更新和从登录启动迁移到开机启动，见 [macOS 部署与恢复](deploy/macos/README.md)。Apple Silicon Mac 可直接从 GitHub Release 安装，已部署的系统服务可用 `ink upgrade` 更新。通过 `/healthz` 返回的 `revision` 核对实际运行版本，使用 App CLI 按仓库刷新短期凭据。系统迁移同时处理 cc-connect 登录依赖，不需要 cc-connect 新协议。FileVault 冷启动仍需先解锁磁盘。
+Apple Silicon Mac 可从 GitHub Release 安装系统级 LaunchDaemon，同砚以普通用户身份运行。已安装的系统版可用 `ink upgrade` 暂存新版，再用 `ink upgrade --apply` 切换。从旧版升级时，从校验过的新版发布包运行 `manage.py upgrade --apply`，沿用已有部署配置。通过 `/healthz` 的 `revision` 核对实际运行版本。见 [macOS 部署与恢复](deploy/macos/README.md)。
+
+### 自动合入身份
+
+专用合入模式下，静态启动配置中的 `github_merger_command` 指向独立 App 的绝对 CLI 路径，`github_merger_command_sha256` 为批准的 SHA-256。复用模式使用 `github_command`，仍须配置不同的 reviewer App。可以用 `github_command_sha256` 固定 reader CLI 的摘要。启用仓库自动合入时会校验所选 App 命令的配置，GitHub 在实际合入时检查仓库授权和分支规则。已有配置缺少所需命令时，审核状态仍保留，并报告等待原因。
+
+### Git 工作树盘点
+
+`ink workspace list --repo /path/to/clone --json` 按本地 clone 列出 Git 登记的工作树及其分支、HEAD、改动和失效状态。省略 `--repo` 时使用当前目录。独立 clone 即使指向同一个远程仓库，也各自维护自己的工作树登记。
+
+### Full / Lite 工作区
+
+`ink workspace acquire` 从指定的本地 clone 或 worktree 申请隔离目录，PR 创建前也可使用。请先在源 clone 准备需要的本地 ref。默认优先使用 Full，全部占用时分配 Lite。使用 `--kind full` 可明确要求 Full，使用 `--kind lite` 可直接申请 Lite。Full 槽位首次申请时才创建，每个独立 clone 默认最多两个，可在 daemon 配置中通过 `workspace_full_slots` 调整。 若复用 Full 时已有缓存阻止 checkout，且工作树仍处于归还时的状态，自动分配会尝试其他 Full 或 Lite。
+
+```sh
+ink workspace acquire --repo ~/src/project --ref origin/main --branch feature/new --request-id my-new-work --json
+ink workspace list --repo ~/src/project --json
+ink workspace release --id ALLOCATION_ID --json
+ink workspace remove --id RELEASED_LITE_ID --json
+```
+
+返回值含本次分配的 ID、实际类型、工作目录、初始 HEAD 和状态。用同一 `--request-id` 重试，不会重复分配。省略 `--branch` 时检出 detached HEAD，适合固定 SHA 的审查。Agent 会话中的请求会记录会话路由，已领取的同砚任务还可传入 `--task TASK_ID`，并以该任务的 SHA 申请。
+
+完成工作并离开目录后显式归还。归还要求目录没有未提交或未跟踪文件，且 HEAD 能在线验证已保存在 `origin` 上。Full 归还后保留实际目录和被忽略的缓存，供后续任务复用。Lite 归还后可显式删除。删除前重新核验，目录中有未提交、未跟踪或忽略文件时拒绝删除。分支由 Git 独立管理。现有手工 worktree 出现在盘点里，不受分配或删除命令管理。

@@ -154,3 +154,94 @@ func TestMergeConflictConfirmationRestartsAfterFailedPRRead(t *testing.T) {
 		t.Fatal("first dirty response after recovery should restart confirmation")
 	}
 }
+
+func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T) {
+	for _, scenario := range []string{"both REST snapshots stale", "detail already current", "base advances again and becomes clean"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := approvedConflictFixture(t)
+			task := confirmConflict(t, f)
+			f.claim(t, task, claimB, 200)
+			f.submit(t, task, claimB, HandoffSubmission{RequestID: "old-base", Handoff: true,
+				Outcome: "blocked", Reason: "main advanced"}, 200)
+
+			f.conflictBaseSHA = strings.Repeat("d", 40)
+			if scenario != "both REST snapshots stale" {
+				f.conflictDetailBaseSHA = f.conflictBaseSHA
+			}
+			f.conflictLookupUnavailable = true
+			preflightConflict(t, f)
+			if w := f.work(t); w.Task == nil || w.Task.ID != task.ID || w.Task.Handoff.State != "blocked" {
+				t.Fatal("unverified live base must not replace the blocked task")
+			}
+			f.conflictLookupUnavailable = false
+			preflightConflict(t, f)
+			// Repeat the stale REST list observation and restart before confirmation.
+			f.observe(t)
+			f.restart(t)
+			st, err := f.s.store.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := st.Work[key(f.repo.Repo, f.pull.Number)]
+			if w.Task != nil || w.MergeConflict == nil || w.MergeConflict.Base.SHA != f.conflictBaseSHA ||
+				w.MergeConflict.ReportedBase == nil || *w.MergeConflict.ReportedBase != f.pull.Base {
+				t.Fatal("new live base should restart conflict confirmation")
+			}
+			w.MergeConflict.Since = time.Now().Add(-mergeConflictConfirmation)
+			if err := f.s.store.save(st); err != nil {
+				t.Fatal(err)
+			}
+			f.conflictLookupUnavailable = true
+			preflightConflict(t, f)
+			if f.work(t).MergeConflict != nil {
+				t.Fatal("failed GraphQL confirmation retained the expired timer")
+			}
+			f.conflictLookupUnavailable = false
+			preflightConflict(t, f)
+			st, err = f.s.store.load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			w = st.Work[key(f.repo.Repo, f.pull.Number)]
+			if w.Task != nil || w.MergeConflict == nil {
+				t.Fatal("first confirmation after recovery must start a new window")
+			}
+			w.MergeConflict.Since = time.Now().Add(-mergeConflictConfirmation)
+			if err := f.s.store.save(st); err != nil {
+				t.Fatal(err)
+			}
+			preflightConflict(t, f)
+			f.observe(t)
+			next := f.work(t).Task
+			if next == nil || next.ID == task.ID || next.ConflictBase == nil || next.ConflictBase.SHA != f.conflictBaseSHA {
+				t.Fatalf("new conflict task does not use the live base: %+v", next)
+			}
+			delivery := f.claim(t, next, claimA, 200)["delivery"].(map[string]any)
+			if delivery["conflict_base_sha"] != f.conflictBaseSHA {
+				t.Fatalf("wrong delivered conflict base: %v", delivery["conflict_base_sha"])
+			}
+			f.submit(t, next, claimA, HandoffSubmission{RequestID: "known-base", Handoff: true,
+				Outcome: "blocked", Reason: "waiting for a clean base"}, 200)
+			mergeable := true
+			f.pull.Mergeable, f.pull.MergeableState = &mergeable, "unstable"
+			f.conflictDetailBaseSHA = f.pull.Base.SHA
+			preflightConflict(t, f)
+			if w := f.work(t); w.Task == nil || w.Task.ID != next.ID {
+				t.Fatal("a clean result for the stale base retired a task on the live base")
+			}
+			f.conflictRefMergeable = true
+			if scenario == "base advances again and becomes clean" {
+				f.conflictBaseSHA = strings.Repeat("e", 40)
+				preflightConflict(t, f)
+				if w := f.work(t); w.Task == nil || w.Task.ID != next.ID {
+					t.Fatal("a clean live ref cannot validate a REST result for a different SHA")
+				}
+			}
+			f.conflictDetailBaseSHA = f.conflictBaseSHA
+			preflightConflict(t, f)
+			if w := f.work(t); w.Task != nil || w.MergeConflict != nil || w.handoffMergeBlocked() {
+				t.Fatal("a clean result for the confirmed base did not clear the blocked task")
+			}
+		})
+	}
+}

@@ -2,16 +2,35 @@ package ink
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
 	"time"
 
 	"ink-commons/internal/execution"
 )
 
+const maxAllocationRecoveryAttempts = 6
+
+func (w TaskWake) canRecover() bool {
+	return w.Allocation != nil && !w.RecoveryStopped && w.RecoveryAttempts < maxAllocationRecoveryAttempts
+}
+
+func retryablePlacementRead(err error) bool {
+	var status execution.HTTPStatusError
+	if errors.As(err, &status) {
+		return status == http.StatusTooManyRequests || status >= 500
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 // Each pending task is its own durable outbox entry. Wake retries never create
 // executor attempts: only claim grants permission to do work.
-func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number int) (bool, error) {
-	id := key(repo.Repo, number)
+func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck reviewChannelCheck) (bool, error) {
 	s.mu.Lock()
 	st, err := s.store.load()
 	if err != nil {
@@ -31,7 +50,9 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 	}
 	t := w.Task
 	h := t.Handoff
-	if h.State != "pending" || w.executionBlocked() || s.delivering[id] || time.Now().Before(h.Wake.RetryAt) || h.Wake.Preparation == "preparing" {
+	recovering := h.Wake.Preparation == "preparing"
+	if h.State != "pending" || w.executionBlocked() || s.delivering[id] || time.Now().Before(h.Wake.RetryAt) ||
+		(recovering && !h.Wake.canRecover()) {
 		s.mu.Unlock()
 		return true, nil
 	}
@@ -56,6 +77,30 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 		s.mu.Unlock()
 		return true, saveErr
 	}
+	allocator, allocates := executor.(execution.ConversationAllocator)
+	if recovering && !allocates {
+		s.mu.Unlock()
+		return true, nil
+	}
+	if !recovering {
+		if current, err := channelCheck.result(s, w); !current || err != nil {
+			if err != nil {
+				message := "review preparation: " + err.Error()
+				if h.Wake.Error != message {
+					log.Printf("workflow %s task %s: %s", id, t.ID, message)
+				}
+				h.Wake.Error = message
+				if retryablePlacementRead(err) {
+					h.Wake.PreparationAttempts++
+					h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.PreparationAttempts))
+				}
+				w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+				err = s.store.save(st)
+			}
+			s.mu.Unlock()
+			return true, err
+		}
+	}
 	if err := execution.ValidateDestination(s.providers, *route, route.Session == ""); err != nil {
 		s.mu.Unlock()
 		return true, err
@@ -77,12 +122,25 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 			s.mu.Unlock()
 			return true, err
 		}
-		// Never repeat ambiguous external conversation creation after restart.
+		// Persist the exact destination before sending a creation request.
+		if allocates && !recovering && channelCheck.placement != nil && channelCheck.placement.Session == "" {
+			allocation := allocator.PlanConversation(*channelCheck.placement, d)
+			reservedAt := time.Now().UTC()
+			allocation.ReservedAt = &reservedAt
+			h.Wake.Allocation = &allocation
+		}
 		h.Wake.Preparation = "preparing"
+	} else {
+		h.Wake.Preparation = "prepared"
 	}
-	// Bound wake retries, including transport failures and process interruptions.
-	h.Wake.Attempts++
-	h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.Attempts))
+	if recovering {
+		h.Wake.RecoveryAttempts++
+		h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.RecoveryAttempts))
+	} else {
+		// Reserve the wake before sending so interrupted dispatches retain their delay.
+		h.Wake.Attempts++
+		h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.Attempts))
+	}
 	if err = s.store.save(st); err != nil {
 		s.mu.Unlock()
 		return true, err
@@ -91,8 +149,17 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.delivering, id); s.mu.Unlock() }()
 	if prepared.Session == "" {
-		session, prepareErr := executor.Prepare(ctx, prepared, d)
-		prepared.Session = session
+		preparation := d
+		preparation.ReviewPlacement = channelCheck.placement
+		var prepareErr error
+		switch {
+		case recovering:
+			prepared.Session, prepareErr = allocator.FindConversation(ctx, *h.Wake.Allocation)
+		case h.Wake.Allocation != nil:
+			prepared.Session, prepareErr = allocator.CreateConversation(ctx, *h.Wake.Allocation)
+		default:
+			prepared.Session, prepareErr = executor.Prepare(ctx, prepared, preparation)
+		}
 		if prepareErr == nil {
 			prepareErr = execution.ValidateDestination(s.providers, prepared, false)
 		}
@@ -109,7 +176,8 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 		}
 		lh := lt.Handoff
 		if prepareErr != nil {
-			lh.Wake.Error = "conversation allocation unresolved; inspect before retrying"
+			lh.Wake.recordPreparationError(prepareErr, recovering)
+			log.Printf("workflow %s task %s: %s", id, t.ID, lh.Wake.Error)
 		} else {
 			lh.Wake.Preparation = "prepared"
 			lh.Assignee.Route = &prepared
@@ -151,10 +219,40 @@ func (s *Service) dispatchHandoff(ctx context.Context, repo Repository, number i
 		latest.Handoff.Wake.Error = ""
 		if sendErr != nil {
 			latest.Handoff.Wake.Error = fmt.Sprintf("wake not confirmed; will retry: %v", sendErr)
+		} else {
+			now := time.Now()
+			latest.Handoff.Wake.AcceptedAt = &now
 		}
 		current.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
 	}
 	return true, s.store.save(live)
+}
+
+func (w *TaskWake) recordPreparationError(err error, recovering bool) {
+	if recovering {
+		w.Error = fmt.Sprintf("reconcile Discord thread: %v", err)
+		if w.AllocationError != "" {
+			w.Error = w.AllocationError + "; " + w.Error
+		}
+		return
+	}
+	w.Error = "conversation preparation: " + err.Error()
+	w.AllocationError = w.Error
+	if w.Allocation == nil {
+		return
+	}
+	var status execution.HTTPStatusError
+	if !errors.As(err, &status) {
+		return
+	}
+	switch status {
+	case http.StatusTooManyRequests:
+		// Discord definitively rejected the request. It is safe to create later.
+		w.Allocation = nil
+		w.Preparation = ""
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed:
+		w.RecoveryStopped = true
+	}
 }
 
 // 未领取的任务先保持三次短间隔，再线性退避，避免忙会话持续刷屏。
