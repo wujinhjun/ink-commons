@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,12 @@ func GetJSON(ctx context.Context, client *http.Client, endpoint, auth string, re
 	return requestJSON(ctx, client, http.MethodGet, endpoint, auth, nil, result)
 }
 
+type HTTPStatusError int
+
+func (e HTTPStatusError) Error() string {
+	return fmt.Sprintf("upstream HTTP %d", int(e))
+}
+
 func requestJSON(ctx context.Context, client *http.Client, method, endpoint, auth string, body io.Reader, result any) error {
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
@@ -48,14 +55,18 @@ func requestJSON(ctx context.Context, client *http.Client, method, endpoint, aut
 	req.Header.Set("Accept", "application/json")
 	res, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("upstream transport failure")
+		var requestErr *url.Error
+		if errors.As(err, &requestErr) {
+			err = requestErr.Err
+		}
+		return fmt.Errorf("upstream transport failure: %w", err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("upstream HTTP %d", res.StatusCode)
+		return HTTPStatusError(res.StatusCode)
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 32<<20)).Decode(result); err != nil {
-		return fmt.Errorf("invalid upstream response")
+		return fmt.Errorf("invalid upstream response: %w", err)
 	}
 	return nil
 }

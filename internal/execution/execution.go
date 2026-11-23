@@ -46,8 +46,31 @@ func (r *Route) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ReviewPlacement records the Discord destination resolved before execution starts.
+type ReviewPlacement struct {
+	Parent          string
+	DevelopmentName string
+	Session         string
+}
+
+// ConversationAllocation identifies a thread across ambiguous creation results.
+type ConversationAllocation struct {
+	Parent     string     `json:"parent"`
+	Name       string     `json:"name"`
+	ReservedAt *time.Time `json:"reserved_at,omitempty"`
+}
+
+// ConversationAllocator separates the single creation request from read-only recovery.
+type ConversationAllocator interface {
+	ResolveReviewPlacement(context.Context, Route, Delivery) (*ReviewPlacement, error)
+	PlanConversation(ReviewPlacement, Delivery) ConversationAllocation
+	CreateConversation(context.Context, ConversationAllocation) (string, error)
+	FindConversation(context.Context, ConversationAllocation) (string, error)
+}
+
 // Delivery is the work description shared by execution providers.
 type Delivery struct {
+	RequireSameChannel     bool   `json:"require_same_channel,omitempty"`
 	ReuseDevelopmentThread bool   `json:"reuse_development_thread,omitempty"`
 	ContextBefore          string `json:"context_before,omitempty"`
 	GitHubLogin            string `json:"github_login,omitempty"`
@@ -67,6 +90,9 @@ type Delivery struct {
 	ConflictBaseSHA        string `json:"conflict_base_sha,omitempty"`
 	// Source is the development conversation associated with this task.
 	Source *Route `json:"source,omitempty"`
+
+	// ReviewPlacement is used only during local session preparation.
+	ReviewPlacement *ReviewPlacement `json:"-"`
 }
 
 // ConversationReader reads only the provided source conversation. Pages are

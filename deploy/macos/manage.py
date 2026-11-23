@@ -22,7 +22,7 @@ import time
 
 LABEL = 'com.ink-commons.daemon'
 SYSTEM_DIR = Path('/Library/LaunchDaemons')
-REPOSITORY = 'wujinhjun/ink-commons'
+DEFAULT_RELEASE_REPO = 'wujinhjun/ink-commons'
 BUNDLE_FILES = ('ink', 'manage.py', 'runtime.py', 'config.example.json', 'REVISION')
 
 
@@ -151,12 +151,13 @@ def config_drift(data, declaration):
     if not declaration:
         return {'status': 'not_configured'}
     expected = json.loads(Path(declaration).read_text())
-    if expected.get('schema') != 1 or not all(isinstance(expected.get(key), dict)
-                                               for key in ('global', 'repositories')):
+    if not isinstance(expected, dict) or expected.get('schema') != 1 or not all(
+            isinstance(expected.get(key), dict) for key in ('global', 'repositories')):
         raise DeploymentError('invalid runtime configuration declaration')
     try:
         actual = local_get(data, '/v1/config/export', timeout=2)
-        if not isinstance(actual, dict) or actual.get('schema') != 1:
+        if not isinstance(actual, dict) or actual.get('schema') != 1 or not all(
+                isinstance(actual.get(key), dict) for key in ('global', 'repositories')):
             return {'status': 'unavailable'}
     except (OSError, ValueError, IndexError, DeploymentError):
         return {'status': 'unavailable'}
@@ -166,6 +167,44 @@ def config_drift(data, declaration):
     if expected['global'] != actual['global']:
         changed.insert(0, 'global')
     return {'status': 'changed' if changed else 'match', 'scopes': changed}
+
+
+def validate_release_repo(repo):
+    if not isinstance(repo, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+', repo):
+        raise DeploymentError('release repository must be owner/repo')
+    if repo.split('/')[1] in ('.', '..'):
+        raise DeploymentError('invalid release repository name')
+    return repo
+
+
+def validate_service_path(path):
+    if not isinstance(path, str) or any(ch in path for ch in ('\0', '\r', '\n')):
+        raise DeploymentError('service PATH must contain only absolute directories')
+    if not all(Path(directory).is_absolute() for directory in path.split(':')):
+        raise DeploymentError('service PATH must contain only absolute directories')
+    return path
+
+
+def active_deployment(home, root, *, allow_legacy_entry=False):
+    entry = root / 'ink'
+    if not entry.exists() and not entry.is_symlink():
+        return None
+    if allow_legacy_entry and not entry.is_symlink() and entry.is_file() and os.access(entry, os.X_OK):
+        return None
+    try:
+        binary = entry.resolve(strict=True)
+        release = binary.parent
+        if (not entry.is_symlink() or binary.name != 'ink' or not binary.is_file()
+                or release.parent != root / 'releases'
+                or not re.fullmatch(r'[0-9a-f]{40}', release.name)):
+            raise ValueError
+        settings = json.loads((release / 'deployment.json').read_text())
+        if (not isinstance(settings, dict) or settings.get('home') != str(home)
+                or settings.get('revision') != release.name):
+            raise ValueError
+    except (OSError, RuntimeError, ValueError):
+        raise DeploymentError('active deployment metadata is invalid or unavailable') from None
+    return release, settings
 
 
 def stage(args, *, reuse=False):
@@ -190,12 +229,12 @@ def stage(args, *, reuse=False):
         revision = output(['git', '-C', repo, 'rev-parse', '--verify', '--end-of-options', args.revision + '^{commit}'])
     home = Path.home().resolve()
     extra_env = parse_env(args.env)
-    root = home / '.local/lib/ink-commons/releases'
-    release = root / revision
+    root = home / '.local/lib/ink-commons'
+    releases = root / 'releases'
+    release = releases / revision
     if release.exists() and not reuse:
-        raise DeploymentError('release already exists; reuse it or explicitly archive it before restaging')
-    config_source = Path(args.config).expanduser().resolve()
-    config = json.loads(config_source.read_text())
+        raise DeploymentError('release already exists; select an unstaged revision or use set-release-repo to change the active source')
+    config = json.loads(Path(args.config).expanduser().read_text())
     legacy = sorted(config.keys() & {'repositories', 'repository_defaults', 'execution'})
     if legacy:
         print('Legacy SQLite first-import fields:', ', '.join(legacy))
@@ -214,8 +253,24 @@ def stage(args, *, reuse=False):
     from runtime import credential_environment
     settings = {'revision': revision, 'home': str(home), 'python': sys.executable,
                 'data': str(home / '.local/state/ink-commons'),
-                'environment': extra_env,
-                'config_source': str(config_source)}
+                'environment': extra_env}
+    release_repo = getattr(args, 'release_repo', None)
+    service_path = getattr(args, 'service_path', None)
+    if release_repo is None or service_path is None:
+        active = active_deployment(home, root, allow_legacy_entry=True)
+        if active is not None:
+            _, previous = active
+            if release_repo is None and 'release_repo' in previous:
+                release_repo = validate_release_repo(previous['release_repo'])
+            if service_path is None and 'service_path' in previous:
+                service_path = validate_service_path(previous['service_path'])
+        elif (root / 'ink').exists() or releases.is_dir():
+            print('No versioned Ink entry to inherit from. Omitted release repository and service PATH use defaults.',
+                  file=sys.stderr)
+    if release_repo is not None:
+        settings['release_repo'] = validate_release_repo(release_repo)
+    if service_path is not None:
+        settings['service_path'] = validate_service_path(service_path)
     declaration = getattr(args, 'runtime_declaration', None)
     if declaration:
         settings['runtime_declaration'] = str(Path(declaration).expanduser().resolve())
@@ -236,8 +291,8 @@ def stage(args, *, reuse=False):
         verify_staged_settings(release, config, settings)
         verify_artifact(artifact, release, revision, bundled)
         return release
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.TemporaryDirectory(dir=root) as temp:
+    releases.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(dir=releases) as temp:
         temp = Path(temp)
         candidate = temp / 'release'
         candidate.mkdir(mode=0o700)
@@ -278,8 +333,10 @@ def deploy(args):
     root = home / '.local/lib/ink-commons'
     with deployment_lock(root):
         entry = root / 'ink'
-        gui = 'gui/' + str(uid)
-        if entry.exists() or entry.is_symlink() or loaded('system', LABEL) or loaded(gui, LABEL):
+        plist = LABEL + '.plist'
+        if (entry.exists() or entry.is_symlink() or (SYSTEM_DIR / plist).exists()
+                or (home / 'Library/LaunchAgents' / plist).exists()
+                or loaded('system', LABEL) or loaded('gui/' + str(uid), LABEL)):
             raise DeploymentError('an Ink deployment already exists; use upgrade')
         artifact = Path(__file__).resolve().parent
         args.revision = bundle_revision(artifact)
@@ -307,15 +364,50 @@ def upgrade(args):
         raise DeploymentError('upgrade must run as the service user, without sudo')
     root = Path.home().resolve() / '.local/lib/ink-commons'
     entry = root / 'ink'
-    if loaded('system', LABEL) or (SYSTEM_DIR / (LABEL + '.plist')).exists():
-        raise DeploymentError('legacy system deployment detected; migrate to the login service before upgrading')
     if not entry.is_symlink():
-        raise DeploymentError('upgrade requires an existing login deployment')
+        raise DeploymentError('upgrade requires an existing Ink deployment')
     if args.dry_run:
         upgrade_system(root, entry, tag=args.tag, channel=args.channel, dry_run=True)
         return
     with deployment_lock(root):
         upgrade_system(root, entry, tag=args.tag, channel=args.channel, apply=args.apply)
+
+
+def release_client(config, repo):
+    prefix = config.get('github_read_args')
+    if prefix is None:
+        return [config['github_command'], '--profile', 'inspect', '-R', repo], []
+    if not isinstance(prefix, list) or any(not isinstance(arg, str) or not arg or '\0' in arg for arg in prefix):
+        raise DeploymentError('invalid github_read_args')
+    return ([config['github_command'], *[arg.replace('{repo}', repo) for arg in prefix]],
+            ['--repo', repo])
+
+
+def set_release_repo(args):
+    if os.geteuid() == 0:
+        raise DeploymentError('set-release-repo must run as the service user, without sudo')
+    repo = validate_release_repo(args.repo)
+    home = Path.home().resolve()
+    root = home / '.local/lib/ink-commons'
+    with deployment_lock(root):
+        active = active_deployment(home, root)
+        if active is None:
+            raise DeploymentError('set-release-repo requires an existing Ink deployment')
+        release, settings = active
+        config = json.loads((release / 'config.json').read_text())
+        app, _ = release_client(config, repo)
+        proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
+        network_env = {**os.environ, **parse_env(proxy_entries)}
+        tag = 'build-' + release.name
+        try:
+            published_tag = output([*app, 'api', f'repos/{repo}/releases/tags/{tag}',
+                                    '--jq', '.tag_name'], env=network_env, stderr=subprocess.DEVNULL, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            raise DeploymentError('cannot read the installed revision release from the new repository') from None
+        if published_tag != tag:
+            raise DeploymentError('the new repository did not return the installed revision release')
+        atomic(release / 'deployment.json', json.dumps({**settings, 'release_repo': repo}).encode())
+    print('Release repository:', repo)
 
 
 def verify_staged_settings(target, config, expected_settings):
@@ -329,14 +421,14 @@ def verify_staged_settings(target, config, expected_settings):
                               'archive the staged release before retrying')
 
 
-def select_release(app, network_env, tag, channel):
+def select_release(app, network_env, tag, channel, repo):
     if tag is None:
         if channel == 'preview':
-            tag = output([*app, 'api', f'repos/{REPOSITORY}/releases',
+            tag = output([*app, 'api', f'repos/{repo}/releases',
                           '--jq', '[.[] | select(.prerelease and (.draft | not))][0].tag_name // ""'],
                          env=network_env)
         else:
-            tag = output([*app, 'api', f'repos/{REPOSITORY}/releases/latest',
+            tag = output([*app, 'api', f'repos/{repo}/releases/latest',
                           '--jq', '.tag_name'], env=network_env)
     match = re.fullmatch(r'build-([0-9a-f]{40})', tag)
     if match is None:
@@ -350,19 +442,22 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
     if current.parent != releases or not (current / 'deployment.json').is_file():
         raise DeploymentError('installed release is unavailable')
     settings = json.loads((current / 'deployment.json').read_text())
-    active_config_path = current / 'config.json'
-    config = json.loads(active_config_path.read_text())
-    config_path = Path(settings.get('config_source') or active_config_path)
+    config_path = current / 'config.json'
+    config = json.loads(config_path.read_text())
     proxy_entries = [key + '=' + value for key, value in settings.get('environment', {}).items()]
     network_env = {**os.environ, **parse_env(proxy_entries)}
-    app = [config['github_command'], '--profile', 'inspect', '-R', REPOSITORY]
-    tag, revision = select_release(app, network_env, tag, channel)
+    repo = validate_release_repo(settings.get('release_repo', DEFAULT_RELEASE_REPO))
+    app, release_scope = release_client(config, repo)
+    tag, revision = select_release(app, network_env, tag, channel, repo)
     if dry_run:
         print(json.dumps({'current': current.name, 'tag': tag, 'revision': revision,
                           'staged': (releases / revision).is_dir()}))
         return
     target = releases / revision
-    if target == current:
+    if (target == current and loaded('system', LABEL)
+            and (SYSTEM_DIR / (LABEL + '.plist')).is_file()
+            and not (Path(settings['home']) / 'Library/LaunchAgents' / (LABEL + '.plist')).exists()
+            and not loaded('gui/' + str(os.geteuid()), LABEL)):
         try:
             running = health(settings['data'])
         except (OSError, ValueError, IndexError, DeploymentError):
@@ -374,10 +469,7 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
     reuse = target.exists()
     if reuse and target != current:
         expected = {key: value for key, value in settings.items() if key != 'cc_binary_sha256'}
-        desired_config = json.loads(config_path.read_text())
-        desired_config['github_command'] = config['github_command']
-        verify_staged_settings(target, desired_config,
-                               {**expected, 'config_source': str(config_path), 'revision': revision})
+        verify_staged_settings(target, config, {**expected, 'revision': revision})
         if settings.get('runtime_declaration'):
             print(json.dumps({'config_drift': config_drift(settings['data'], settings['runtime_declaration'])}))
 
@@ -387,21 +479,22 @@ def upgrade_system(root, entry, *, tag=None, channel=None, dry_run=False, apply=
         assets += ('SHA256SUMS.sig',)
     with tempfile.TemporaryDirectory() as artifact:
         try:
-            run([*app, 'release', 'download', tag, '--dir', artifact,
+            run([*app, 'release', 'download', tag, '--dir', artifact, *release_scope,
                  *[f'--pattern={name}' for name in assets]], env=network_env)
         except subprocess.CalledProcessError:
-            raise DeploymentError('unable to download the main build; check the GitHub Actions publish job') from None
+            raise DeploymentError('unable to download the selected release; check the GitHub Actions publish job') from None
         if reuse:
             verify_signature(Path(artifact), allowed_signers)
             verify_artifact(Path(artifact), target, revision, bundled=True)
         else:
             if bundle_revision(Path(artifact)) != revision:
-                raise DeploymentError('downloaded bundle does not match the main revision')
+                raise DeploymentError('downloaded bundle does not match the selected release')
             stage(argparse.Namespace(
                 revision=revision, artifact_dir=artifact, config=str(config_path),
                 github_command=config['github_command'], cc_config=settings.get('cc_config'),
                 project=settings.get('project'), credentials=settings.get('credentials'),
-                env=proxy_entries, allowed_signers=allowed_signers,
+                env=proxy_entries, allowed_signers=allowed_signers, release_repo=settings.get('release_repo'),
+                service_path=settings.get('service_path'),
                 runtime_declaration=settings.get('runtime_declaration'),
             ))
 
@@ -423,12 +516,13 @@ def activate_staged(release):
     activate(argparse.Namespace(user=pwd.getpwuid(os.geteuid()).pw_name, release=release))
 
 
-def ink_plist(release, settings):
+def ink_plist(release, settings, user):
     data = Path(settings['data'])
-    env = {'HOME': settings['home'],
-           'PATH': str(Path(settings['home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'}
+    default_path = str(Path(settings['home']) / '.local/bin') + ':/opt/homebrew/bin:/usr/bin:/bin'
+    env = {'HOME': settings['home'], 'PATH': validate_service_path(settings.get('service_path', default_path))}
     env.update(parse_env([key + '=' + value for key, value in settings.get('environment', {}).items()]))
-    return {'Label': LABEL, 'ProgramArguments': [settings['python'], str(release / 'runtime.py')],
+    return {'Label': LABEL, 'UserName': user,
+            'ProgramArguments': [settings['python'], str(release / 'runtime.py')],
             'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 30,
             'ExitTimeOut': 45, 'EnvironmentVariables': env,
             'StandardOutPath': str(data / 'stdout.log'),
@@ -477,11 +571,36 @@ def loaded(domain, label):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
+def run_as_admin(args):
+    # A snapshot or a health check can outlast the sudo timestamp.
+    return run(['/usr/bin/sudo', '--', *args])
+
+
+@contextmanager
+def system_activation_lock():
+    # The root-owned directory has a shared inode across service accounts.
+    # Locking it avoids a user-writable or replaceable lock file.
+    descriptor = os.open(SYSTEM_DIR, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise DeploymentError('another system Ink activation is running') from None
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def install_system_plist(path, source):
+    run_as_admin(['/usr/bin/install', '-S', '-o', 'root', '-g', 'wheel', '-m', '0644', source, path])
+
+
 def unload(domain, label, timeout=45):
     if not loaded(domain,label):
         return
     try:
-        run(['/bin/launchctl','bootout',domain+'/'+label])
+        launchctl = run_as_admin if domain == 'system' else run
+        launchctl(['/bin/launchctl', 'bootout', domain + '/' + label])
     except subprocess.CalledProcessError:
         # 服务也可能在状态读取与 bootout 之间自行退出。
         if not loaded(domain,label):
@@ -493,6 +612,21 @@ def unload(domain, label, timeout=45):
         if time.monotonic() >= deadline:
             raise DeploymentError('service did not stop before deadline: '+label)
         time.sleep(0.1)
+
+
+def restore_launchd_service(domain, path, was_loaded, was_disabled, *, settings_changed=False):
+    restart = was_loaded and not loaded(domain, LABEL)
+    launchctl = run_as_admin if domain == 'system' else run
+    target = domain + '/' + LABEL
+    try:
+        if restart:
+            if was_disabled:
+                launchctl(['/bin/launchctl', 'enable', target])
+            launchctl(['/bin/launchctl', 'bootstrap', domain, path])
+    finally:
+        # A loaded service can be disabled, but a disabled service cannot be bootstrapped.
+        if was_disabled and (restart or settings_changed):
+            launchctl(['/bin/launchctl', 'disable', target])
 
 
 def validate_state_directory(data, home, uid):
@@ -512,7 +646,12 @@ def switch_entry(entry, target):
 def activate(args):
     account = pwd.getpwnam(args.user)
     if os.geteuid() == 0 or os.geteuid() != account.pw_uid:
-        raise DeploymentError('activate must run as the non-root login service user')
+        raise DeploymentError('activate must run as the service user, without sudo')
+    with system_activation_lock():
+        activate_system(args, account)
+
+
+def activate_system(args, account):
     home = Path(account.pw_dir).resolve()
     root = home / '.local/lib/ink-commons'
     release = Path(args.release).resolve()
@@ -523,11 +662,9 @@ def activate(args):
         raise DeploymentError('release home or revision differs from the deployment manifest')
     data = Path(settings['data'])
     validate_state_directory(data, home, account.pw_uid)
-    if loaded('system', LABEL) or (SYSTEM_DIR / (LABEL + '.plist')).exists():
-        raise DeploymentError('legacy system service must be migrated separately')
-    domain = 'gui/' + str(account.pw_uid)
-    run(['/bin/launchctl', 'print', domain], stdout=subprocess.DEVNULL)
-    path = home / 'Library/LaunchAgents' / (LABEL + '.plist')
+    gui = 'gui/' + str(account.pw_uid)
+    path = SYSTEM_DIR / (LABEL + '.plist')
+    agent_path = home / 'Library/LaunchAgents' / path.name
     config = json.loads((release / 'config.json').read_text())
     if not config.get('github_command') or not Path(config['github_command']).is_file():
         raise DeploymentError('release has no App CLI')
@@ -535,12 +672,23 @@ def activate(args):
         raise DeploymentError('release runtime unavailable')
     check_provider_endpoints(config)
 
-    old_loaded = loaded(domain, LABEL)
+    old_loaded = loaded('system', LABEL)
+    agent_loaded = loaded(gui, LABEL)
     old_plist = path.read_bytes() if path.exists() else None
-    if old_loaded and old_plist is None:
+    agent_plist = agent_path.read_bytes() if agent_path.exists() else None
+    if (old_loaded and old_plist is None) or (agent_loaded and agent_plist is None):
         raise DeploymentError('loaded Ink service has no restorable plist')
-    old_mode = stat.S_IMODE(path.stat().st_mode) if old_plist is not None else 0o600
-    old_disabled = disabled(domain, LABEL)
+    if old_plist is not None and plistlib.loads(old_plist).get('UserName') != args.user:
+        raise DeploymentError('system Ink service belongs to a different user')
+    if old_loaded and agent_loaded:
+        raise DeploymentError('both system and login Ink services are loaded')
+    agent_mode = stat.S_IMODE(agent_path.stat().st_mode) if agent_plist is not None else 0o600
+    old_disabled = disabled('system', LABEL)
+    agent_disabled = agent_loaded and disabled(gui, LABEL)
+    try:
+        run(['/usr/bin/sudo', '-v'])
+    except subprocess.CalledProcessError:
+        raise DeploymentError('administrator authorization is required to activate the LaunchDaemon') from None
     backup = root / 'backups' / str(time.time_ns())
     backup.mkdir(parents=True, mode=0o700)
     print('Backup:', backup, flush=True)
@@ -550,15 +698,26 @@ def activate(args):
         (backup / 'ink').symlink_to(old_link)
     elif entry.exists():
         shutil.copy2(entry, backup / 'ink')
+    system_backup = backup / 'system' / path.name
     if old_plist is not None:
-        atomic(backup / path.name, old_plist)
+        atomic(system_backup, old_plist)
+    if agent_plist is not None:
+        atomic(backup / 'login' / agent_path.name, agent_plist)
+    candidate_plist = backup / 'candidate' / path.name
+    atomic(candidate_plist, plistlib.dumps(ink_plist(release, settings, args.user)))
     gate = release / 'enabled'
     gate_was_enabled = gate.exists()
     snapshot = backup / 'state'
     candidate_started = False
+    system_changed = False
+    agent_removed = False
     phase = 'stop_old_service'
     try:
-        unload(domain, LABEL)
+        if agent_plist is not None:
+            agent_path.unlink()
+            agent_removed = True
+            unload(gui, LABEL)
+        unload('system', LABEL)
         phase = 'snapshot'
         with open(data / 'state.json.lock', 'a') as lock:
             os.fchmod(lock.fileno(), 0o600)
@@ -566,10 +725,11 @@ def activate(args):
             shutil.copytree(data, snapshot, ignore=shutil.ignore_patterns('ink.sock', 'state.json.lock', '*.log'))
         phase = 'start_candidate'
         gate.unlink(missing_ok=True)
-        atomic(path, plistlib.dumps(ink_plist(release, settings)))
-        run(['/bin/launchctl', 'enable', domain + '/' + LABEL])
+        system_changed = True
+        install_system_plist(path, candidate_plist)
+        run_as_admin(['/bin/launchctl', 'enable', 'system/' + LABEL])
         candidate_started = True
-        run(['/bin/launchctl', 'bootstrap', domain, path])
+        run_as_admin(['/bin/launchctl', 'bootstrap', 'system', path])
         phase = 'verify_revision'
         for _ in range(30):
             try:
@@ -597,7 +757,7 @@ def activate(args):
         try:
             if candidate_started:
                 gate.unlink(missing_ok=True)
-                unload(domain, LABEL)
+                unload('system', LABEL)
                 with open(data / 'state.json.lock', 'a') as lock:
                     acquire_state_lock(lock)
                     for item in data.iterdir():
@@ -613,15 +773,18 @@ def activate(args):
                     atomic(entry, (backup / 'ink').read_bytes(), stat.S_IMODE((backup / 'ink').stat().st_mode))
                 else:
                     entry.unlink(missing_ok=True)
-            if old_plist is None:
-                path.unlink(missing_ok=True)
-            else:
-                atomic(path, old_plist, old_mode)
-            run(['/bin/launchctl', 'disable' if old_disabled else 'enable', domain + '/' + LABEL])
+            if system_changed:
+                if old_plist is None:
+                    run_as_admin(['/bin/rm', '-f', path])
+                else:
+                    install_system_plist(path, system_backup)
             if gate_was_enabled:
                 atomic(gate, b'ready\n')
-            if old_loaded and not loaded(domain, LABEL):
-                run(['/bin/launchctl', 'bootstrap', domain, path])
+            if agent_removed:
+                atomic(agent_path, agent_plist, agent_mode)
+            restore_launchd_service('system', path, old_loaded, old_disabled,
+                                    settings_changed=system_changed)
+            restore_launchd_service(gui, agent_path, agent_loaded, agent_disabled)
         except Exception as recovery_error:
             print(json.dumps({'deployment': 'rollback_incomplete', 'phase': phase,
                               'revision': release.name, 'backup': str(backup)}), flush=True)
@@ -630,6 +793,13 @@ def activate(args):
                           'revision': release.name, 'backup': str(backup)}), flush=True)
         raise
     print('Activated revision:', release.name, 'gate: open')
+
+
+def activate_from_cli(args):
+    if os.geteuid() == 0:
+        raise DeploymentError('activate must run as the service user, without sudo')
+    with deployment_lock(Path.home().resolve() / '.local/lib/ink-commons'):
+        activate(args)
 
 
 def status(args):
@@ -684,6 +854,8 @@ def main():
         prepare.add_argument('--cc-config', help='explicit legacy TOML credential source')
         prepare.add_argument('--project', help='project in the legacy TOML credential source')
         prepare.add_argument('--github-command', help='absolute GitHub reader CLI path')
+        prepare.add_argument('--release-repo', help='owner/repo for upgrades (inherits active setting, else ' + DEFAULT_RELEASE_REPO + ')')
+        prepare.add_argument('--service-path', help='absolute LaunchDaemon PATH entries separated by colons (inherits active setting)')
     update = commands.add_parser('upgrade', help='prepare a published release')
     selection = update.add_mutually_exclusive_group()
     selection.add_argument('--tag', help='published build-<SHA> tag')
@@ -694,6 +866,8 @@ def main():
     rollback.add_argument('--tag', required=True)
     rollback.add_argument('--dry-run', action='store_true')
     rollback.set_defaults(apply=True, channel=None)
+    source = commands.add_parser('set-release-repo', help='change the release source for the installed revision')
+    source.add_argument('repo', metavar='owner/repo')
     apply = commands.add_parser('activate')
     apply.add_argument('--release', required=True)
     apply.add_argument('--user', required=True)
@@ -708,7 +882,8 @@ def main():
         if args.action in ('upgrade', 'rollback'):
             upgrade(args)
         else:
-            {'stage': stage, 'deploy': deploy, 'activate': activate, 'status': status}[args.action](args)
+            {'stage': stage, 'deploy': deploy, 'activate': activate_from_cli,
+             'set-release-repo': set_release_repo, 'status': status}[args.action](args)
     except DeploymentError as error:
         print('Deployment failed:', str(error), file=sys.stderr)
         return 1

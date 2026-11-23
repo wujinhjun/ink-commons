@@ -229,6 +229,11 @@ func (s *Service) changeConfig(scope, key string, value json.RawMessage, unset b
 		if err := s.validateEffective(effective.Repository); err != nil {
 			return record, apiError{400, err.Error()}
 		}
+		if name != "" && name == scope && key == "auto_merge" {
+			if err := s.validateAutoMergeIdentity(effective.Repository); err != nil {
+				return record, apiError{400, err.Error()}
+			}
+		}
 	}
 	// Global revision is a monotonic generation for all runtime configuration.
 	global.Revision++
@@ -303,6 +308,9 @@ func (s *Service) registerConfig(name string, values ConfigValues) (Repository, 
 			return Repository{}, false, apiError{409, "repository already registered with different overrides"}
 		}
 		return effective.Repository, false, tx.Commit()
+	}
+	if err := s.validateAutoMergeIdentity(effective.Repository); err != nil {
+		return Repository{}, false, apiError{400, err.Error()}
 	}
 	global.Revision++
 	if err := putConfigRecord(tx, global); err != nil {

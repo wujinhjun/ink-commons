@@ -2,7 +2,9 @@ package ink
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,5 +138,59 @@ exit 1
 	_, status, err := up.gitHubJSON(context.Background(), "PUT", "/repos/acme/project/pulls/42/merge-async", "code", stackAPIVersion, []byte("{}"), &response, 409)
 	if err != nil || status != 409 || response.Details.ID != testStackRequestID {
 		t.Fatalf("HTTP %d, result %+v, error %v", status, response, err)
+	}
+}
+
+func TestMergerRequiresDedicatedPinnedCommand(t *testing.T) {
+	up := newUpstream("reader-token")
+	up.command = "/unused-reader"
+	if _, err := up.merger(false); err == nil {
+		t.Fatal("reader used as merger")
+	}
+	script := filepath.Join(t.TempDir(), "merger")
+	body := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(script, body, 0700); err != nil {
+		t.Fatal(err)
+	}
+	up.mergerCommand, up.mergerDigest = script, fmt.Sprintf("%x", sha256.Sum256(body))
+	merger, err := up.merger(false)
+	if err != nil || merger.command != script || merger.token != "" {
+		t.Fatalf("incorrect merger routing: %v", err)
+	}
+	if err := os.WriteFile(script, []byte("changed"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := merger.merge(context.Background(), "acme/project", 42, strings.Repeat("a", 40), "merge"); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected modified command to be rejected before use, got %v", err)
+	}
+}
+
+func TestGitHubCommandUsesConfiguredArgumentPrefixes(t *testing.T) {
+	command := filepath.Join(t.TempDir(), "github-cli")
+	script := `#!/bin/sh
+case "$*" in
+  'api --include --method GET /repos/acme/project/pulls') ;;
+  '--scope=acme/project api --include --method PUT /repos/acme/project/pulls/42/merge --input -') ;;
+  *) exit 1 ;;
+esac
+printf 'HTTP/2.0 200 OK\r\n\r\n{"merged":true,"sha":"dddddddddddddddddddddddddddddddddddddddd"}'
+`
+	if err := os.WriteFile(command, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	up := newUpstream("")
+	up.command = command
+	up.readArgs = []string{}
+	up.mergeArgs = []string{"--scope={repo}"}
+	var result any
+	if _, err := up.gitHubGet(context.Background(), "/repos/acme/project/pulls", &result); err != nil {
+		t.Fatal(err)
+	}
+	merger, err := up.merger(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := merger.merge(context.Background(), "acme/project", 42, strings.Repeat("a", 40), "merge"); err != nil {
+		t.Fatal(err)
 	}
 }
