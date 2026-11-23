@@ -150,9 +150,11 @@ def validate_service_path(path):
     return path
 
 
-def active_deployment(home, root):
+def active_deployment(home, root, *, allow_legacy_entry=False):
     entry = root / 'ink'
     if not entry.exists() and not entry.is_symlink():
+        return None
+    if allow_legacy_entry and not entry.is_symlink() and entry.is_file() and os.access(entry, os.X_OK):
         return None
     try:
         binary = entry.resolve(strict=True)
@@ -211,15 +213,15 @@ def stage(args, *, reuse=False):
     release_repo = getattr(args, 'release_repo', None)
     service_path = getattr(args, 'service_path', None)
     if release_repo is None or service_path is None:
-        active = active_deployment(home, root)
+        active = active_deployment(home, root, allow_legacy_entry=True)
         if active is not None:
             _, previous = active
             if release_repo is None and 'release_repo' in previous:
                 release_repo = validate_release_repo(previous['release_repo'])
             if service_path is None and 'service_path' in previous:
                 service_path = validate_service_path(previous['service_path'])
-        elif releases.is_dir():
-            print('No active Ink entry to inherit from. Omitted release repository and service PATH use defaults.',
+        elif (root / 'ink').exists() or releases.is_dir():
+            print('No versioned Ink entry to inherit from. Omitted release repository and service PATH use defaults.',
                   file=sys.stderr)
     if release_repo is not None:
         settings['release_repo'] = validate_release_repo(release_repo)

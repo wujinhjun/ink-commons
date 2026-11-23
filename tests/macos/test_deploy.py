@@ -2,6 +2,7 @@ import importlib.util
 import fcntl
 import os
 import hashlib
+import io
 import json
 from pathlib import Path
 import plistlib
@@ -194,6 +195,31 @@ class ArtifactStageTest(unittest.TestCase):
         self.args.release_repo = None
         self.args.service_path = None
         self.write_bundle_for('d' * 40)
+        with self.assertRaisesRegex(m.DeploymentError, 'active deployment metadata'):
+            self.stage()
+        self.assertFalse((self.releases / self.revision).exists())
+
+    def test_manual_stage_accepts_legacy_executable_entry_without_saved_settings(self):
+        self.write_bundle()
+        entry = self.releases.parent / 'ink'
+        entry.parent.mkdir(parents=True)
+        entry.write_text('#!/bin/sh\nexit 0\n')
+        entry.chmod(0o700)
+        before = entry.read_bytes()
+        with patch.object(m.sys, 'stderr', new_callable=io.StringIO) as stderr:
+            self.stage()
+        self.assertIn('Omitted release repository and service PATH use defaults.', stderr.getvalue())
+        settings = json.loads((self.releases / self.revision / 'deployment.json').read_text())
+        self.assertNotIn('release_repo', settings)
+        self.assertNotIn('service_path', settings)
+        self.assertEqual(entry.read_bytes(), before)
+        self.assertFalse(entry.is_symlink())
+
+    def test_manual_stage_rejects_broken_versioned_entry(self):
+        self.write_bundle()
+        entry = self.releases.parent / 'ink'
+        entry.parent.mkdir(parents=True)
+        entry.symlink_to(self.releases / ('d' * 40) / 'ink')
         with self.assertRaisesRegex(m.DeploymentError, 'active deployment metadata'):
             self.stage()
         self.assertFalse((self.releases / self.revision).exists())
