@@ -19,15 +19,17 @@ import (
 // DaemonConfig contains only static process/provider settings. Mutable policy
 // lives in SQLite; the legacy fields below are accepted solely for first import.
 type DaemonConfig struct {
-	GitHubCommand       string `json:"github_command,omitempty"`
-	GitHubCommandSHA256 string `json:"github_command_sha256,omitempty"`
-	GitHubMergerCommand string `json:"github_merger_command,omitempty"`
-	GitHubMergerSHA256  string `json:"github_merger_command_sha256,omitempty"`
-	WorkspaceFullSlots  int    `json:"workspace_full_slots"`
-	PollSeconds         int    `json:"poll_seconds"`
-	CCConnectURL        string `json:"cc_connect_url"`
-	HTTPURL             string `json:"http_provider_url,omitempty"`
-	HTTPExecution       bool   `json:"http_provider_execution,omitempty"`
+	GitHubCommand       string   `json:"github_command,omitempty"`
+	GitHubCommandSHA256 string   `json:"github_command_sha256,omitempty"`
+	GitHubMergerCommand string   `json:"github_merger_command,omitempty"`
+	GitHubReadArgs      []string `json:"github_read_args"`
+	GitHubMergeArgs     []string `json:"github_merge_args"`
+	GitHubMergerSHA256  string   `json:"github_merger_command_sha256,omitempty"`
+	WorkspaceFullSlots  int      `json:"workspace_full_slots"`
+	PollSeconds         int      `json:"poll_seconds"`
+	CCConnectURL        string   `json:"cc_connect_url"`
+	HTTPURL             string   `json:"http_provider_url,omitempty"`
+	HTTPExecution       bool     `json:"http_provider_execution,omitempty"`
 }
 
 func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) {
@@ -66,6 +68,8 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	cfg.GitHubCommandSHA256 = file.GitHubCommandSHA256
 	cfg.GitHubMergerCommand = file.GitHubMergerCommand
 	cfg.GitHubMergerSHA256 = file.GitHubMergerSHA256
+	cfg.GitHubReadArgs = file.GitHubReadArgs
+	cfg.GitHubMergeArgs = file.GitHubMergeArgs
 	cfg.GitHubToken = os.Getenv("INK_GITHUB_TOKEN")
 	if cfg.GitHubCommand != "" && !filepath.IsAbs(cfg.GitHubCommand) {
 		return cfg, nil, fmt.Errorf("github_command must be an absolute App CLI path")

@@ -247,6 +247,29 @@ class UpgradeTest(unittest.TestCase):
         self.assertIn('--pattern=manage.py', self.calls[1])
         self.assertIn('--pattern=runtime.py', self.calls[1])
 
+    def test_upgrade_accepts_cli_without_global_profile_or_repo_flags(self):
+        config_file = self.current / 'config.json'
+        config_file.write_text(json.dumps({
+            'github_command': '/test/github-app-cli', 'github_read_args': [],
+        }))
+
+        def run(args, **kwargs):
+            self.calls.append(args)
+            if args[1] == 'api':
+                return SimpleNamespace(stdout=self.target.name.encode())
+            directory = Path(args[args.index('--dir') + 1])
+            (directory / 'REVISION').write_text(self.target.name)
+
+        with patch.object(m, 'run', side_effect=run), patch.object(m, 'stage'), \
+             patch.object(m, 'activate_staged'):
+            m.upgrade_system(self.root, self.entry)
+
+        self.assertEqual(self.calls[0][:3], [
+            '/test/github-app-cli', 'api', f'repos/{m.REPOSITORY}/git/ref/heads/main',
+        ])
+        self.assertEqual(self.calls[1][1:4], ['release', 'download', 'build-' + self.target.name])
+        self.assertEqual(self.calls[1][6:8], ['--repo', m.REPOSITORY])
+
     def test_unpublished_build_does_not_stage_or_activate(self):
         with patch.object(m, 'run', side_effect=subprocess.CalledProcessError(1, 'release download')) as run, \
              patch.object(m, 'output', return_value=self.target.name), \
