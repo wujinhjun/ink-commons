@@ -164,7 +164,7 @@ func (s *Service) Poll(ctx context.Context) {
 // owns the key, so overlapping observations cannot apply stale list payloads.
 func (s *Service) pollRepo(ctx context.Context, repo Repository, recoveryByPR map[int]recovery, send func(pollJob)) error {
 	path := "/repos/" + repo.Repo + "/pulls"
-	pulls, listErr := listPages[Pull](ctx, s.up, path+"?state=open")
+	pulls, listErr := listPages[Pull](ctx, s.up.observer(), path+"?state=open")
 	pending, pendingErr := statedb.New(s.store.db).ListPollPending(ctx, repo.Repo)
 	numbers := make(map[int]bool, len(pulls)+len(pending))
 	emit := func(number int) {
@@ -258,7 +258,8 @@ func (s *Service) observePull(ctx context.Context, repo Repository, number int) 
 	}
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo.Repo, number)
 	var pull Pull
-	if _, err := s.up.gitHubGet(ctx, path, &pull); err != nil {
+	observer := s.up.observer()
+	if _, err := observer.gitHubGet(ctx, path, &pull); err != nil {
 		return nil, err
 	}
 	if pull.Number != number || (pull.State != "closed" && (pull.State != "open" || !validSHA(pull.Head.SHA))) {
@@ -266,12 +267,12 @@ func (s *Service) observePull(ctx context.Context, repo Repository, number int) 
 	}
 	var reviews []Review
 	if pull.State == "open" && !pull.Draft {
-		reviews, err = listPages[Review](ctx, s.up, path+"/reviews")
+		reviews, err = listPages[Review](ctx, observer, path+"/reviews")
 		if err != nil {
 			return nil, err
 		}
 		var current Pull
-		if _, err := s.up.gitHubGet(ctx, path, &current); err != nil {
+		if _, err := observer.gitHubGet(ctx, path, &current); err != nil {
 			return nil, err
 		}
 		if current.Number != number || current.Head.SHA != pull.Head.SHA || current.State != pull.State || current.Draft != pull.Draft {

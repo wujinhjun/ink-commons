@@ -38,6 +38,8 @@ type Config struct {
 	PollSeconds         int
 	Reliability         Reliability
 	GitHubToken         string
+	GitHubReader        *GitHubCredential
+	GitHubMerger        *GitHubCredential
 	GitHubCommand       string
 	GitHubCommandSHA256 string
 	GitHubReadArgs      []string

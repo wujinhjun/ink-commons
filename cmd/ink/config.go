@@ -42,6 +42,8 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		Repositories       []ink.Repository `json:"repositories"`
 		Reliability        ink.Reliability  `json:"execution"`
 		DaemonConfig
+		GitHubReader *ink.GitHubCredential `json:"github_reader,omitempty"`
+		GitHubMerger *ink.GitHubCredential `json:"github_merger,omitempty"`
 	}
 	var cfg ink.Config
 	f, err := os.Open(path)
@@ -75,7 +77,7 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	cfg.GitHubMergerSHA256 = file.GitHubMergerSHA256
 	cfg.GitHubReadArgs = file.GitHubReadArgs
 	cfg.GitHubMergeArgs = file.GitHubMergeArgs
-	cfg.GitHubToken = os.Getenv("INK_GITHUB_TOKEN")
+	cfg.GitHubReader, cfg.GitHubMerger = file.GitHubReader, file.GitHubMerger
 	if cfg.GitHubCommand != "" && !filepath.IsAbs(cfg.GitHubCommand) {
 		return cfg, nil, fmt.Errorf("github_command must be an absolute App CLI path")
 	}

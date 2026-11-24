@@ -51,3 +51,56 @@ A v0.2+ `github_auto_merge` strategy can substitute native GitHub submission and
 reconciliation while preserving role isolation, the SHA-bound policy boundary
 and GitHub as the authority for business completion. Task 4 implements the
 interfaces against the existing behavior.
+
+## Daemon credential configuration
+
+Configure the static JSON keys `github_reader` and `github_merger`. Each object
+selects one source:
+
+- PAT: `{"token_env":"INK_READER_PAT"}` reads the named daemon environment
+  variable. Use a different credential for the merger. Existing
+  `INK_GITHUB_TOKEN` deployments still work for reads when no reader source
+  is configured. With no reader source, public observations can use anonymous
+  HTTP.
+- App: `{"app":{"app_id":123,"installation_id":456,"private_key_file":"/run/secrets/github-app.pem"}}`
+  reads a private RSA PEM file with mode `0600` or stricter. The reader token
+  requests read access to contents, pull requests, and checks. The merger
+  token requests write access to contents and pull requests. Both tokens are
+  restricted to the requested repository. An App serving both roles needs
+  explicit repository opt-in via `auto_merge.reuse_reader_identity`.
+- Helper: `{"helper":{"command":"/usr/local/bin/ink-credential","args":[],"identity":"reader-app"}}`
+  runs the absolute executable with the configured arguments followed by
+  `get`. Standard input carries Git credential protocol fields `protocol`,
+  `host`, and `path` (the repository), and the process receives
+  `INK_GITHUB_ROLE`. Standard output can be a single token line, Git
+  credential format with `password` and optional `password_expiry_utc`, or
+  JSON with `token` and optional RFC 3339 `expires_at`. A helper without an
+  expiry is queried again after about 30 seconds. Use a distinct `identity`
+  for each principal and change it when a helper switches principals. Scope
+  helper tokens to the repository and the requested role.
+
+Legacy `github_command` and pinned `github_merger_command` wrappers continue to
+work with their existing argument and HTTP response protocol. Configure one
+source per role. Commands run without a shell, with isolated Git and GitHub CLI
+configuration and without ambient GitHub CLI tokens or configured PAT variables.
+The Agent's formal review command remains separate.
+
+A pending Stack merge retains an opaque reference to the credential that
+submitted it. A replacement PAT or wrapper cannot query that request. Restore
+the submitting credential to resume lookup. App signing-key rotation preserves
+the installation identity. For records predating identity references, Ink
+retains the request and reconciles it against the observed PR outcome.
+
+## Conditional observations
+
+Polling uses conditional GETs for authenticated open PR lists, PR details, and
+review pages. Each cache entry keeps the complete URL, the ETag, the response
+body, and its pagination links in memory. The key also includes the reader's
+credential scope. A 304 is reconciled locally with the stored page and links.
+Anonymous reads and the legacy HTTP wrapper use full responses because those
+paths do not expose a token scope to the cache. Checks, conflict diagnosis,
+handoff verification, and merge preflight use fresh requests.
+
+Secondary rate limits pause both GitHub roles for the server's `Retry-After`
+interval or for exponential backoff when the header is absent. A primary
+rate limit cools down the affected role until GitHub's reset time.
