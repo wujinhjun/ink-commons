@@ -100,6 +100,17 @@ func (s *Service) approvalCandidate(ctx context.Context, repo Repository, number
 	return candidate, nil
 }
 
+// A queued hook must match the approval verified by merge preflight. Once
+// execution starts, the existing once-per-SHA rule covers subsequent reviews.
+func (w *Work) hasApprovalReceipt(sha string, reviewID int64) bool {
+	for _, run := range w.Approvals {
+		if run.SHA == sha && (run.State != "pending" || run.ReviewID == reviewID) {
+			return true
+		}
+	}
+	return false
+}
+
 func pendingApproval(work *Work, effective EffectiveConfig) *approvalCandidate {
 	if effective.Repository.PostApproval == nil || work.handoffMergeBlocked() {
 		return nil

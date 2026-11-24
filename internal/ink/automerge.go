@@ -179,12 +179,13 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 	if w == nil {
 		return false, nil
 	}
-	if run.preflight != nil && (reserve || run.UpdatedAt.IsZero()) {
-		current, err := s.store.effectiveConfig(repo.Repo)
+	var effective EffectiveConfig
+	if reserve || (run.preflight != nil && run.UpdatedAt.IsZero()) {
+		effective, err = s.store.effectiveConfig(repo.Repo)
 		if err != nil {
 			return false, err
 		}
-		if w.Version != run.preflight.version || w.Pull.Head.SHA != run.SHA || current.Revision != run.preflight.policyRevision {
+		if run.preflight != nil && (w.Version != run.preflight.version || w.Pull.Head.SHA != run.SHA || effective.Revision != run.preflight.policyRevision) {
 			return false, nil
 		}
 	}
@@ -209,14 +210,19 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 		if w.handoffMergeBlocked() || (w.Task != nil && w.Task.ConflictBase != nil) {
 			return false, nil
 		}
-		current, ok := s.repo(repo.Repo)
-		if !ok || current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method ||
+		current := effective.Repository
+		if current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method ||
 			current.AutoMerge.ReuseReaderIdentity != run.ReuseReaderIdentity || w.Phase != "approved" || w.Pull.Head.SHA != run.SHA || !strings.EqualFold(w.Reviewer.GitHubLogin, run.Reviewer) {
 			return false, nil
 		}
 		merger, err := s.up.merger(run.ReuseReaderIdentity)
 		if err != nil || sameAppCommand(w.Reviewer.GitHubCommand, merger.command) {
 			return false, nil
+		}
+		// Gate the new merge on a durable receipt, so a write failure
+		// cannot lose the hook when GitHub closes this PR.
+		if current.PostApproval != nil && !w.hasApprovalReceipt(run.SHA, run.ReviewID) {
+			return false, fmt.Errorf("approval hook event is not reserved for the current approval")
 		}
 	}
 	if !reserve || run.UpdatedAt.IsZero() {

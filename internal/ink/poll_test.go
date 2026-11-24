@@ -340,3 +340,40 @@ func TestObservationDoesNotOverwriteConcurrentAssignment(t *testing.T) {
 		t.Fatal("observation raced the concurrent assignment")
 	}
 }
+
+func TestPollRetriesFailedApprovalReservationBeforeMerging(t *testing.T) {
+	f := newAutoMergeFixture(t)
+	script := filepath.Join(t.TempDir(), "hook")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.changeConfig(f.repo.Repo, "postApproval", jsonValue(ApprovalHook{Command: []string{script}}), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.store.db.Exec(`CREATE TRIGGER reject_pending_approval BEFORE UPDATE ON work_items
+		WHEN json_extract(NEW.payload, '$.postApproval[0].state') = 'pending'
+		BEGIN SELECT RAISE(ABORT, 'approval journal write failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	f.s.Poll(ctx)
+	work := notificationWork(t, f.s, f.repo, f.pull)
+	if f.writes != 0 || len(work.Approvals) != 0 || hasInFlightAutoMerge(work) {
+		t.Fatalf("failed hook reservation allowed merge: writes=%d approvals=%+v merges=%+v", f.writes, work.Approvals, work.AutoMerges)
+	}
+	if _, err := f.s.store.db.Exec("DROP TRIGGER reject_pending_approval"); err != nil {
+		t.Fatal(err)
+	}
+	f.onMerge = func() {
+		work := notificationWork(t, f.s, f.repo, f.pull)
+		if len(work.Approvals) != 1 || work.Approvals[0].State != "pending" {
+			t.Errorf("hook was not durably queued before merge: %+v", work.Approvals)
+		}
+	}
+	f.s.Poll(ctx)
+	f.s.hooks.wg.Wait()
+	work = notificationWork(t, f.s, f.repo, f.pull)
+	if f.writes != 1 || len(work.Approvals) != 1 || work.Approvals[0].State != "succeeded" {
+		t.Fatalf("retry did not merge and execute hook once: writes=%d approvals=%+v", f.writes, work.Approvals)
+	}
+}
