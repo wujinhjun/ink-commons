@@ -34,4 +34,4 @@ The [cooperative workflow diagram](diagrams/cooperative-workflow.png) illustrate
 - Rendered PNG: [`diagrams/cooperative-workflow.png`](diagrams/cooperative-workflow.png)
 - Editable Excalidraw source: [`diagrams/cooperative-workflow.excalidraw`](diagrams/cooperative-workflow.excalidraw)
 
-> Note: The diagram's right-hand callouts use placeholder values; for current v0.1 configuration keys (`providers.<name>.url`, `github_reader` / `github_merger`, `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION`), refer to [`config.example.json`](../config.example.json) and [Centralized Configuration](configuration.md).
+> Note: All configuration values in the diagram are placeholders; see [`config.example.json`](../config.example.json) and [Centralized Configuration](configuration.md) for the complete schema and policy rules.

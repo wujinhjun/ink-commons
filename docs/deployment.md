@@ -127,7 +127,13 @@ ink hook install --checkout /path/to/checkout
 ink hook status --checkout /path/to/checkout
 ```
 
-When running from a source build or wrapping an existing `pre-push` hook, buffer stdin so both hooks receive the ref updates and preserve the existing hook's exit code:
+The installed hook resolves the `ink` binary in this order:
+
+1. `INK_BIN` (if set in the Git push environment—use this for source builds such as `INK_BIN=/absolute/path/to/bin/ink git push`, or add `bin/` to `PATH`).
+2. `ink` on `PATH` (for example `/usr/local/bin/ink` from a release installation).
+3. `$HOME/.local/lib/ink-commons/ink` (fallback for user-local installations).
+
+You can also install [`scripts/ink-pre-push`](../scripts/ink-pre-push) directly as an executable `pre-push` hook at `$(git rev-parse --git-path hooks/pre-push)`. When wrapping an existing `pre-push` hook, buffer stdin so both hooks receive the ref updates and preserve the existing hook's exit code:
 
 ```sh
 updates=$(mktemp) || exit 1
