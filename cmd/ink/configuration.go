@@ -149,8 +149,8 @@ func configurationCommand(options *cliOptions, action string) *cobra.Command {
 			}
 			return nil
 		}
-		values := ink.ConfigValues{}
-		sources := map[string]string{}
+		var values ink.ConfigValues
+		var sources map[string]string
 		if *effective {
 			var result ink.EffectiveConfig
 			if err := json.Unmarshal(data, &result); err != nil {

@@ -1,0 +1,20 @@
+[Unit]
+Description=Ink Commons cc-connect adapter
+After=network.target
+
+[Service]
+Type=simple
+User=INK_ADAPTER_USER
+Group=INK_ADAPTER_GROUP
+EnvironmentFile=/path/to/ink/adapter.env
+UMask=0077
+ExecStart=/path/to/bin/ink-adapter-ccconnect --provider INK_PROVIDER_NAME --listen 127.0.0.1:8788
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

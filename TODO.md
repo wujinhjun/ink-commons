@@ -17,7 +17,7 @@
 
 ## 已完成
 
-- [x] 持久化审查等待状态与回流诊断，传递 reviewer 的 GitHub 身份 / 命令；身份或 SHA 不符、执行不明及缺少业务结果通过 API / 日志可见。不依赖 cc-connect 新协议，不自动重派成功的执行。见 [PR #6](https://github.com/wujinhjun/ink-commons/pull/6)。
+- [x] 持久化审查等待状态与回流诊断，传递 reviewer 的 GitHub 身份 / 命令；身份或 SHA 不符、执行不明及缺少业务结果通过 API / 日志可见。不依赖 cc-connect 新协议，不自动重派成功的执行。见 PR #6。
 
-- [x] 将 daemon 状态从 `state.json` 迁移到 SQLite，保留现有 PR、会话绑定和投递记录，并提供备份与回滚方式。见 [PR #3](https://github.com/wujinhjun/ink-commons/pull/3) 和 [状态维护说明](README.md#状态备份与回滚)。
-- [x] 审查 thread 与开发 thread 位于同一父频道，名称关联开发 thread 标题和 PR 编号，并支持显式指定审查位置。见 [PR #4](https://github.com/wujinhjun/ink-commons/pull/4)。
+- [x] 将 daemon 状态从 `state.json` 迁移到 SQLite，保留现有 PR、会话绑定和投递记录，并提供备份与回滚方式。见 PR #3 和 [状态维护说明](README.md#状态备份与回滚)。
+- [x] 审查 thread 与开发 thread 位于同一父频道，名称关联开发 thread 标题和 PR 编号，并支持显式指定审查位置。见 PR #4。

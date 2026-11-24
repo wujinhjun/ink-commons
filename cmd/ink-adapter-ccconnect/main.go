@@ -15,10 +15,20 @@ import (
 	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
+var (
+	buildVersion  = "development"
+	buildRevision = "development"
+)
+
 func run() error {
+	version := flag.Bool("version", false, "print the build version and revision")
 	addr := flag.String("listen", "127.0.0.1:8788", "loopback listen address")
 	provider := flag.String("provider", "", "persistent Ink provider name")
 	flag.Parse()
+	if *version {
+		fmt.Println(buildVersion, buildRevision)
+		return nil
+	}
 	host, _, err := net.SplitHostPort(*addr)
 	if err != nil || !net.ParseIP(host).IsLoopback() {
 		return fmt.Errorf("listen address must be a loopback IP and port")

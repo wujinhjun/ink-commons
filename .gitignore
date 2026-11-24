@@ -8,5 +8,5 @@
 /state.sqlite3*
 /state.json.pre-sqlite.bak
 
-__pycache__/
-*.pyc
+/bin/
+/dist/

@@ -5,7 +5,8 @@
 - [Adapter HTTP v1 契约](adapter-http-v1.md)
 - [GitHub 凭据与合入契约](github-contracts.md)
 - [执行生命周期与可靠执行端](execution.md)：task/attempt、Monitor 协议、执行账本与恢复边界。
-- [macOS 部署与恢复](../deploy/macos/README.md)：指定版本构建、launchd 激活、校验及失败回滚。
+- [systemd 与 launchd 服务模板](../deploy/README.md)
+- [单实例切换检查清单](migration.md)
 
 ## 流程图
 

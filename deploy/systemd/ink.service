@@ -1,0 +1,21 @@
+[Unit]
+Description=Ink Commons daemon
+After=network.target
+
+[Service]
+Type=simple
+User=INK_SERVICE_USER
+Group=INK_SERVICE_GROUP
+EnvironmentFile=/path/to/ink/daemon.env
+StateDirectory=ink-commons
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/path/to/bin/ink serve --config /path/to/ink/config.json --data %S/ink-commons
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

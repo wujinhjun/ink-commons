@@ -22,9 +22,9 @@
 
 ## 重建启动环境
 
-- 为目标服务用户安装 GitHub 客户端或包装器，更新 `github_command` 和需要的 `github_merger_command` 绝对路径。配置了 reader 摘要时，用目标可执行文件的已批准摘要更新 `github_command_sha256`。专用 merger 必须设置其已批准的 `github_merger_command_sha256`。使用 GitHub App 时，在目标安装中核对 reader、reviewer 和适用的 merger 身份及对受管仓库的权限。使用自动升级时也验证 reader 能读取发布仓库。参数与身份模式见 [GitHub CLI 适配](configuration.md#github-cli-适配) 和 [自动合入身份](../README.md#自动合入身份)。
+- 为目标服务用户安装 GitHub 客户端或包装器，更新 `github_command` 和需要的 `github_merger_command` 绝对路径。配置了 reader 摘要时，用目标可执行文件的已批准摘要更新 `github_command_sha256`。专用 merger 必须设置其已批准的 `github_merger_command_sha256`。使用 GitHub App 时，在目标安装中核对 reader、reviewer 和适用的 merger 身份及对受管仓库的权限。参数与身份模式见 [GitHub CLI 适配](configuration.md#github-cli-适配) 和 [自动合入身份](../README.md#自动合入身份)。
 - 将旧 `cc_connect_url`、`http_provider_url` 和 `http_provider_execution` 转为 [具名 `providers`](adapters.md)。为保留已有路由，可沿用原 provider 名称。旧 cc-connect webhook 配置和 Discord 凭据放入独立 Adapter 环境，daemon 只持有对应的 Adapter Bearer 凭据。旧托管 HTTP 服务需要实现 [只读准入声明](adapter-http-v1.md#managed-admission) 后才能启用 `managed`。
-- 按目标平台准备服务。macOS 部署可指定发布仓库和 LaunchDaemon 的工具搜索路径。接续既有 PR 时，先暂存发布包，按下节核查后再激活。参见 [macOS 部署与恢复](../deploy/macos/README.md)。
+- 按目标平台准备服务，参见 [systemd 与 launchd 服务模板](../deploy/README.md)。接续既有 PR 时，先准备目标二进制与环境文件，按下节核查后再启动正式服务。
 
 ## 核对运行期配置和在途任务
 
@@ -34,7 +34,7 @@
 ink serve --config /private/ink/config.json --data /private/ink/state --config-only
 ```
 
-macOS 可以用 `manage.py stage` 暂存发布包，确保 LaunchDaemon 已停止，再以服务用户用暂存时的 Python 在前台运行该版本目录中的 `runtime.py --config-only`。这个入口会加载部署凭据。下方的 `INK_DATA_DIR` 应设为暂存版本 `deployment.json` 中的 `data`。
+在服务停止后，使用目标服务的配置和凭据执行上述命令。
 
 在另一个终端用同一服务用户操作，并让本地 CLI 指向目标状态目录。以下命令依次查看全局配置、仓库显式覆盖、仓库最终配置和 PR 最终配置。将 `example/project` 和 PR 编号替换成待迁移的对象。
 
@@ -65,7 +65,7 @@ ink review --github-login 'reviewer[bot]' --provider cc-connect --target new-rev
 
 **放行条件**。确认每个恢复的工作项可以继续使用已核对的路由，或已经改派到可用的新路由。只要首轮轮询仍可能向待停用或未经核对的旧项目发出唤醒或重试，就保持轮询关闭。
 
-满足放行条件后先停止核查进程，再省略 `-config-only` 启动正式服务。macOS 停止前台核查进程后，用 `manage.py activate` 激活暂存版本。正常激活会在验证后自动创建 `enabled` 并开始轮询。
+满足放行条件后先停止核查进程，再用服务管理器启动省略 `--config-only` 的正式服务。如果配置了 `--poll-gate`，在满足放行条件后创建门控文件。
 
 ## 重建用户级集成
 
