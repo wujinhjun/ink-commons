@@ -36,6 +36,7 @@ func (c *AutoMergeConfig) Validate() error {
 }
 
 type AutoMergeRun struct {
+	preflight           *mergePreflight
 	RequestID           string    `json:"request_id,omitempty"`
 	ReuseReaderIdentity bool      `json:"reuse_reader_identity,omitempty"`
 	SHA                 string    `json:"sha"`
@@ -123,7 +124,7 @@ func (u upstream) checksReady(ctx context.Context, repo, sha string) (bool, erro
 			return false, err
 		}
 		if runs.CheckRuns == nil {
-			return false, fmt.Errorf("missing check-run list")
+			return false, diagnosticError("missing check-run list")
 		}
 		for _, r := range runs.CheckRuns {
 			if r.Status != "completed" {
@@ -139,7 +140,7 @@ func (u upstream) checksReady(ctx context.Context, repo, sha string) (bool, erro
 			return true, nil
 		}
 	}
-	return false, fmt.Errorf("too many check-run pages")
+	return false, diagnosticError("too many check-run pages")
 }
 
 func (u upstream) merge(ctx context.Context, repo string, number int, sha, method string) (string, error) {
@@ -156,13 +157,18 @@ func (u upstream) merge(ctx context.Context, repo string, number int, sha, metho
 		return "", err
 	}
 	if !result.Merged || !validSHA(result.SHA) {
-		return "", fmt.Errorf("merge outcome not confirmed")
+		return "", diagnosticError("merge outcome not confirmed")
 	}
 	return result.SHA, nil
 }
 
 // 合入账本与完成通知一起持久化；预留或终态记录会阻止重复 merge，
 // 结果不明的外部写入不重放。
+type mergePreflight struct {
+	version        uint64
+	policyRevision int64
+}
+
 func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun, reserve bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,6 +178,16 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 	}
 	if w == nil {
 		return false, nil
+	}
+	var effective EffectiveConfig
+	if reserve || (run.preflight != nil && run.UpdatedAt.IsZero()) {
+		effective, err = s.store.effectiveConfig(repo.Repo)
+		if err != nil {
+			return false, err
+		}
+		if run.preflight != nil && (w.Version != run.preflight.version || w.Pull.Head.SHA != run.SHA || effective.Revision != run.preflight.policyRevision) {
+			return false, nil
+		}
 	}
 	// Preflight may not overwrite an in-flight write. A response tied to the
 	// exact reservation can release it after a definitive rejection.
@@ -194,8 +210,8 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 		if w.handoffMergeBlocked() || (w.Task != nil && w.Task.ConflictBase != nil) {
 			return false, nil
 		}
-		current, ok := s.repo(repo.Repo)
-		if !ok || current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method ||
+		current := effective.Repository
+		if current.AutoMerge == nil || !current.AutoMerge.Enabled || current.AutoMerge.method() != run.Method ||
 			current.AutoMerge.ReuseReaderIdentity != run.ReuseReaderIdentity || w.Phase != "approved" || w.Pull.Head.SHA != run.SHA || !strings.EqualFold(w.Reviewer.GitHubLogin, run.Reviewer) {
 			return false, nil
 		}
@@ -203,9 +219,14 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 		if err != nil || sameAppCommand(w.Reviewer.GitHubCommand, merger.command) {
 			return false, nil
 		}
+		// Gate the new merge on a durable receipt, so a write failure
+		// cannot lose the hook when GitHub closes this PR.
+		if current.PostApproval != nil && !w.hasApprovalReceipt(run.SHA, run.ReviewID) {
+			return false, diagnosticError("approval hook event is not reserved for the current approval")
+		}
 	}
 	if !reserve || run.UpdatedAt.IsZero() {
-		run.UpdatedAt = time.Now()
+		run.UpdatedAt = s.now()
 	}
 	found := false
 	for i := range w.AutoMerges {
@@ -221,7 +242,7 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 	if run.State == "merged" {
 		s.reserveMergedNotification(w, repo, run)
 	}
-	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(w, s.now())
 	return true, s.store.saveWork(w)
 }
 
@@ -235,23 +256,29 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		s.mu.Unlock()
 		return err
 	}
-	if w == nil {
+	if w == nil || !matchesObservation(ctx, w) {
 		s.mu.Unlock()
 		return nil
 	}
+	effective, err := s.store.effectiveConfig(repo.Repo)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	repo = effective.Repository
 	// Reconcile ambiguous responses using GitHub observations even if the switch
 	// has subsequently been disabled. Never infer failure from a lost response.
 	mergedBefore := make(map[string]bool)
 	for _, run := range w.AutoMerges {
 		mergedBefore[run.SHA] = run.State == "merged"
 	}
-	if reconcileClosedAutoMerges(w, time.Now()) {
+	if reconcileClosedAutoMerges(w, s.now()) {
 		for _, run := range w.AutoMerges {
 			if run.State == "merged" && !mergedBefore[run.SHA] {
 				s.reserveMergedNotification(w, repo, run)
 			}
 		}
-		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		s.refreshWorkflow(w, s.now())
 		err := s.store.saveWork(w)
 		s.mu.Unlock()
 		return err
@@ -278,7 +305,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 			return nil
 		}
 	}
-	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting", ReuseReaderIdentity: repo.AutoMerge.ReuseReaderIdentity}
+	run := AutoMergeRun{preflight: &mergePreflight{version: w.Version, policyRevision: effective.Revision}, SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting", ReuseReaderIdentity: repo.AutoMerge.ReuseReaderIdentity}
 	version, observedPull, reviewerCommand := w.Version, w.Pull, w.Reviewer.GitHubCommand
 	confirmingConflict := w.MergeConflict != nil
 	trackingConflict := confirmingConflict || (w.Task != nil && w.Task.ConflictBase != nil)
@@ -291,6 +318,10 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		_, err := s.updateAutoMerge(repo, number, run, false)
 		return err
 	}
+	waitForRead := func(reason string, err error) error {
+		s.warnError(reason, err, "repo", repo.Repo, "number", number)
+		return wait(reason + ": " + redactedError(err))
+	}
 	var pull Pull
 	if _, _, err := s.up.gitHubJSON(ctx, http.MethodGet, path, "inspect", stackAPIVersion, nil, &pull); err != nil {
 		if confirmingConflict {
@@ -299,7 +330,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 				return err
 			}
 		}
-		return wait("cannot refresh PR before merge")
+		return waitForRead("cannot refresh PR before merge", err)
 	}
 	if pull.State != "open" || pull.Draft || pull.Head.SHA != run.SHA {
 		return wait("PR state or head changed; waiting for observation")
@@ -320,7 +351,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 					return resetErr
 				}
 			}
-			return wait("cannot confirm mergeability against the current GitHub base ref")
+			return waitForRead("cannot confirm mergeability against the current GitHub base ref", err)
 		}
 	}
 	if trackingConflict || dirty {
@@ -348,7 +379,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	for _, sha := range refs {
 		ready, err := s.up.checksReady(ctx, repo.Repo, sha)
 		if err != nil {
-			return wait("cannot read checks; automatic merge is blocked: " + err.Error())
+			return waitForRead("cannot read checks; automatic merge is blocked", err)
 		}
 		if !ready {
 			return wait("waiting for checks to pass")
@@ -356,7 +387,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	reviews, err := listPages[Review](ctx, s.up, path+"/reviews")
 	if err != nil {
-		return wait("cannot refresh reviews before merge")
+		return waitForRead("cannot refresh reviews before merge", err)
 	}
 	approval := approvedReview(mergeReviews(nil, reviews), run.SHA, run.Reviewer)
 	if approval == nil {
@@ -365,14 +396,14 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	run.ReviewID = approval.ID
 	var fresh Pull
 	if _, _, err := s.up.gitHubJSON(ctx, http.MethodGet, path, "inspect", stackAPIVersion, nil, &fresh); err != nil {
-		return wait("cannot revalidate PR before merge")
+		return waitForRead("cannot revalidate PR before merge", err)
 	}
 	if fresh.State != "open" || fresh.Draft || fresh.Head.SHA != run.SHA || fresh.Base != pull.Base || !sameStack(fresh.Stack, pull.Stack) || fresh.MergeCommitSHA != pull.MergeCommitSHA || fresh.Mergeable == nil || !*fresh.Mergeable || fresh.MergeableState != "clean" {
 		return wait("PR changed during preflight")
 	}
 	run.State = "unknown"
 	run.Reason = "merge request reserved; outcome not yet confirmed"
-	run.UpdatedAt = time.Now()
+	run.UpdatedAt = s.now()
 	reserved, err := s.updateAutoMerge(repo, number, run, true)
 	if err != nil || !reserved {
 		return err
@@ -381,6 +412,9 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		return s.startStackMerge(ctx, repo, number, run, mergeUpstream)
 	}
 	mergeSHA, err := mergeUpstream.merge(ctx, repo.Repo, number, run.SHA, run.Method)
+	if err != nil {
+		s.warnError("automatic merge request failed", err, "repo", repo.Repo, "number", number)
+	}
 	switch {
 	case errors.Is(err, errAppCommandNotStarted):
 		run.State = "waiting"

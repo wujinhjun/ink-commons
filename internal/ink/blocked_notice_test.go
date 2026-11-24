@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -150,4 +151,19 @@ func TestBlockedNoticeKeepsClaimedTaskDestinationAfterDeveloperReassignment(t *t
 			}
 		})
 	}
+}
+
+func (s *Service) reconcileBlockedNotices(ctx context.Context) error {
+	s.mu.Lock()
+	ids, err := statedb.New(s.store.db).ListBlockedNoticePending(ctx)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := s.reconcileBlockedWork(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -21,6 +21,8 @@ import (
 // DaemonConfig contains only static process/provider settings. Mutable policy
 // lives in SQLite; optional policy settings seed a newly initialized database.
 type DaemonConfig struct {
+	LogLevel            string   `json:"log_level,omitempty"`
+	LogFormat           string   `json:"log_format,omitempty"`
 	GitHubCommand       string   `json:"github_command,omitempty"`
 	GitHubCommandSHA256 string   `json:"github_command_sha256,omitempty"`
 	GitHubMergerCommand string   `json:"github_merger_command,omitempty"`
@@ -53,14 +55,19 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		return cfg, nil, err
 	}
 	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err != io.EOF {
+	switch err := decoder.Decode(&extra); err {
+	case io.EOF:
+	case nil:
 		return cfg, nil, fmt.Errorf("expected one configuration object")
+	default:
+		return cfg, nil, err
 	}
 	cfg.Reliability = file.Reliability
 	if err := cfg.Reliability.Validate(); err != nil {
 		return cfg, nil, err
 	}
 	cfg.PollSeconds = file.PollSeconds
+	cfg.LogLevel, cfg.LogFormat = file.LogLevel, file.LogFormat
 	cfg.WorkspaceFullSlots = file.WorkspaceFullSlots
 	cfg.GitHubCommand = file.GitHubCommand
 	cfg.GitHubCommandSHA256 = file.GitHubCommandSHA256

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Existing workflow regressions change central policy through this helper
@@ -188,7 +189,7 @@ func TestTaskConfigFreezesFirstDispatchAndRetryButRefreshesNewSHA(t *testing.T) 
 	st, _ := loadFixture(s.store)
 	w := st.Work[key(repo.Repo, 42)]
 	w.Linked = true
-	w.derive()
+	w.derive(time.Now())
 	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
@@ -262,10 +263,10 @@ func TestEffectivePRConfigShowsExplicitSources(t *testing.T) {
 	}
 	st, _ := loadFixture(s.store)
 	w := st.Work[key(repo.Repo, 42)]
-	if err := applyChange(w, "link", workChange{GitHubLogin: "dev"}); err != nil {
+	if err := applyChange(w, "link", workChange{GitHubLogin: "dev"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyChange(w, "assign", workChange{Role: "reviewer", GitHubLogin: "explicit"}); err != nil {
+	if err := applyChange(w, "assign", workChange{Role: "reviewer", GitHubLogin: "explicit"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := saveFixture(s.store, st); err != nil {
@@ -341,7 +342,7 @@ func TestEqualReviewerAssignmentStillPinsPROverride(t *testing.T) {
 	}
 	st, _ := loadFixture(s.store)
 	w := st.Work[key(repo.Repo, 42)]
-	if err := applyChange(w, "link", workChange{GitHubLogin: "dev"}); err != nil {
+	if err := applyChange(w, "link", workChange{GitHubLogin: "dev"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	taskID := w.Task.ID

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegistrationPersistsAndPollsWithoutRestart(t *testing.T) {
@@ -98,7 +99,7 @@ func TestApprovalHookFilteringDedupRestartAndNewSHA(t *testing.T) {
 		if err := s.observe(repo, pull, rs); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.postApproval(context.Background(), repo, 42); err != nil {
+		if err := testRunApproval(s, repo, 42); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -181,7 +182,7 @@ func TestApprovalHookFailureNotReplayed(t *testing.T) {
 			review := Review{ID: 1, State: "APPROVED", SHA: pull.Head.SHA}
 			review.User.Login = "reviewer"
 			work := &Work{Repo: repo.Repo, Pull: pull, Linked: true, Reviewer: Assignee{GitHubLogin: "reviewer"}, Reviews: []Review{review}}
-			work.derive()
+			work.derive(time.Now())
 			if mode == "unknown" {
 				work.Approvals = []ApprovalRun{{ApprovalEvent: ApprovalEvent{SHA: pull.Head.SHA}, State: "unknown"}}
 			}
@@ -191,7 +192,7 @@ func TestApprovalHookFailureNotReplayed(t *testing.T) {
 				t.Fatal(err)
 			}
 			for i := 0; i < 2; i++ {
-				if err := s.postApproval(context.Background(), repo, 42); err != nil {
+				if err := testRunApproval(s, repo, 42); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -206,4 +207,13 @@ func TestApprovalHookFailureNotReplayed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Other tests exercise queued hooks through the upstream poll path.
+func testRunApproval(s *Service, repo Repository, number int) error {
+	candidate, err := s.approvalCandidate(context.Background(), repo, number)
+	if err != nil || candidate == nil {
+		return err
+	}
+	return s.runApproval(context.Background(), *candidate)
 }

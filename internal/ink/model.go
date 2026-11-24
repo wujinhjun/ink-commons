@@ -85,20 +85,22 @@ type Attempt struct {
 }
 
 type Task struct {
-	ConflictBase   *PullBase           `json:"conflict_base,omitempty"`
-	ConfigSnapshot *TaskConfigSnapshot `json:"config_snapshot,omitempty"`
-	Handoff        *TaskHandoff        `json:"handoff,omitempty"`
-	CreatedAt      time.Time           `json:"created_at,omitempty"`
-	ID             string              `json:"task_id,omitempty"`
-	Runs           []Attempt           `json:"runs,omitempty"`
-	RetryAt        time.Time           `json:"retry_at,omitempty"`
-	Role           string              `json:"role"`
-	SHA            string              `json:"sha"`
-	ReviewID       int64               `json:"review_id,omitempty"`
-	ReviewURL      string              `json:"review_url,omitempty"`
-	Delivery       string              `json:"delivery"`
-	Error          string              `json:"error,omitempty"`
-	Attempts       int                 `json:"attempts"`
+	AttemptsExhausted  bool                `json:"attempts_exhausted,omitempty"`
+	PreparationInvalid bool                `json:"preparation_invalid,omitempty"`
+	ConflictBase       *PullBase           `json:"conflict_base,omitempty"`
+	ConfigSnapshot     *TaskConfigSnapshot `json:"config_snapshot,omitempty"`
+	Handoff            *TaskHandoff        `json:"handoff,omitempty"`
+	CreatedAt          time.Time           `json:"created_at,omitempty"`
+	ID                 string              `json:"task_id,omitempty"`
+	Runs               []Attempt           `json:"runs,omitempty"`
+	RetryAt            time.Time           `json:"retry_at,omitempty"`
+	Role               string              `json:"role"`
+	SHA                string              `json:"sha"`
+	ReviewID           int64               `json:"review_id,omitempty"`
+	ReviewURL          string              `json:"review_url,omitempty"`
+	Delivery           string              `json:"delivery"`
+	Error              string              `json:"error,omitempty"`
+	Attempts           int                 `json:"attempts"`
 }
 
 type Alert struct {
@@ -139,7 +141,7 @@ type Work struct {
 	Reviews           []Review            `json:"reviews,omitempty"`
 }
 
-func (w *Work) derive() {
+func (w *Work) derive(now time.Time) {
 	w.retireStaleConflictTasks()
 	if w.Pull.State == "closed" {
 		w.Phase = "closed"
@@ -168,7 +170,7 @@ func (w *Work) derive() {
 	}
 	if latest == nil {
 		w.Phase = "review_pending"
-		w.setTask(Task{Role: "reviewer", SHA: w.Pull.Head.SHA}, w.Reviewer)
+		w.setTask(Task{Role: "reviewer", SHA: w.Pull.Head.SHA}, w.Reviewer, now)
 		return
 	}
 	if latest.State == "APPROVED" {
@@ -179,10 +181,10 @@ func (w *Work) derive() {
 		return
 	}
 	w.Phase = "changes_requested"
-	w.setTask(Task{Role: "developer", SHA: w.Pull.Head.SHA, ReviewID: latest.ID, ReviewURL: latest.URL}, w.Developer)
+	w.setTask(Task{Role: "developer", SHA: w.Pull.Head.SHA, ReviewID: latest.ID, ReviewURL: latest.URL}, w.Developer, now)
 }
 
-func (w *Work) setTask(task Task, assignee Assignee) {
+func (w *Work) setTask(task Task, assignee Assignee, now time.Time) {
 	if w.Task != nil && w.Task.Role == task.Role && w.Task.SHA == task.SHA && w.Task.ReviewID == task.ReviewID &&
 		(w.Task.ConflictBase == nil) == (task.ConflictBase == nil) {
 		return
@@ -191,7 +193,7 @@ func (w *Work) setTask(task Task, assignee Assignee) {
 	if assignee.Route != nil {
 		task.Delivery = "pending"
 	}
-	task.CreatedAt = time.Now()
+	task.CreatedAt = now
 	task.ID = uuid.NewString()
 	if w.TaskMode == "cooperative" {
 		task.Handoff = &TaskHandoff{State: "pending", Assignee: assignee}

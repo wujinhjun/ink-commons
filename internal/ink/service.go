@@ -5,7 +5,8 @@ package ink
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -15,10 +16,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/wujinhjun/ink-commons/internal/execution"
 	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
-	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 type Service struct {
+	now                func() time.Time
+	log                *slog.Logger
+	pollMu             sync.Mutex
+	pullLocks          pullLocks
+	hooks              approvalQueue
 	store              *stateStore
 	workspaceMu        sync.Mutex
 	workspaceRoot      string
@@ -32,6 +37,13 @@ type Service struct {
 }
 
 func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
+	logger, err := newLogger(os.Stderr, config.LogLevel, config.LogFormat)
+	if err != nil {
+		return nil, err
+	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
 	if config.WorkspaceFullSlots < 0 || config.WorkspaceFullSlots > 32 {
 		return nil, fmt.Errorf("workspace_full_slots must be between 0 and 32")
 	}
@@ -71,11 +83,16 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 	if absolute, err := filepath.Abs(stateDir); err == nil {
 		stateDir = absolute
 	}
-	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool),
+	return &Service{now: config.Now, log: logger, store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool),
 		workspaceRoot: filepath.Join(stateDir, "workspaces"), fullWorkspaceSlots: config.WorkspaceFullSlots}, nil
 }
 
-func (s *Service) Close() error { return s.store.db.Close() }
+func (s *Service) Close() error {
+	s.stopApprovals()
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+	return s.store.db.Close()
+}
 
 // Caller holds s.mu. All repository policy is resolved from central SQLite.
 func (s *Service) repo(name string) (Repository, bool) {
@@ -88,15 +105,20 @@ func (s *Service) repositories() []Repository {
 	defer s.mu.Unlock()
 	repos, err := s.runtimeRepositories()
 	if err != nil {
-		log.Printf("load repository configuration: %v", err)
+		s.warnError("load repository configuration", err)
 	}
 	return repos
 }
 
 func (s *Service) recordPushes(pushes []Push, now time.Time) error {
+	records, err := s.store.configRecords()
+	if err != nil {
+		return err
+	}
+	registered := recordMap(records)
 	accepted := make([]Push, 0, len(pushes))
 	for _, p := range pushes {
-		if _, ok := s.repo(p.Repo); ok {
+		if _, ok := registered[p.Repo]; ok && p.Repo != "" {
 			p.At = now
 			accepted = append(accepted, p)
 		}
@@ -106,94 +128,6 @@ func (s *Service) recordPushes(pushes []Push, now time.Time) error {
 
 func key(repo string, number int) string { return fmt.Sprintf("%s#%d", repo, number) }
 
-func (s *Service) Poll(ctx context.Context) {
-	defer func() { s.lastPoll.Store(time.Now().Unix()) }()
-	if err := statedb.New(s.store.db).PrunePushes(ctx, pushCutoff(time.Now())); err != nil {
-		log.Printf("prune expired push observations: %v", err)
-	}
-	if err := s.reconcileBlockedNotices(ctx); err != nil {
-		log.Printf("blocked task notifications: %v", err)
-	}
-	if err := s.reconcileHandoffs(ctx); err != nil {
-		log.Printf("handoff verification: %v", err)
-	}
-	if err := s.reconcileExecutions(ctx); err != nil {
-		log.Printf("execution recovery: %v", err)
-	}
-	for _, repo := range s.repositories() {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := s.pollRepo(ctx, repo); err != nil {
-			log.Printf("sync %s: %v", repo.Repo, err)
-		}
-	}
-}
-
-func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
-	path := "/repos/" + repo.Repo + "/pulls"
-	pulls, err := listPages[Pull](ctx, s.up, path+"?state=open")
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	pending, err := statedb.New(s.store.db).ListPollPending(ctx, repo.Repo)
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-
-	open := make(map[int]bool, len(pulls))
-	for _, pull := range pulls {
-		open[pull.Number] = true
-	}
-	for _, pendingNumber := range pending {
-		number := int(pendingNumber)
-		if open[number] {
-			continue
-		}
-		var pull Pull
-		_, err := s.up.gitHubGet(ctx, fmt.Sprintf("%s/%d", path, number), &pull)
-		if err != nil {
-			log.Printf("refresh %s: %v", key(repo.Repo, number), err)
-			continue
-		}
-		pulls = append(pulls, pull)
-	}
-	for _, pull := range pulls {
-		if pull.Number <= 0 || (pull.State != "closed" && (pull.State != "open" || !validSHA(pull.Head.SHA))) {
-			continue
-		}
-		var reviews []Review
-		if pull.State == "open" && !pull.Draft {
-			reviews, err = listPages[Review](ctx, s.up, fmt.Sprintf("%s/%d/reviews", path, pull.Number))
-			if err != nil {
-				log.Printf("reviews %s: %v", key(repo.Repo, pull.Number), err)
-				continue
-			}
-		}
-		if err := s.observe(repo, pull, reviews); err != nil {
-			return err
-		}
-		if err := s.notifyApproved(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-		if err := s.postApproval(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-		if err := s.autoMerge(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-		if err := s.notifyMerged(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-		if err := s.dispatch(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -201,6 +135,11 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	if err != nil {
 		return err
 	}
+	return s.saveObservation(repo, pull, reviews, work)
+}
+
+// Caller holds s.mu.
+func (s *Service) saveObservation(repo Repository, pull Pull, reviews []Review, work *Work) error {
 	if work == nil {
 		work = &Work{Repo: repo.Repo}
 	}
@@ -214,7 +153,7 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	repo = latest.Repository
 	s.refreshPendingConfig(work, repo)
 	if pull.State == "open" && !work.Linked {
-		origin, err := s.store.matchOrigin(pull, time.Now())
+		origin, err := s.store.matchOrigin(pull, s.now())
 		if err != nil {
 			return err
 		}
@@ -225,13 +164,13 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	if pull.State == "open" && !pull.Draft {
 		work.Reviews = mergeReviews(work.Reviews, reviews)
 	}
-	work.derive()
+	work.derive(s.now())
 	if work.Task != nil && work.Task.Delivery == "manual" && !taskStarted(work.Task) {
 		if err := s.freezeTaskConfig(work); err != nil {
 			return err
 		}
 	}
-	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(work, s.now())
 	return s.store.saveWork(work)
 }
 
@@ -255,33 +194,38 @@ func mergeReviews(previous, current []Review) []Review {
 	return current
 }
 
-func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Work, error) {
+func (s *Service) beginDelivery(ctx context.Context, id string, channelCheck reviewChannelCheck) (*Work, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	work, err := s.store.loadWork(id)
 	if err != nil {
 		return nil, err
 	}
+	if !matchesObservation(ctx, work) {
+		return nil, nil
+	}
 	if work != nil {
 		if err := s.preparePendingConfig(work); err != nil {
 			return nil, err
 		}
 	}
-	if work == nil || work.Task == nil || work.Task.Handoff != nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
+	if work == nil || work.Task == nil || work.Task.Handoff != nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || s.now().Before(work.Task.RetryAt) {
 		return nil, nil
 	}
 	// Missing provenance is a local configuration problem, not an unknown
 	// external execution. Reject it before reserving an attempt or session.
 	if err := s.validateReviewPreparation(work); err != nil {
+		work.Task.PreparationInvalid = true
 		work.Task.Error = "review preparation: " + err.Error()
-		work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		s.refreshWorkflow(work, s.now())
 		return nil, s.store.saveWork(work)
 	}
 
 	if current, err := channelCheck.result(s, work); !current || err != nil {
 		if err != nil {
+			work.Task.PreparationInvalid = true
 			work.Task.Error = "review preparation: " + err.Error()
-			work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+			s.refreshWorkflow(work, s.now())
 			return nil, s.store.saveWork(work)
 		}
 		return nil, nil
@@ -291,6 +235,7 @@ func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Wo
 		return nil, err
 	}
 
+	work.Task.PreparationInvalid = false
 	// Persist the attempt before making external requests. If the daemon restarts
 	// during delivery, the operator can inspect the unknown outcome before retrying.
 	work.Task.Delivery, work.Task.Error = "unknown", "delivery interrupted or in progress"
@@ -304,7 +249,7 @@ func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Wo
 	}
 	attemptID := uuid.NewString()
 	work.Task.RetryAt = time.Time{}
-	work.Task.Runs = append(work.Task.Runs, Attempt{ID: attemptID, Number: work.Task.Attempts, Route: *route, Request: deliveryFor(work, work.Task, attemptID, work.Task.Attempts), State: "unknown", CreatedAt: time.Now()})
+	work.Task.Runs = append(work.Task.Runs, Attempt{ID: attemptID, Number: work.Task.Attempts, Route: *route, Request: deliveryFor(work, work.Task, attemptID, work.Task.Attempts), State: "unknown", CreatedAt: s.now()})
 	if err := s.store.saveWork(work); err != nil {
 		return nil, err
 	}
@@ -340,7 +285,7 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 			}
 		}
 	}
-	live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(live, s.now())
 	return s.store.saveWork(live)
 }
 
@@ -353,10 +298,22 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 	if err != nil {
 		return err
 	}
+	if _, guarded := ctx.Value(observationKey{}).(prObservation); guarded {
+		live, err := s.store.loadWork(id)
+		if err != nil {
+			return err
+		}
+		if !matchesObservation(ctx, live) || live.Task == nil || live.Task.Delivery != "pending" {
+			return nil
+		}
+		if current, err := s.observedHeadCurrent(ctx); err != nil || !current {
+			return err
+		}
+	}
 	if handled, err := s.dispatchHandoff(ctx, id, channelCheck); handled || err != nil {
 		return err
 	}
-	work, err := s.beginDelivery(id, channelCheck)
+	work, err := s.beginDelivery(ctx, id, channelCheck)
 	if err != nil || work == nil {
 		return err
 	}
@@ -417,11 +374,14 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 		if err := s.saveDelivery(id, work); err != nil {
 			return err
 		}
+		if current, err := s.observedHeadCurrent(ctx); err != nil || !current {
+			return err
+		}
 	}
 	// Do not deliver a task superseded while its session was being allocated.
 	s.mu.Lock()
 	live, loadErr := s.store.loadWork(id)
-	current := loadErr == nil && live != nil && live.Task != nil && live.Task.ID == task.ID
+	current := loadErr == nil && live != nil && live.Task != nil && live.Task.ID == task.ID && matchesObservation(ctx, live)
 	s.mu.Unlock()
 	if loadErr != nil {
 		return loadErr

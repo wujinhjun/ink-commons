@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 // TaskHandoff is a cooperative business handoff, never an executor termination
@@ -195,7 +194,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 			fail(out, err)
 			return
 		}
-		h.State, h.ClaimHash, h.ClaimedAt = "claimed", hash, time.Now()
+		h.State, h.ClaimHash, h.ClaimedAt = "claimed", hash, s.now()
 		first = true
 	case "retry":
 		if h.ClaimHash != hash || h.ClaimHash == "" {
@@ -209,7 +208,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		h.State = "superseded"
 		if w.Task == t {
 			w.replaceTask(nil)
-			w.derive()
+			w.derive(s.now())
 		}
 		first = true
 	case "submit":
@@ -239,7 +238,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 				fail(out, apiError{400, "blocked handoff requires a reason and no result evidence"})
 				return
 			}
-			h.State, h.FinishedAt = "blocked", time.Now()
+			h.State, h.FinishedAt = "blocked", s.now()
 		} else if t.Role == "developer" {
 			if !validSHA(result.NewSHA) || result.NewSHA == t.SHA || result.ReviewID != 0 || result.Outcome != "" {
 				fail(out, apiError{400, "developer handoff requires a different valid new_sha"})
@@ -254,7 +253,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 			h.State = "submitted"
 		}
 		h.Submission = result
-		h.SubmittedAt = time.Now()
+		h.SubmittedAt = s.now()
 		h.Verification = "waiting for GitHub verification"
 		if h.State == "blocked" {
 			h.Verification = result.Reason
@@ -265,7 +264,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		fail(out, apiError{404, "expected claim or submit"})
 		return
 	}
-	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(w, s.now())
 	if err := s.store.saveWork(w); err != nil {
 		fail(out, err)
 		return
@@ -276,29 +275,21 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 // Verify outside the state lock. On return, version and claim comparisons fence
 // observations/assignments that raced with the network request. Completion,
 // successor creation and its pending wake record share one SQLite transaction.
-func (s *Service) reconcileHandoffs(ctx context.Context) error {
-	s.mu.Lock()
-	ids, err := statedb.New(s.store.db).ListHandoffPending(ctx)
-	s.mu.Unlock()
+func (s *Service) reconcileHandoffWork(ctx context.Context, id string) error {
+	w, err := s.store.loadWork(id)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		w, err := s.store.loadWork(id)
-		if err != nil {
-			return err
-		}
-		if w == nil {
-			continue
-		}
-		for _, t := range w.executionTasks() {
-			if h := t.Handoff; h != nil && h.State == "submitted" {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				if err := s.verifyHandoff(ctx, w, t); err != nil {
-					return err
-				}
+	if w == nil {
+		return nil
+	}
+	for _, t := range w.executionTasks() {
+		if h := t.Handoff; h != nil && h.State == "submitted" {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err := s.verifyHandoff(ctx, w, t); err != nil {
+				return err
 			}
 		}
 	}
@@ -366,16 +357,16 @@ func (s *Service) verifyHandoff(ctx context.Context, snapshot *Work, task *Task)
 		// complete work on behalf of a newer task. Evidence belongs to this task.
 		h.State = state
 		if state != "submitted" {
-			h.FinishedAt = time.Now()
+			h.FinishedAt = s.now()
 		}
 		w.Pull = pull
 		if task.Role == "reviewer" {
 			w.Reviews = mergeReviews(w.Reviews, reviews)
 		}
 		w.Version++
-		w.derive()
+		w.derive(s.now())
 	}
-	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(w, s.now())
 	return s.store.saveWork(w)
 }
 

@@ -60,14 +60,14 @@ func openSQLite(path string) (*sql.DB, error) {
 func openStore(path string) (*stateStore, error) {
 	db, err := openSQLite(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("state database missing at %s: check the data directory or restore a SQLite backup; for a new instance run ink state init", path)
+		return nil, errors.New("state database missing: check the data directory or restore a SQLite backup; for a new instance run ink state init")
 	}
 	if err != nil {
 		return nil, err
 	}
 	if err := checkSchema(db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("open state database %s: %w", path, err)
+		return nil, fmt.Errorf("open state database: %w", err)
 	}
 	return &stateStore{db: db}, nil
 }
@@ -84,7 +84,7 @@ func checkSchema(db *sql.DB) error {
 	for _, table := range []string{"work_items", "work_tasks", "work_notifications", "pushes", "runtime_config", "workspace_allocations"} {
 		rows, err := db.Query("SELECT * FROM " + table + " LIMIT 0")
 		if err != nil {
-			return err
+			return fmt.Errorf("verify state table %s: %w", table, err)
 		}
 		if err := rows.Close(); err != nil {
 			return err
@@ -96,7 +96,7 @@ func checkSchema(db *sql.DB) error {
 func checkStateDir(dir string) error {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("state directory missing at %s: check the configured path or run ink state init for a new instance", dir)
+		return errors.New("state directory missing: check the configured path or run ink state init for a new instance")
 	}
 	if err != nil {
 		return err

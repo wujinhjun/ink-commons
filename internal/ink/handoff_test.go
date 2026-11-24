@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -67,7 +68,7 @@ func newHandoffFixture(t *testing.T) *handoffFixture {
 	st, _ := loadFixture(s.store)
 	w := &Work{Repo: f.repo.Repo, TaskMode: "cooperative", Linked: true, Pull: f.pull, Reviewer: Assignee{GitHubLogin: "reviewer", Route: f.repo.ReviewerRoute}, Developer: Assignee{GitHubLogin: "developer", Route: &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}}}
 	w.DeveloperOverride = cloneAssignee(w.Developer)
-	w.derive()
+	w.derive(time.Now())
 	st.Work[key(f.repo.Repo, 42)] = w
 	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
@@ -670,7 +671,7 @@ func TestReassignmentPreservesCooperativeDeliveryIdentity(t *testing.T) {
 			f.claim(t, task, claimA, 200)
 			st, _ = loadFixture(f.s.store)
 			w = st.Work[key(f.repo.Repo, 42)]
-			if err := applyChange(w, "assign", workChange{Role: role, GitHubLogin: "replacement", GitHubCommand: "/replacement-command", Route: &execution.Route{Provider: "test", Target: "replacement", Session: "replacement-session"}}); err != nil {
+			if err := applyChange(w, "assign", workChange{Role: role, GitHubLogin: "replacement", GitHubCommand: "/replacement-command", Route: &execution.Route{Provider: "test", Target: "replacement", Session: "replacement-session"}}, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			if err := saveFixture(f.s.store, st); err != nil {
@@ -707,4 +708,19 @@ func TestReassignmentPreservesCooperativeDeliveryIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (s *Service) reconcileHandoffs(ctx context.Context) error {
+	s.mu.Lock()
+	ids, err := statedb.New(s.store.db).ListHandoffPending(ctx)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := s.reconcileHandoffWork(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

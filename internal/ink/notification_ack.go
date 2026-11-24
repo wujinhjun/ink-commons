@@ -57,13 +57,13 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 						old := &work.Notifications[j]
 						if old.Event == "review_approved" && old.SHA == n.SHA && (old.State == "unknown" || old.State == "awaiting_ack") {
 							old.State = "superseded"
-							old.FinishedAt = time.Now()
+							old.FinishedAt = s.now()
 							old.RetryAt = time.Time{}
 						}
 					}
 				}
-				n.FinishedAt, n.RetryAt, n.Error = time.Now(), time.Time{}, ""
-				work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+				n.FinishedAt, n.RetryAt, n.Error = s.now(), time.Time{}, ""
+				s.refreshWorkflow(work, s.now())
 				if err := s.store.saveWork(work); err != nil {
 					fail(w, err)
 					return

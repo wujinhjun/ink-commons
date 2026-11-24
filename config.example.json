@@ -1,3 +1,5 @@
 {
-  "poll_seconds": 60
+  "poll_seconds": 60,
+  "log_level": "info",
+  "log_format": "text"
 }

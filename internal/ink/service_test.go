@@ -133,7 +133,7 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 		if err := s.reconcileExecutions(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.pollRepo(context.Background(), repo); err != nil {
+		if err := pollRepoForTest(context.Background(), s, repo); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -214,4 +214,17 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 	if executor.prepared != 1 || len(executor.deliveries) != 3 {
 		t.Fatal("manual assignments triggered bot deliveries")
 	}
+}
+
+func pollRepoForTest(ctx context.Context, s *Service, repo Repository) error {
+	var syncErr error
+	listErr := s.pollRepo(ctx, repo, nil, func(job pollJob) {
+		if err := s.pollPull(ctx, job); err != nil && syncErr == nil {
+			syncErr = err
+		}
+	})
+	if listErr != nil {
+		return listErr
+	}
+	return syncErr
 }
