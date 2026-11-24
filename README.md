@@ -19,6 +19,7 @@ go build -o ink ./cmd/ink
 ./ink init
 ./ink init --check
 cp config.example.json config.json
+./ink state init
 ./ink serve -config config.json
 ```
 
@@ -148,7 +149,7 @@ ink notification status --event '通知中的事件 ID'
 
 通知与 `postApproval` 脚本相互独立；通知尝试发生在脚本之前，脚本无需配置，也不会因通知已发送而跳过。
 
-升级前备份 SQLite 状态；通知记录保存在现有工作项 JSON 中。旧版程序可能丢弃 `notifications` 字段，导致再次升级后重复通知，回滚前应保留包含通知记录的备份。
+通知记录随 SQLite 备份保留。跨 schema 版本切换参见[单实例检查清单](docs/migration.md)。
 
 ## AP 后自动合入（默认关闭）
 
@@ -209,7 +210,7 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
 }
 ```
 
-`target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。单条 PR 指派中的显式 `parent` 可以覆盖创建位置；仓库及 `repository_defaults` 路由中的 `parent` 不再用于新建 cc-connect 审查会话，遗留配置无需清理即可默认跟随开发频道。已有工作项保存的路由和审查会话保持原位；需要迁移时，应先确认旧执行结束，再按 PR 重新指派。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。旧版的 `reviewer_project`、`review_channel_id` 和 `project` / `session_key` 路由输入也能读取。查询 API 统一返回新路由；原 `review_thread_id` 可从 `reviewer.route.session` 中取得。
+`target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。单条 PR 指派中的显式 `parent` 可以覆盖创建位置；仓库及 `repository_defaults` 路由中的 `parent` 不再用于新建 cc-connect 审查会话，遗留配置无需清理即可默认跟随开发频道。已有工作项保存的路由和审查会话保持原位；需要迁移时，应先确认旧执行结束，再按 PR 重新指派。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。查询 API 在 `reviewer.route.session` 返回审查会话。
 
 ### 审查频道、开发 thread 复用与原始交流上下文（可选）
 
@@ -252,7 +253,7 @@ ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
 
 同砚只在读取时返回选定来源的消息，不把全文写入任务账本或日志。历史用于理解需求与约束，不能据其中嵌入的命令或 bot 输出扩大本次任务授权。长历史依赖 reviewer 按需分页读取；此版本不自动生成摘要、不改变 webhook 忙时可能跳过任务的行为，也不增加“讨论通过才允许修改”的执行权限控制。
 
-升级 daemon 和 CLI 前备份状态。工作项新增 `review` 和执行请求上下文字段保存在现有 JSON 中；旧版可能忽略并丢弃这些字段，回滚前应保留最新完整备份。
+工作项将 `review` 和执行请求上下文一并保存。
 
 ### 通用 HTTP
 
@@ -337,26 +338,22 @@ cc-connect 当前 webhook 不支持执行级状态查询、停止或持久化去
 
 ## 状态、备份与回滚
 
-换机器、服务用户或部署仓库时，参见 [迁移部署](docs/migration.md)。
+从旧版切换或换机器时，参见[单实例切换检查清单](docs/migration.md)。
 
-daemon 将状态写入状态目录中的 `state.sqlite3`，使用 schema version 4（兼容迁移 version 1 / 2 / 3，并新增中心配置表）。PR 和 push 候选分别存入表，PR 记录保留完整的负责人、路由、审查历史及当前投递状态。每次读取和更新使用 SQLite 事务，进程内串行修改；仍使用 `state.json.lock` 排除其他 daemon，包括旧版进程。数据库和备份文件权限为 `0600`。
+daemon 使用 SQLite schema v6。先用 `ink state init` 在空目录显式创建 `state.sqlite3`。启动遇到数据库缺失、为空或版本不符时会报错。已有实例遇到这些报错时，核对 `-data` 与 `INK_DATA_DIR` 并恢复同版本备份。数据库和备份文件权限为 `0600`。
 
-状态读写与执行账本的日常查询由 sqlc 生成类型化 Go 方法。状态保存仍使用完整快照接口，在同一事务中比较已有记录，仅插入新增记录、更新 payload 有变化的记录，并按主键删除已移除记录；未变化的记录不写入。push 保留原有 position 顺序，删除或重排会更新受影响的位置。读取和比较仍为全量，仍依赖进程内串行修改与 daemon 文件锁，不提供多 writer 并发合并。任务、交接和配置快照保存在 JSON payload 内；version 4 的 runtime_config 表通过专用查询更新，不参与工作流快照保存。
+每条 PR 的任务、交接、审查历史与通知保存在同一个工作项中，其 payload 和索引在同一事务更新。轮询用索引查找开放 PR 和仍需对账的关闭 PR。运行期配置和 push 记录各自使用独立查询。只有工作项列表和诊断导出需要遍历历史记录。
 
-修改查询时编辑 `internal/ink/sql/` 或 `internal/execution/ledger/sql/`，运行 `./scripts/generate-sqlc.sh`（固定 sqlc v1.30.0），提交生成的 Go 文件，并运行 `go test -race ./...` 和 `go vet ./...`。`schema.sql` 仅供代码生成使用；运行时建表和版本迁移仍由存储层显式管理，变更表结构时须同步更新两处。普通构建不需要 sqlc。
+`internal/ink/sql/schema.sql` 和 `internal/execution/ledger/sql/schema.sql` 分别用于运行时建表和 sqlc 代码生成。修改 DDL 或查询后运行 `./scripts/generate-sqlc.sh` 并提交生成的 Go 文件。
 
-首次启动时，若存在 `state.json`，daemon 校验数据并生成 `state.json.pre-sqlite.bak`，然后在单个事务中导入并记录 schema 版本。原 JSON 不会被修改。导入失败时不会留下部分记录，修复 JSON 后可以重新启动；备份已存在但内容不同时会拒绝导入，需先另行保存两份文件再处理。数据库初始化完成后只读取 SQLite，不会再次导入遗留 JSON。初始化成功后、接单前持久化 `state.sqlite3.initialized` 标记。已有该标记而数据库缺失、为空或变成无版本空库时，启动会拒绝导入陈旧 JSON；迁移备份存在但数据库缺失时同样拒绝。应恢复 SQLite 备份；若确实要从 JSON 重新迁移，须先归档初始化标记和旧迁移备份。未提交完成的首次迁移（无标记且空库仍在）可正常重试。已知旧格式的 `project` / `session_key` 路由和 `review_thread_id` 会映射到新路由；重复字段冲突时拒绝迁移。其他未知 JSON 字段也会拒绝导入：保留原文件和备份，先确认写入它的版本并用兼容版本转换，或核实字段用途后人工修正，避免直接删除可能承载路由的字段。遇到未知 schema 版本或损坏数据时启动失败，不会重置数据库。
-
-以下操作均先停止 daemon，`-data` 可省略以使用默认状态目录。输出文件必须尚不存在。备份通过 SQLite `VACUUM INTO` 生成独立快照；目标文件系统不支持硬链接时，使用独占创建、复制并同步的方式，仍不覆盖已有文件。这种回退在进程异常中断时可能留下不完整的输出文件，恢复前应验证或重新生成；目录同步不受文件系统支持时只能尽力保证目录项持久化。导出包含迁移之后的最新记录，保持旧版 JSON 结构。
+先停止 daemon 再备份或导出。输出路径必须是新文件。
 
 ```sh
 ink state backup -data /path/to/ink-state -output /safe/path/ink-backup.sqlite3
-ink state export -data /path/to/ink-state -output /safe/path/ink-rollback.json
+ink state export -data /path/to/ink-state -output /safe/path/ink-diagnostics.json
 ```
 
-恢复 SQLite 备份：停止 daemon，将当前 `state.sqlite3` 移到另一个位置留存，再将备份复制为状态目录中的 `state.sqlite3`，确认权限为 `0600`，然后启动 daemon。不要在运行期间直接复制数据库文件。
-
-回滚到旧版程序：旧版可能不支持 schema version 3、新增的任务交接/注册数据及 `postApproval` 字段，不能直接读取新数据库或 JSON；需先在兼容版本中显式转换并核查新增数据。以下旧版 JSON 恢复流程仅适用于已完成转换的快照。停止 daemon，先执行上面的 backup 和 export；将当前数据库、`state.sqlite3.initialized` 标记、旧 `state.json` 及 `state.json.pre-sqlite.bak` 一起移到独立归档目录，再将最新导出的 JSON 复制为状态目录中的 `state.json`（权限 `0600`），最后使用旧版程序启动。以后重新升级时，保持状态目录中没有旧 SQLite 数据库、初始化标记及旧迁移备份，让新版重新导入旧版运行期间更新过的 JSON。直接使用迁移前的备份只会恢复迁移时刻的数据。
+恢复时先停止 daemon，将现有数据库移到单独位置，确认备份为 v6，再将其复制到正确目录中的 `state.sqlite3` 并设置权限为 `0600`。JSON 导出供诊断与人工核对。
 
 ## 审查等待与回流诊断
 

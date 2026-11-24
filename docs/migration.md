@@ -1,8 +1,16 @@
-# 迁移 Ink Commons 部署
+# Ink Commons 单实例切换检查清单
 
-## 确定是否接续原工作项
+## 从旧版切换到 SQLite v6
 
-新环境独立接管新仓库时，从 [config.example.json](../config.example.json) 新建启动配置，再按需设置全局默认值、注册仓库和分配路由。公开示例使用虚构的仓库、身份和路径。
+1. 选在途 PR 较少的窗口。让现有领取者完成交接，或记录每条在途 PR 的 head SHA、审查/合入状态、会话及本地 worktree。确认遗留执行和延迟请求已停止，再停止旧 daemon。
+2. 用旧版 `ink state backup` 保存 SQLite 快照（更早的 JSON 实例保存原始状态目录），另存启动配置、领取凭据和本地 worktree。保留原数据目录及旧二进制用于回滚。
+3. 选择新的空目录，使用新版执行 `ink state init -data /private/ink/state-v6`。用 `ink serve -config /private/ink/config.json -data /private/ink/state-v6 -config-only` 核对部署和运行期配置。将旧路由字段改为 `reviewer_route` 内的 `provider`、`target`、`session`，再注册所需仓库，先保持自动派发路由、自动合入和批准 hook 关闭。
+4. 对照 GitHub 核对仍开放的 PR，特别是已经批准或仍有合入请求的 PR。把 daemon 和本地 CLI 的路径切到新目录，启动轮询以观察开放 PR。核对工作项后按需重新关联开发会话、指派 reviewer、保留原 worktree，再逐项启用自动处理。旧任务凭据与未决回执留在旧实例。
+5. 需回滚时，先停止新版，核对新版运行期间已经发生的 GitHub 与执行端副作用。用旧二进制和保留的原状态目录恢复。始终让同一批 PR 由一个 daemon 处理。
+
+## 同版本迁移到另一环境
+
+新环境独立接管新仓库时，从 [config.example.json](../config.example.json) 新建启动配置，用 `ink state init` 创建状态库，再按需设置全局默认值、注册仓库和分配路由。公开示例使用虚构的仓库、身份和路径。
 
 需要接续既有 PR 时，在停机前盘点已投递、正在运行和待交接的任务。让原领取者完成能结清的交接。对仍需提交交接或显式重试的 cooperative 任务，安全保留执行侧的原领取凭据。SQLite 备份和 JSON 导出只含领取凭据的哈希，原凭据位于领取侧状态目录的 `claims/TASK_UUID.json`，或当时通过 `--claim-file` 指定的路径。保持文件归原领取者所有、权限为 `0600`，默认 `claims` 目录权限为 `0700`。更换领取侧路径时，将原文件安全移到新默认位置，或在后续命令中通过 `--claim-file` 指向保留的文件。之后用原凭据提交交接或重试已阻塞的任务。参见 [领取与交接](handoff.md#agent-操作)。
 
@@ -40,7 +48,7 @@ ink config list --repo example/project --pr 42 --effective
 
 发现旧路由时，可在目标端保持核查模式，按下面的顺序处理：
 
-1. 确认旧执行已停止且延迟请求无法重启。已领取的 cooperative 任务由原领取者使用原凭据提交交接。对需要迁移路由且无法继续的任务，可提交 `blocked`。旧版执行使用工作项 API 的 `confirm-stopped` 记录已核实的停止。
+1. 确认旧执行已停止且延迟请求无法重启。已领取的 cooperative 任务由原领取者使用原凭据提交交接。对需要迁移路由且无法继续的任务，可提交 `blocked`。没有状态回执的执行使用工作项 API 的 `confirm-stopped` 记录已核实的停止。
 2. 用 `ink review` 改派 reviewer，或用工作项 API 的 `assign` 改派 developer。改派会替换该角色的当前待办并保留旧记录，仍在等待交接的任务会继续阻塞后继待办。
 3. 对主动交回为 `blocked` 的旧任务，在核对新指派后，用原凭据执行 `ink task retry` 解除阻塞。已经提交的 GitHub 结果由正式服务恢复轮询后核验。参见 [阻塞和重试](handoff.md#阻塞和重试)。
 

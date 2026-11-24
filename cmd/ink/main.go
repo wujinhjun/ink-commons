@@ -29,7 +29,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: ink version | ink upgrade [flags] | ink rollback --tag TAG | ink config get|set|unset|list [flags] | ink init [--check] [--skills-dir DIR] | ink serve [-config FILE] [-data DIR] | ink hook install|status [--checkout DIR] | ink pre-push REMOTE_URL | ink register [flags] [OWNER/REPO] | ink review [flags] PR_URL | ink context --sha SHA [--before MESSAGE_ID] PR_URL | ink notification ack|status --event EVENT_ID | ink task claim|status|submit|retry --task TASK_ID [flags] | ink workspace list|acquire|release|remove [flags] | ink state backup|export [flags]")
+		return errors.New("usage: ink version | ink upgrade [flags] | ink rollback --tag TAG | ink config get|set|unset|list [flags] | ink init [--check] [--skills-dir DIR] | ink serve [-config FILE] [-data DIR] | ink hook install|status [--checkout DIR] | ink pre-push REMOTE_URL | ink register [flags] [OWNER/REPO] | ink review [flags] PR_URL | ink context --sha SHA [--before MESSAGE_ID] PR_URL | ink notification ack|status --event EVENT_ID | ink task claim|status|submit|retry --task TASK_ID [flags] | ink workspace list|acquire|release|remove [flags] | ink state init|backup|export [flags]")
 	}
 	switch args[0] {
 	case "version":
@@ -100,7 +100,7 @@ func serve(args []string) error {
 	configPath := flags.String("config", "config.json", "configuration file")
 	data := flags.String("data", dir, "private state directory")
 	gate := flags.String("poll-gate", "", "delay polling until this deployment gate file exists")
-	configOnly := flags.Bool("config-only", false, "allow local configuration and work item migration without polling or dispatch")
+	configOnly := flags.Bool("config-only", false, "allow local configuration and work item setup without polling or dispatch")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

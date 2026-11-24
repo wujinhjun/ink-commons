@@ -23,9 +23,6 @@ func (s *Service) exportConfiguration(w http.ResponseWriter, r *http.Request) {
 	global := ConfigValues{}
 	repositories := map[string]ConfigValues{}
 	for _, record := range records {
-		if record.Scope == legacyConfigScope {
-			continue
-		}
 		if record.Values == nil {
 			record.Values = ConfigValues{}
 		}
@@ -128,12 +125,11 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 			fail(w, apiError{400, "invalid PR number"})
 			return
 		}
-		st, err := s.store.load()
+		work, err := s.store.loadWork(key(scope, number))
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		work := st.Work[key(scope, number)]
 		if work == nil {
 			fail(w, apiError{404, "PR not observed yet"})
 			return

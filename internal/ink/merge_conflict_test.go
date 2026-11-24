@@ -37,7 +37,7 @@ func confirmConflict(t *testing.T, f *handoffFixture) *Task {
 	t.Helper()
 	preflightConflict(t, f)
 	preflightConflict(t, f)
-	st, err := f.s.store.load()
+	st, err := loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func confirmConflict(t *testing.T, f *handoffFixture) *Task {
 		t.Fatal("conflict must wait for confirmation")
 	}
 	w.MergeConflict.Since = time.Now().Add(-mergeConflictConfirmation)
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	f.restart(t)
@@ -132,7 +132,7 @@ func TestMergeConflictTaskClearsOnPositiveMergeabilityOrChangedBase(t *testing.T
 func TestMergeConflictConfirmationRestartsAfterFailedPRRead(t *testing.T) {
 	f := approvedConflictFixture(t)
 	preflightConflict(t, f)
-	st, err := f.s.store.load()
+	st, err := loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestMergeConflictConfirmationRestartsAfterFailedPRRead(t *testing.T) {
 		t.Fatal("first dirty response should begin confirmation")
 	}
 	w.MergeConflict.Since = time.Now().Add(-mergeConflictConfirmation)
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,7 +180,7 @@ func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T
 			// Repeat the stale REST list observation and restart before confirmation.
 			f.observe(t)
 			f.restart(t)
-			st, err := f.s.store.load()
+			st, err := loadFixture(f.s.store)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -190,7 +190,7 @@ func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T
 				t.Fatal("new live base should restart conflict confirmation")
 			}
 			w.MergeConflict.Since = time.Now().Add(-mergeConflictConfirmation)
-			if err := f.s.store.save(st); err != nil {
+			if err := saveFixture(f.s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			f.conflictLookupUnavailable = true
@@ -200,7 +200,7 @@ func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T
 			}
 			f.conflictLookupUnavailable = false
 			preflightConflict(t, f)
-			st, err = f.s.store.load()
+			st, err = loadFixture(f.s.store)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -209,7 +209,7 @@ func TestBlockedConflictRefreshesAgainstLiveBaseWithStalePRSnapshot(t *testing.T
 				t.Fatal("first confirmation after recovery must start a new window")
 			}
 			w.MergeConflict.Since = time.Now().Add(-mergeConflictConfirmation)
-			if err := f.s.store.save(st); err != nil {
+			if err := saveFixture(f.s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			preflightConflict(t, f)

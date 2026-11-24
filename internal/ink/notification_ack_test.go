@@ -40,12 +40,12 @@ func expireNotification(t *testing.T, s *Service, repo Repository, p Pull) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Work[key(repo.Repo, p.Number)].Notifications[0].RetryAt = time.Now().Add(-time.Second)
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -180,7 +180,7 @@ func TestApprovalNotificationLostResponseRetriesAndConcurrentReceiptDeduplicates
 }
 
 func TestApprovalNotificationStaleReceiptDoesNotAnnounceApproval(t *testing.T) {
-	for _, scenario := range []string{"head changed", "closed", "approval revoked", "route changed"} {
+	for _, scenario := range []string{"head changed", "approval revoked", "route changed"} {
 		t.Run(scenario, func(t *testing.T) {
 			e := &notificationExecutor{requireACK: true}
 			s, repo, p, r, _ := notificationFixture(t, e)
@@ -191,7 +191,7 @@ func TestApprovalNotificationStaleReceiptDoesNotAnnounceApproval(t *testing.T) {
 				t.Fatal(err)
 			}
 			event := e.notices[0].EventID
-			st, err := s.store.load()
+			st, err := loadFixture(s.store)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -199,15 +199,13 @@ func TestApprovalNotificationStaleReceiptDoesNotAnnounceApproval(t *testing.T) {
 			switch scenario {
 			case "head changed":
 				w.Pull.Head.SHA = strings.Repeat("b", 40)
-			case "closed":
-				w.Pull.State = "closed"
 			case "approval revoked":
 				w.Reviews[0].State = "CHANGES_REQUESTED"
 			case "route changed":
 				w.Developer.Route.Session = "new-session"
 			}
 			w.derive()
-			if err := s.store.save(st); err != nil {
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			receiptFirst(t, s, event, false)
@@ -269,12 +267,14 @@ func TestPollCCConnectApprovalBusyDropRecoveredWithoutRuntimeChanges(t *testing.
 	}
 	s, repo, p, r, _ := notificationFixture(t, executor)
 	service = s
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Work[key(repo.Repo, p.Number)].Developer.Route.Session = "discord:123"
-	if err := s.store.save(st); err != nil {
+	work := st.Work[key(repo.Repo, p.Number)]
+	work.Developer.Route.Session = "discord:123"
+	work.DeveloperOverride = cloneAssignee(work.Developer)
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	s.up.http.Transport = testTransport(func(req *http.Request) (*http.Response, error) {
@@ -320,12 +320,14 @@ func TestApprovalNotificationRetriesAndReceiptsSurviveAutoMerge(t *testing.T) {
 		})
 	}
 	configure()
-	st, err := f.s.store.load()
+	st, err := loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Work[key(f.repo.Repo, 42)].Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
-	if err := f.s.store.save(st); err != nil {
+	work := st.Work[key(f.repo.Repo, 42)]
+	work.Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
+	work.DeveloperOverride = cloneAssignee(work.Developer)
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	f.onMerge = func() { f.pull.State, f.pull.Merged = "closed", true; f.pull.MergeCommitSHA = strings.Repeat("d", 40) }
@@ -357,4 +359,63 @@ func TestApprovalNotificationRetriesAndReceiptsSurviveAutoMerge(t *testing.T) {
 	if len(e.notices) != 3 || f.reads != reads {
 		t.Fatal("received merged notification kept polling/replaying")
 	}
+}
+
+func TestApprovalReceiptResumesAfterSameHeadReopen(t *testing.T) {
+	ctx := context.Background()
+	e := &notificationExecutor{requireACK: true}
+	s, repo, pull, review, path := notificationFixture(t, e)
+	if err := s.observe(repo, pull, []Review{review}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.notifyApproved(ctx, repo, pull.Number); err != nil {
+		t.Fatal(err)
+	}
+	original := notificationWork(t, s, repo, pull).Notifications[0]
+	pull.State = "closed"
+	if err := s.observe(repo, pull, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.notifyApproved(ctx, repo, pull.Number); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	reopened, err := NewService(Config{}, path, map[string]execution.Executor{"test": e})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if pollIncludes(t, reopened, repo.Repo, pull.Number) {
+		t.Fatal("paused approval receipt kept closed PR in the poll index")
+	}
+	receiptFirst(t, reopened, original.EventID, false)
+	paused := notificationWork(t, reopened, repo, pull).Notifications[0]
+	if paused.State != "awaiting_ack" || !paused.RetryAt.Equal(original.RetryAt) || paused.Attempts != original.Attempts {
+		t.Fatalf("closing or late receipt changed the lease: %+v", paused)
+	}
+
+	expireNotification(t, reopened, repo, pull)
+	pull.State = "open"
+	reopened.up.github = "https://stub.invalid"
+	reopened.up.http.Transport = testTransport(func(r *http.Request) (*http.Response, error) {
+		out := httptest.NewRecorder()
+		switch r.URL.Path {
+		case "/repos/acme/project/pulls":
+			reply(out, 200, []Pull{pull})
+		case "/repos/acme/project/pulls/42/reviews":
+			reply(out, 200, []Review{review})
+		default:
+			t.Fatalf("unexpected request: %s", r.URL)
+		}
+		return out.Result(), nil
+	})
+	if err := reopened.pollRepo(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.notices) != 2 || e.notices[1].EventID != original.EventID {
+		t.Fatalf("same-head reopen did not retry the original event: %+v", e.notices)
+	}
+	receiptFirst(t, reopened, original.EventID, true)
+	receiptFirst(t, reopened, original.EventID, false)
 }

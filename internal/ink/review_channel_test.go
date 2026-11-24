@@ -74,23 +74,26 @@ func TestRequireSameReviewChannel(t *testing.T) {
 					ReviewerRoute: route,
 					Review:        &ReviewFeatures{RequireSameChannel: !tc.disabled, ReuseDevelopmentThread: tc.reuse},
 				}
-				s, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: e})
+				s, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: e})
 				if err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { s.Close() })
 				p := Pull{Number: 42, State: "open", URL: "https://github.com/acme/project/pull/42"}
 				p.Head.SHA = strings.Repeat("a", 40)
-				st, err := s.store.load()
+				st, err := loadFixture(s.store)
 				if err != nil {
 					t.Fatal(err)
 				}
-				st.Work[key(repo.Repo, p.Number)] = &Work{
+				seed := &Work{
 					Repo: repo.Repo, Pull: p, Linked: true,
 					Developer: Assignee{Route: &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}},
 					Reviewer:  Assignee{GitHubLogin: "reviewer", Route: route},
 				}
-				if err := s.store.save(st); err != nil {
+				seed.ReviewerOverride = cloneAssignee(seed.Reviewer)
+				seed.DeveloperOverride = cloneAssignee(seed.Developer)
+				st.Work[key(repo.Repo, p.Number)] = seed
+				if err := saveFixture(s.store, st); err != nil {
 					t.Fatal(err)
 				}
 				if err := s.observe(repo, p, nil); err != nil {

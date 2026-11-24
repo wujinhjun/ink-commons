@@ -4,426 +4,283 @@ package ink
 
 import (
 	"bytes"
-	"database/sql"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
-func storedFixture() state {
-	route := &execution.Route{Provider: "cc-connect", Target: "dev", Session: "discord:123", Parent: "456"}
-	w := &Work{Repo: "acme/project", Linked: true, Origin: route, Developer: Assignee{GitHubLogin: "developer", Route: route}, Reviewer: Assignee{GitHubLogin: "reviewer", Route: &execution.Route{Provider: "http", Target: "reviewer", Session: "review/42"}}, Phase: "review_pending", Task: &Task{Role: "reviewer", SHA: strings.Repeat("a", 40), Delivery: "unknown", Error: "delivery interrupted or in progress", Attempts: 3}}
-	w.Pull.Number, w.Pull.State, w.Pull.Head.SHA = 42, "open", strings.Repeat("a", 40)
-	w.Pull.Head.Ref = "feature"
-	w.Reviews = []Review{{ID: 123, SHA: strings.Repeat("b", 40), State: "CHANGES_REQUESTED", URL: "https://example.invalid/review", SubmittedAt: time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)}}
-	accepted := *w
-	accepted.Pull.Number = 43
-	task := *w.Task
-	task.Delivery, task.Error = "accepted", ""
-	accepted.Task = &task
-	return state{Pushes: []Push{{Repo: w.Repo, Ref: w.Pull.Head.Ref, SHA: w.Pull.Head.SHA, Route: *route, At: time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)}}, Work: map[string]*Work{"acme/project#42": w, "acme/project#43": &accepted}}
-}
-
-func checkState(t *testing.T, store *stateStore, want state) {
+func newFixtureService(t *testing.T, config Config, path string, providers map[string]execution.Executor) (*Service, error) {
 	t.Helper()
-	got, err := store.load()
+	if err := createStateDatabase(path); err != nil {
+		t.Fatal(err)
+	}
+	return NewService(config, path, providers)
+}
+
+type workFixture struct{ Work map[string]*Work }
+
+func loadFixture(s *stateStore) (workFixture, error) {
+	st := workFixture{Work: make(map[string]*Work)}
+	works, err := s.listWork()
+	for _, w := range works {
+		st.Work[keyForWork(w)] = w
+	}
+	return st, err
+}
+
+func saveFixture(s *stateStore, st workFixture) error {
+	for _, w := range st.Work {
+		if err := s.saveWork(w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func testStore(t *testing.T, path string) *stateStore {
+	t.Helper()
+	s, err := openStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("state changed:\ngot %+v\nwant %+v", got, want)
+	t.Cleanup(func() { s.db.Close() })
+	return s
+}
+
+func initTestStore(t *testing.T) (*stateStore, string) {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := InitializeState(dir); err != nil {
+		t.Fatal(err)
+	}
+	return testStore(t, filepath.Join(dir, stateDatabase)), dir
+}
+
+func pollIncludes(t *testing.T, s *Service, repo string, number int) bool {
+	t.Helper()
+	numbers, err := statedb.New(s.store.db).ListPollPending(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return slices.Contains(numbers, int64(number))
+}
+
+func TestServeRefusesMissingState(t *testing.T) {
+	parent := t.TempDir()
+	empty := filepath.Join(parent, "empty")
+	if err := os.Mkdir(empty, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{empty, filepath.Join(parent, "wrong-path")} {
+		err := Serve(context.Background(), Config{}, dir, nil)
+		if err == nil || !strings.Contains(err.Error(), "ink state init") {
+			t.Fatalf("serve with missing state: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, stateDatabase)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("serve created database: %v", err)
+		}
 	}
 }
 
-func TestSQLiteMigrationRestartAndSnapshot(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, stateDatabase)
-	legacy := filepath.Join(dir, legacyState)
-	initial := storedFixture()
-	data, err := json.Marshal(initial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacy, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkState(t, store, initial)
-	for _, p := range []string{legacy, legacy + ".pre-sqlite.bak"} {
-		actual, err := os.ReadFile(p)
-		if err != nil || !bytes.Equal(actual, data) {
-			t.Fatalf("legacy backup %s: %s, %v", p, actual, err)
-		}
-	}
-	// Keep migration-era data distinct so export and backup cannot accidentally
-	// return the old JSON, and a restart must not import it again.
-	initial.Work["acme/project#42"].Task.Attempts = 7
-	initial.Work["acme/project#42"].Reviewer.Route.Session = "new-review-session"
-	if err := store.save(initial); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacy, []byte("invalid obsolete JSON"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	store, err = openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkState(t, store, initial)
-	store.db.Close()
-
-	snapshot := filepath.Join(dir, "backup.sqlite3")
-	exported := filepath.Join(dir, "rollback.json")
-	if err := StateSnapshot(dir, snapshot, false); err != nil {
-		t.Fatal(err)
-	}
-	if err := StateSnapshot(dir, exported, true); err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range []string{path, snapshot, exported, legacy + ".pre-sqlite.bak"} {
-		info, err := os.Stat(p)
-		if err != nil || info.Mode().Perm() != 0600 {
-			t.Fatalf("private file %s: %v, %v", p, info, err)
-		}
-	}
-	if err := StateSnapshot(dir, exported, true); err == nil {
-		t.Fatal("export overwrote existing file")
-	}
-	if err := StateSnapshot(dir, snapshot, false); err == nil {
-		t.Fatal("backup overwrote existing file")
-	}
-	backup, err := openStore(snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkState(t, backup, initial)
-	backup.db.Close()
-	// Restore the SQLite backup into a new state directory.
-	restoredDir := t.TempDir()
-	snapshotData, err := os.ReadFile(snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(restoredDir, stateDatabase), snapshotData, 0600); err != nil {
-		t.Fatal(err)
-	}
-	restored, err := openStore(filepath.Join(restoredDir, stateDatabase))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkState(t, restored, initial)
-	restored.db.Close()
-	// JSON export remains readable by the old state representation and can be
-	// migrated again after running an older binary.
-	exportedData, err := os.ReadFile(exported)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var oldState state
-	if err := json.Unmarshal(exportedData, &oldState); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(oldState, initial) {
-		t.Fatal("rollback lost current data")
-	}
-	newDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(newDir, legacyState), exportedData, 0600); err != nil {
-		t.Fatal(err)
-	}
-	remigrated, err := openStore(filepath.Join(newDir, stateDatabase))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer remigrated.db.Close()
-	checkState(t, remigrated, initial)
-}
-
-func TestMigrationFailureCanRetryWithoutPartialImport(t *testing.T) {
-	for _, input := range []string{`{`, `{"work":null}`, `{"work":{"acme/project#42":null}}`, `{"work":{},"future":true}`} {
-		t.Run(input, func(t *testing.T) {
-			dir := t.TempDir()
-			legacy := filepath.Join(dir, legacyState)
+func TestStateSchemaRejectsUnsupportedVersions(t *testing.T) {
+	for _, version := range []int{0, 1, 2, 3, 4, 5, 7} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			s, dir := initTestStore(t)
+			if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+				t.Fatal(err)
+			}
+			s.db.Close()
 			path := filepath.Join(dir, stateDatabase)
-			if err := os.WriteFile(legacy, []byte(input), 0600); err != nil {
-				t.Fatal(err)
+			if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("version %d (expected 6)", version)) {
+				t.Fatalf("open unsupported version: %v", err)
 			}
-			if store, err := openStore(path); err == nil {
-				store.db.Close()
-				t.Fatal("invalid state migrated")
-			}
-			got, err := os.ReadFile(legacy)
-			if err != nil || string(got) != input {
-				t.Fatal("failed migration changed legacy state")
-			}
-			if _, err := os.Stat(legacy + ".pre-sqlite.bak"); !os.IsNotExist(err) {
-				t.Fatal("invalid state backed up")
-			}
-			fixture := storedFixture()
-			data, _ := json.Marshal(fixture)
-			if err := os.WriteFile(legacy, data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			store, err := openStore(path)
+			db, err := openSQLite(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.db.Close()
-			checkState(t, store, fixture)
-		})
-	}
-}
-
-func TestSQLiteSaveRollsBackAndRejectsFutureSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), stateDatabase)
-	store, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	initial := storedFixture()
-	if err := store.save(initial); err != nil {
-		t.Fatal(err)
-	}
-	// Fail after updating work but before deleting stale rows. The transaction
-	// must restore all records, including accepted/unknown delivery records.
-	if _, err := store.db.Exec(`CREATE TRIGGER fail_save BEFORE INSERT ON pushes BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`); err != nil {
-		t.Fatal(err)
-	}
-	replacement := storedFixture()
-	replacement.Work["acme/project#42"].Task.Delivery = "pending"
-	delete(replacement.Work, "acme/project#43")
-	replacement.Pushes = append(replacement.Pushes, replacement.Pushes[0])
-	if err := store.save(replacement); err == nil {
-		t.Fatal("expected failed write")
-	}
-	checkState(t, store, initial)
-	if _, err := store.db.Exec("PRAGMA user_version = 999"); err != nil {
-		t.Fatal(err)
-	}
-	store.db.Close()
-	if reopened, err := openStore(path); err == nil {
-		reopened.db.Close()
-		t.Fatal("opened unsupported schema")
-	}
-}
-
-func TestMigrationBackupConflictAndLock(t *testing.T) {
-	dir := t.TempDir()
-	legacy := filepath.Join(dir, legacyState)
-	data, _ := json.Marshal(storedFixture())
-	if err := os.WriteFile(legacy, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(legacy+".pre-sqlite.bak", []byte("older backup"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if store, err := openStore(filepath.Join(dir, stateDatabase)); err == nil {
-		store.db.Close()
-		t.Fatal("overwrote migration backup")
-	}
-	if err := os.Remove(legacy + ".pre-sqlite.bak"); err != nil {
-		t.Fatal(err)
-	}
-	store, err := openStore(filepath.Join(dir, stateDatabase))
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.db.Close()
-	lock, err := lockState(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lock.Close()
-	if second, err := lockState(legacy); err == nil {
-		second.Close()
-		t.Fatal("second daemon acquired legacy lock")
-	}
-	output := filepath.Join(dir, "backup.sqlite3")
-	if err := StateSnapshot(dir, output, false); err == nil {
-		t.Fatal("backup raced a running daemon")
-	}
-	if _, err := os.Stat(output); !os.IsNotExist(err) {
-		t.Fatal("failed backup left an output")
-	}
-}
-
-func TestSQLiteRejectsUnversionedAndInsecureFiles(t *testing.T) {
-	for _, kind := range []string{"unversioned", "missing-table", "public", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), stateDatabase)
-			store, err := openStore(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch kind {
-			case "unversioned":
-				_, err = store.db.Exec("PRAGMA user_version=0")
-			case "missing-table":
-				_, err = store.db.Exec("DROP TABLE pushes")
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			store.db.Close()
-			if kind == "public" {
-				if err := os.Chmod(path, 0644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if kind == "symlink" {
-				original := path + ".original"
-				if err := os.Rename(path, original); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(original, path); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if reopened, err := openStore(path); err == nil {
-				reopened.db.Close()
-				t.Fatal("invalid database accepted")
+			defer db.Close()
+			var actual int
+			if err := db.QueryRow("PRAGMA user_version").Scan(&actual); err != nil || actual != version {
+				t.Fatalf("schema was changed: %d, %v", actual, err)
 			}
 		})
 	}
 }
 
-func TestSnapshotDoesNotCreateMissingDatabase(t *testing.T) {
-	dir := t.TempDir()
-	for _, asJSON := range []bool{false, true} {
-		output := filepath.Join(dir, "snapshot")
-		if err := StateSnapshot(dir, output, asJSON); err == nil {
-			t.Fatal("backed up missing database")
-		}
-		for _, path := range []string{output, filepath.Join(dir, stateDatabase)} {
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
-				t.Fatalf("created %s", path)
-			}
-		}
-	}
-}
-
-func TestMissingMigratedDatabaseDoesNotReplayLegacyTasks(t *testing.T) {
-	dir := t.TempDir()
+func TestExplicitInitRefusesExistingStateAndEmptyPlaceholders(t *testing.T) {
+	s, dir := initTestStore(t)
+	s.db.Close()
 	path := filepath.Join(dir, stateDatabase)
-	initial := storedFixture()
-	initial.Work["acme/project#42"].Task.Delivery = "pending"
-	data, _ := json.Marshal(initial)
-	if err := os.WriteFile(filepath.Join(dir, legacyState), data, 0600); err != nil {
+	if err := InitializeState(dir); err == nil {
+		t.Fatal("reinitialized existing database")
+	}
+	if err := os.Truncate(path, 0); err != nil {
 		t.Fatal(err)
 	}
-	store, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), "version 0") {
+		t.Fatalf("opened empty file: %v", err)
 	}
-	initial.Work["acme/project#42"].Task.Delivery = "accepted"
-	initial.Work["acme/project#42"].Task.Attempts++
-	if err := store.save(initial); err != nil {
-		t.Fatal(err)
-	}
-	store.db.Close()
-	backup := filepath.Join(dir, "current.sqlite3")
-	if err := StateSnapshot(dir, backup, false); err != nil {
-		t.Fatal(err)
+	info, err := os.Stat(path)
+	if err != nil || info.Size() != 0 {
+		t.Fatalf("changed placeholder: %v, %v", info, err)
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if reopened, err := openStore(path); err == nil {
-		reopened.db.Close()
-		t.Fatal("silently imported stale pending task")
-	} else if !strings.Contains(err.Error(), "database is missing") {
+	marker := path + ".initialized"
+	if err := os.WriteFile(marker, []byte("1"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("failed startup created a new database")
+	if err := InitializeState(dir); err == nil {
+		t.Fatal("initialized in a previous instance's directory")
 	}
-	restoredData, err := os.ReadFile(backup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, restoredData, 0600); err != nil {
-		t.Fatal(err)
-	}
-	restored, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restored.db.Close()
-	checkState(t, restored, initial)
 }
 
-func TestInterruptedMigrationWithMatchingBackupCanRetry(t *testing.T) {
-	dir := t.TempDir()
+func TestStateDatabaseMustBePrivateAndComplete(t *testing.T) {
+	s, dir := initTestStore(t)
+	if _, err := s.db.Exec("DROP TABLE pushes"); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Close()
 	path := filepath.Join(dir, stateDatabase)
-	fixture := storedFixture()
-	data, _ := json.Marshal(fixture)
-	for name, content := range map[string][]byte{stateDatabase: nil, legacyState: data, legacyState + ".pre-sqlite.bak": data} {
-		if err := os.WriteFile(filepath.Join(dir, name), content, 0600); err != nil {
-			t.Fatal(err)
+	if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), "pushes") {
+		t.Fatalf("opened incomplete schema: %v", err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), "private regular file") {
+		t.Fatalf("opened public database: %v", err)
+	}
+}
+
+func TestStateSnapshotPreservesAggregateAndIndexes(t *testing.T) {
+	s, dir := initTestStore(t)
+	work := &Work{Repo: "acme/project", Pull: Pull{Number: 7, State: "closed", Merged: true}, Phase: "merged",
+		History:       []*Task{{ID: "old-task", Handoff: &TaskHandoff{State: "submitted"}}},
+		Notifications: []NotificationRun{{Notification: execution.Notification{EventID: "event"}, RequireACK: true, State: "awaiting_ack"}},
+	}
+	if err := s.saveWork(work); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "backup")
+	lock, err := lockState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := StateSnapshot(dir, output, false); err == nil {
+		t.Fatal("backup raced a held daemon lock")
+	}
+	lock.Close()
+	s.db.Close()
+	if err := StateSnapshot(dir, output, false); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := testStore(t, output)
+	w, task, err := snapshot.loadTask("old-task")
+	if err != nil || task == nil || task.Handoff.State != "submitted" || w.Pull.Number != 7 {
+		t.Fatalf("backup lost handoff: %v, %v", task, err)
+	}
+	w, err = snapshot.loadNotification("event")
+	if err != nil || w == nil || w.Notifications[0].State != "awaiting_ack" {
+		t.Fatalf("backup lost receipt: %v, %v", w, err)
+	}
+	output += ".json"
+	if err := StateSnapshot(dir, output, true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var export stateExport
+	if err := json.Unmarshal(data, &export); err != nil || export.Work[keyForWork(work)] == nil {
+		t.Fatalf("export lost aggregate: %s, %v", data, err)
+	}
+}
+
+func TestSaveWorkFencesStaleWriterAndRollsBackIndexFailure(t *testing.T) {
+	s, _ := initTestStore(t)
+	w := &Work{Repo: "acme/project", Pull: Pull{Number: 7, State: "open"}, Task: &Task{ID: "current"}}
+	if err := s.saveWork(w); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := s.loadWork(keyForWork(w))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Task.ID = "successor"
+	w.History = []*Task{{ID: "current"}}
+	if err := s.saveWork(w); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveWork(stale); err == nil || !strings.Contains(err.Error(), "changed since it was read") {
+		t.Fatalf("accepted stale write: %v", err)
+	}
+	w.Pull.State = "closed"
+	w.History = nil
+	w.Notifications = []NotificationRun{
+		{Notification: execution.Notification{EventID: "duplicate"}},
+		{Notification: execution.Notification{EventID: "duplicate"}},
+	}
+	if err := s.saveWork(w); err == nil {
+		t.Fatal("duplicate event committed")
+	}
+	for _, id := range []string{"current", "successor"} {
+		found, task, err := s.loadTask(id)
+		if err != nil || task == nil || found.Pull.State != "open" {
+			t.Fatalf("failed transaction changed payload or task index for %s: %v, %v", id, task, err)
 		}
 	}
-	store, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
+	if found, err := s.loadNotification("duplicate"); err != nil || found != nil {
+		t.Fatalf("failed transaction published event: %v, %v", found, err)
 	}
-	defer store.db.Close()
-	checkState(t, store, fixture)
+	if !pollIncludes(t, &Service{store: s}, w.Repo, w.Pull.Number) {
+		t.Fatal("failed transaction changed pending index")
+	}
 }
 
-func TestMigrationMapsLegacyReviewThreadWithoutReplayingDelivery(t *testing.T) {
-	for _, session := range []string{"", "discord:99", "discord:99:456", "discord:100"} {
-		t.Run(session, func(t *testing.T) {
-			dir := t.TempDir()
-			data := []byte(fmt.Sprintf(`{"work":{"acme/project#42":{"repo":"acme/project","pull_request":{"number":42,"state":"open"},"linked":true,"origin":{"project":"dev","session_key":"discord:123"},"developer":{"route":{"project":"dev","session_key":"discord:123"}},"reviewer":{"github_login":"reviewer","route":{"project":"reviewer","session_key":%q}},"review_thread_id":"99","phase":"review_pending","task":{"role":"reviewer","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","delivery":"accepted","attempts":3}}}}`, session))
-			if err := os.WriteFile(filepath.Join(dir, legacyState), data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			store, err := openStore(filepath.Join(dir, stateDatabase))
-			if session == "discord:100" {
-				if err == nil {
-					store.db.Close()
-					t.Fatal("conflicting reviewer session migrated")
-				}
-				if !strings.Contains(err.Error(), "conflicts") {
-					t.Fatal(err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer store.db.Close()
-			st, err := store.load()
-			if err != nil {
-				t.Fatal(err)
-			}
-			work := st.Work["acme/project#42"]
-			wantSession := session
-			if wantSession == "" {
-				wantSession = "discord:99"
-			}
-			if work.Reviewer.Route.Provider != "cc-connect" || work.Reviewer.Route.Target != "reviewer" || work.Reviewer.Route.Session != wantSession || work.Origin.Session != "discord:123" || work.Task.Delivery != "accepted" || work.Task.Attempts != 3 {
-				t.Fatalf("legacy binding/delivery changed: %+v", work)
-			}
-			backup, err := os.ReadFile(filepath.Join(dir, legacyState+".pre-sqlite.bak"))
-			if err != nil || !bytes.Equal(backup, data) {
-				t.Fatal("legacy source not preserved byte-for-byte")
-			}
-		})
+func TestIndexedOriginIgnoresExpiredAndOtherRepositories(t *testing.T) {
+	s, _ := initTestStore(t)
+	now := time.Now()
+	var pull Pull
+	pull.Head.SHA, pull.Head.Ref = strings.Repeat("a", 40), "feature"
+	pull.Head.Repo = &struct {
+		FullName string `json:"full_name"`
+	}{"Acme/Project"}
+	first := Push{Repo: "acme/project", Ref: pull.Head.Ref, SHA: pull.Head.SHA, At: now, Route: execution.Route{Provider: "test", Target: "dev", Session: "dev-session"}}
+	second := first
+	second.Route.Session = "other-session"
+	second.At = now.Add(-time.Hour)
+	other := second
+	other.Repo = "fork/project"
+	if err := s.savePushes([]Push{first, second, other, first}, now); err != nil {
+		t.Fatal(err)
+	}
+	if origin, err := s.matchOrigin(pull, now); err != nil || origin != nil {
+		t.Fatalf("matched ambiguous origin: %v, %v", origin, err)
+	}
+	later := now.Add(7*24*time.Hour - time.Minute)
+	if origin, err := s.matchOrigin(pull, later); err != nil || origin == nil || *origin != first.Route {
+		t.Fatalf("indexed lookup failed after conflicting observation expired: %v, %v", origin, err)
+	}
+	if err := s.savePushes(nil, later); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := statedb.New(s.db).ListPushes(context.Background())
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("prune did not remove expired observations: %v, %v", rows, err)
 	}
 }
 
@@ -468,200 +325,4 @@ func TestPublishFallbackPreservesBytesPermissionsAndNoOverwrite(t *testing.T) {
 	if _, err := os.Stat(destination); !os.IsNotExist(err) {
 		t.Fatal("failed copy left a partial output")
 	}
-}
-
-func TestInitializedStateRejectsEmptyDatabasePlaceholders(t *testing.T) {
-	for _, kind := range []string{"zero-byte", "empty-sqlite"} {
-		t.Run(kind, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, stateDatabase)
-			fixture := storedFixture()
-			fixture.Work["acme/project#42"].Task.Delivery = "pending"
-			data, _ := json.Marshal(fixture)
-			if err := os.WriteFile(filepath.Join(dir, legacyState), data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			store, err := openStore(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			fixture.Work["acme/project#42"].Task.Delivery = "accepted"
-			if err := store.save(fixture); err != nil {
-				t.Fatal(err)
-			}
-			store.db.Close()
-			saved, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			marker, err := os.Stat(path + ".initialized")
-			if err != nil || marker.Mode().Perm() != 0600 {
-				t.Fatal("initialization marker missing or not private")
-			}
-			if err := os.WriteFile(path, nil, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if kind == "empty-sqlite" {
-				empty, err := sql.Open("sqlite", path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := empty.Exec("VACUUM"); err != nil {
-					t.Fatal(err)
-				}
-				empty.Close()
-			}
-			if reopened, err := openStore(path); err == nil {
-				reopened.db.Close()
-				t.Fatal("stale pending task re-imported into empty database")
-			}
-			if err := os.WriteFile(path, saved, 0600); err != nil {
-				t.Fatal(err)
-			}
-			restored, err := openStore(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer restored.db.Close()
-			checkState(t, restored, fixture)
-		})
-	}
-}
-
-// Triggers observe actual mutations, including DELETE+INSERT disguised as an
-// update. Unchanged snapshots must leave every persisted row untouched.
-func TestSQLiteIncrementalWrites(t *testing.T) {
-	path := filepath.Join(t.TempDir(), stateDatabase)
-	store, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.db.Close()
-	st := storedFixture()
-	st.Repositories = []Repository{{Repo: "acme/project", ReviewerLogin: "reviewer"}}
-	if err := store.save(st); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`CREATE TABLE mutations(kind TEXT, key TEXT);`); err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range []struct{ table, key string }{{"work_items", "id"}, {"repositories", "name"}, {"pushes", "position"}} {
-		for _, op := range []string{"INSERT", "UPDATE", "DELETE"} {
-			source := "NEW."
-			if op == "DELETE" {
-				source = "OLD."
-			}
-			query := fmt.Sprintf("CREATE TRIGGER audit_%s_%s AFTER %s ON %s BEGIN INSERT INTO mutations VALUES ('%s:%s', %s%s); END", entry.table, op, op, entry.table, entry.table, op, source, entry.key)
-			if _, err := store.db.Exec(query); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	assertMutations := func(want []string) {
-		t.Helper()
-		rows, err := store.db.Query("SELECT kind || ':' || key FROM mutations ORDER BY kind, key")
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got []string
-		for rows.Next() {
-			var v string
-			if err := rows.Scan(&v); err != nil {
-				t.Fatal(err)
-			}
-			got = append(got, v)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("mutations = %v, want %v", got, want)
-		}
-		if _, err := store.db.Exec("DELETE FROM mutations"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.save(st); err != nil {
-		t.Fatal(err)
-	}
-	assertMutations(nil)
-	st.Work["acme/project#42"].Task.Attempts++
-	if err := store.save(st); err != nil {
-		t.Fatal(err)
-	}
-	assertMutations([]string{"work_items:UPDATE:acme/project#42"})
-	st.Repositories[0].ReviewerLogin = "other-reviewer"
-	st.Pushes = append(st.Pushes, st.Pushes[0])
-	if err := store.save(st); err != nil {
-		t.Fatal(err)
-	}
-	assertMutations([]string{"pushes:INSERT:1", "repositories:UPDATE:acme/project"})
-	st.Pushes[0].SHA = strings.Repeat("c", 40)
-	if err := store.save(st); err != nil {
-		t.Fatal(err)
-	}
-	assertMutations([]string{"pushes:UPDATE:0"})
-	st.Pushes[0], st.Pushes[1] = st.Pushes[1], st.Pushes[0]
-	if err := store.save(st); err != nil {
-		t.Fatal(err)
-	}
-	assertMutations([]string{"pushes:UPDATE:0", "pushes:UPDATE:1"})
-	checkState(t, store, st)
-	delete(st.Work, "acme/project#43")
-	st.Repositories = nil
-	st.Pushes = nil
-	if err := store.save(st); err != nil {
-		t.Fatal(err)
-	}
-	assertMutations([]string{"pushes:DELETE:0", "pushes:DELETE:1", "repositories:DELETE:acme/project", "work_items:DELETE:acme/project#43"})
-	checkState(t, store, st)
-	// Compare against persisted rows after reopening, rather than a pointer cache.
-	if err := store.db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.db.Close()
-	checkState(t, reopened, st)
-	if err := reopened.save(st); err != nil {
-		t.Fatal(err)
-	}
-	var writes int
-	if err := reopened.db.QueryRow("SELECT count(*) FROM mutations").Scan(&writes); err != nil || writes != 0 {
-		t.Fatalf("restart no-op writes = %d, err = %v", writes, err)
-	}
-}
-
-func TestSQLiteIncrementalDeleteRollback(t *testing.T) {
-	store, err := openStore(filepath.Join(t.TempDir(), stateDatabase))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.db.Close()
-	initial := storedFixture()
-	if err := store.save(initial); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`CREATE TRIGGER fail_delete BEFORE DELETE ON pushes BEGIN SELECT RAISE(ABORT, 'injected deletion failure'); END;`); err != nil {
-		t.Fatal(err)
-	}
-	next := storedFixture()
-	next.Work["acme/project#42"].Task.Attempts++
-	delete(next.Work, "acme/project#43")
-	next.Pushes = nil
-	if err := store.save(next); err == nil {
-		t.Fatal("expected deletion failure")
-	}
-	checkState(t, store, initial)
-	if _, err := store.db.Exec("DROP TRIGGER fail_delete"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.save(next); err != nil {
-		t.Fatal(err)
-	}
-	checkState(t, store, next)
 }

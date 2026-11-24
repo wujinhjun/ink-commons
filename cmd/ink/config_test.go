@@ -7,19 +7,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
 	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
-func TestLegacyCCConnectConfigAndRoute(t *testing.T) {
+func TestCCConnectConfigAndRoute(t *testing.T) {
 	t.Setenv("INK_CC_CONNECT_TOKEN", "test")
 	t.Setenv("INK_DISCORD_TOKEN", "test")
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{
 		"cc_connect_url":"http://127.0.0.1:9111/hook",
-		"repositories":[{"repo":"acme/project","reviewer_login":"reviewer","reviewer_project":"reviewer","review_channel_id":"77"}]
+		"repositories":[{"repo":"acme/project","reviewer_login":"reviewer","reviewer_route":{"provider":"cc-connect","target":"reviewer","parent":"77"}}]
 	}`), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -28,21 +29,39 @@ func TestLegacyCCConnectConfigAndRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	if actual := cfg.Repositories[0].ReviewerRoute; actual == nil || *actual != (execution.Route{Provider: ccconnect.Name, Target: "reviewer", Parent: "77"}) {
-		t.Fatalf("legacy configuration mismatch: %+v", actual)
+		t.Fatalf("configuration mismatch: %+v", actual)
 	}
 	if _, ok := providers[ccconnect.Name].(*ccconnect.Executor); !ok {
 		t.Fatal("cc-connect executor was not registered")
 	}
 
 	var route execution.Route
-	if err := json.Unmarshal([]byte(`{"project":"dev","session_key":"discord:19"}`), &route); err != nil {
+	if err := json.Unmarshal([]byte(`{"provider":"cc-connect","target":"dev","session":"discord:19"}`), &route); err != nil {
 		t.Fatal(err)
 	}
 	getenv := func(name string) string {
 		return map[string]string{"CC_PROJECT": "dev", "CC_SESSION_KEY": "discord:19"}[name]
 	}
 	if route != routeFromEnv(getenv) || route != (execution.Route{Provider: ccconnect.Name, Target: "dev", Session: "discord:19"}) {
-		t.Fatalf("legacy routing mismatch: %+v", route)
+		t.Fatalf("routing mismatch: %+v", route)
+	}
+}
+
+func TestRemovedConfigFieldsAreRejected(t *testing.T) {
+	for _, field := range []string{"reviewer_project", "review_channel_id", "project", "session_key"} {
+		t.Run(field, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			entry := fmt.Sprintf(`%q:"obsolete"`, field)
+			if field == "project" || field == "session_key" {
+				entry = `"reviewer_route":{"provider":"cc-connect","target":"dev",` + entry + "}"
+			}
+			if err := os.WriteFile(path, []byte(`{"repositories":[{"repo":"acme/project","reviewer_login":"reviewer",`+entry+`}]}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "unknown field "+fmt.Sprintf("%q", field)) {
+				t.Fatalf("configuration accepted removed field %s: %v", field, err)
+			}
+		})
 	}
 }
 

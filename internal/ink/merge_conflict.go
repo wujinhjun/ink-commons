@@ -109,11 +109,10 @@ func (w *Work) blockedConflictTask() bool {
 func (s *Service) observeMergeConflict(repoName string, number int, version uint64, pull Pull, base PullBase, dirty bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	w, err := s.store.loadWork(key(repoName, number))
 	if err != nil {
 		return err
 	}
-	w := st.Work[key(repoName, number)]
 	repo, ok := s.repo(repoName)
 	if w == nil || w.Version != version || w.Phase != "approved" || !ok || (repo.AutoMerge == nil || !repo.AutoMerge.Enabled) ||
 		w.Pull.Head.SHA != pull.Head.SHA || w.Pull.Base.Ref != pull.Base.Ref || hasInFlightAutoMerge(w) {
@@ -176,5 +175,5 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 		}
 	}
 	w.refreshWorkflow(now, s.config.Reliability.defaults())
-	return s.store.save(st)
+	return s.store.saveWork(w)
 }

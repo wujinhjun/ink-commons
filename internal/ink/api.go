@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -163,22 +162,12 @@ func decode(w http.ResponseWriter, r *http.Request, result any) error {
 
 func (s *Service) listWork(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	st, err := s.store.load()
+	list, err := s.store.listWork()
 	s.mu.Unlock()
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	list := make([]*Work, 0, len(st.Work))
-	for _, work := range st.Work {
-		list = append(list, work)
-	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].Repo != list[j].Repo {
-			return list[i].Repo < list[j].Repo
-		}
-		return list[i].Pull.Number < list[j].Pull.Number
-	})
 	reply(w, 200, list)
 }
 
@@ -198,15 +187,7 @@ func (s *Service) pushes(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	now := time.Now()
-	prunePushes(&st, now)
-	s.recordPushes(&st, input, now)
-	if err := s.store.save(st); err != nil {
+	if err := s.recordPushes(input, time.Now()); err != nil {
 		fail(w, err)
 		return
 	}
@@ -237,12 +218,11 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	work, err := s.store.loadWork(key(repo, number))
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	work := st.Work[key(repo, number)]
 	if work == nil {
 		fail(w, apiError{404, "PR not observed yet"})
 		return
@@ -261,7 +241,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 			if work.ReviewerOverride == nil || !bytes.Equal(jsonValue(work.ReviewerOverride), jsonValue(requested)) {
 				work.ReviewerOverride = cloneAssignee(requested)
 				work.Version++
-				if err := s.store.save(st); err != nil {
+				if err := s.store.saveWork(work); err != nil {
 					fail(w, err)
 					return
 				}
@@ -309,7 +289,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	if err := s.store.save(st); err != nil {
+	if err := s.store.saveWork(work); err != nil {
 		fail(w, err)
 		return
 	}

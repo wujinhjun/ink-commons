@@ -58,7 +58,7 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{httpagent.Name: executor})
+	service, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{httpagent.Name: executor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {
 	if err := service.dispatch(ctx, repo, 3); err != nil {
 		t.Fatal(err)
 	}
-	st, err := service.store.load()
+	st, err := loadFixture(service.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestReviewPlacementIgnoresRepositoryParent(t *testing.T) {
 				t.Fatal(err)
 			}
 			repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer", ReviewerRoute: &execution.Route{Provider: ccconnect.Name, Target: "reviewer", Parent: "88"}}
-			service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: executor})
+			service, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: executor})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -189,7 +189,7 @@ func TestReviewPlacementIgnoresRepositoryParent(t *testing.T) {
 			if err := service.dispatch(context.Background(), repo, 3); err != nil {
 				t.Fatal(err)
 			}
-			st, err := service.store.load()
+			st, err := loadFixture(service.store)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -222,7 +222,7 @@ func TestReviewerAssignmentRejectsMissingSourceBeforeMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := Repository{Repo: "acme/project", ReviewerLogin: "default-reviewer", ReviewerRoute: &execution.Route{Provider: ccconnect.Name, Target: "reviewer", Parent: "88"}}
-	service, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: executor})
+	service, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: executor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestReviewerAssignmentRejectsMissingSourceBeforeMutation(t *testing.T) {
 	if response.Code != 400 || !strings.Contains(response.Body.String(), "Discord development conversation") {
 		t.Fatalf("missing immediate validation: %d %s", response.Code, response.Body)
 	}
-	st, err := service.store.load()
+	st, err := loadFixture(service.store)
 	if err != nil {
 		t.Fatal(err)
 	}

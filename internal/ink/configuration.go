@@ -171,9 +171,8 @@ func resolveConfig(name string, global GlobalConfig, override RepositoryOverride
 	return effective, nil
 }
 
-// Historical repository objects were complete settings, not patches. Include
-// their empty and nil fields so migration cannot unexpectedly enable inheritance.
-func legacyRepositoryValues(repo Repository) ConfigValues {
+// Static repository entries seed complete overrides, including empty values.
+func repositoryValues(repo Repository) ConfigValues {
 	return ConfigValues{
 		"reviewer_login": jsonValue(repo.ReviewerLogin), "reviewer_command": jsonValue(repo.ReviewerCommand),
 		"human_developer": jsonValue(repo.HumanDeveloper), "reviewer_route": jsonValue(repo.ReviewerRoute),

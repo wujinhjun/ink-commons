@@ -166,11 +166,10 @@ func (u upstream) merge(ctx context.Context, repo string, number int, sha, metho
 func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun, reserve bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	w, err := s.store.loadWork(key(repo.Repo, number))
 	if err != nil {
 		return false, err
 	}
-	w := st.Work[key(repo.Repo, number)]
 	if w == nil {
 		return false, nil
 	}
@@ -223,7 +222,7 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 		s.reserveMergedNotification(w, repo, run)
 	}
 	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	return true, s.store.save(st)
+	return true, s.store.saveWork(w)
 }
 
 func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) error {
@@ -231,12 +230,11 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		return nil
 	}
 	s.mu.Lock()
-	st, err := s.store.load()
+	w, err := s.store.loadWork(key(repo.Repo, number))
 	if err != nil {
 		s.mu.Unlock()
 		return err
 	}
-	w := st.Work[key(repo.Repo, number)]
 	if w == nil {
 		s.mu.Unlock()
 		return nil
@@ -254,7 +252,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 			}
 		}
 		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-		err := s.store.save(st)
+		err := s.store.saveWork(w)
 		s.mu.Unlock()
 		return err
 	}

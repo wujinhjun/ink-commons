@@ -6,6 +6,7 @@ sql:
     gen:
       go:
         package: statedb
+        build_tags: linux || darwin
         out: internal/ink/statedb
   - engine: sqlite
     schema: internal/execution/ledger/sql/schema.sql

@@ -5,7 +5,6 @@ package ink
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -17,18 +16,11 @@ import (
 )
 
 func Serve(ctx context.Context, cfg Config, dir string, providers map[string]execution.Executor) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := checkStateDir(dir); err != nil {
 		return err
-	}
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return fmt.Errorf("daemon state directory must be a directory with private permissions")
 	}
 	statePath := filepath.Join(dir, stateDatabase)
-	lock, err := lockState(filepath.Join(dir, legacyState))
+	lock, err := lockState(dir)
 	if err != nil {
 		return err
 	}

@@ -124,7 +124,7 @@ ink task retry --task TASK_UUID
 
 ## 升级与回滚
 
-升级前用 `ink state backup` / `ink state export` 备份。状态数据库使用 schema version 4，保护任务领取/交接记录和中心配置；旧二进制拒绝打开该版本。任务及 outbox 仍在 work payload 内事务保存，运行期配置存入独立 runtime_config 表。
+备份 SQLite v6 可保留任务领取与交接记录。任务、交接与通知索引和 PR payload 在同一事务更新。旧库切换按[单实例检查清单](migration.md)执行。
 
 不要把数据库 user_version 手工改回 2。若需降级，先交回/核查所有未决 cooperative 和旧执行任务，并保留最新完整备份；显式转换和核对状态之后才可使用旧版。恢复升级前快照会丢失之后发生的任务交接。
 

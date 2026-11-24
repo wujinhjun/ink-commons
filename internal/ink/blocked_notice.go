@@ -10,6 +10,7 @@ import (
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
 	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 // A nil hook disables delivery. An empty object uses the development conversation.
@@ -57,12 +58,19 @@ func (s *Service) reserveBlockedNotice(w *Work, task *Task) {
 
 func (s *Service) reconcileBlockedNotices(ctx context.Context) error {
 	s.mu.Lock()
-	st, err := s.store.load()
+	ids, err := statedb.New(s.store.db).ListBlockedNoticePending(ctx)
 	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	for _, w := range st.Work {
+	for _, id := range ids {
+		w, err := s.store.loadWork(id)
+		if err != nil {
+			return err
+		}
+		if w == nil {
+			continue
+		}
 		for _, t := range w.executionTasks() {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -78,21 +86,24 @@ func (s *Service) reconcileBlockedNotices(ctx context.Context) error {
 }
 
 func blockedNoticeDue(t *Task, now time.Time) bool {
+	return hasBlockedNotice(t) && !now.Before(t.Handoff.BlockedNotice.RetryAt)
+}
+
+func hasBlockedNotice(t *Task) bool {
 	if t == nil || t.Handoff == nil || t.Handoff.State != "blocked" || t.Handoff.Submission == nil {
 		return false
 	}
 	n := t.Handoff.BlockedNotice
-	return n != nil && n.Session != "" && n.SentAt.IsZero() && !now.Before(n.RetryAt)
+	return n != nil && n.Session != "" && n.SentAt.IsZero()
 }
 
 func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error {
 	s.mu.Lock()
-	st, err := s.store.load()
+	w, t, err := s.store.loadTask(taskID)
 	if err != nil {
 		s.mu.Unlock()
 		return err
 	}
-	w, t := findTask(st, taskID)
 	now := time.Now()
 	if !blockedNoticeDue(t, now) {
 		s.mu.Unlock()
@@ -106,7 +117,7 @@ func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error
 	attempt, session := n.Attempts, n.Session
 	delivery := deliveryFor(w, t, "", 0)
 	reason := t.Handoff.Submission.Reason
-	err = s.store.save(st)
+	err = s.store.saveWork(w)
 	s.mu.Unlock()
 	if err != nil {
 		return err
@@ -120,11 +131,10 @@ func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err = s.store.load()
+	w, t, err = s.store.loadTask(taskID)
 	if err != nil {
 		return err
 	}
-	_, t = findTask(st, taskID)
 	if t == nil || t.Handoff == nil || t.Handoff.BlockedNotice == nil || t.Handoff.BlockedNotice.Attempts != attempt {
 		return nil
 	}
@@ -135,5 +145,5 @@ func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error
 	} else {
 		n.SentAt, n.RetryAt = time.Now(), time.Time{}
 	}
-	return s.store.save(st)
+	return s.store.saveWork(w)
 }
