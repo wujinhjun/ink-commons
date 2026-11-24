@@ -7,58 +7,67 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/spf13/cobra"
 	"github.com/wujinhjun/ink-commons/skills"
 )
 
 // init 只安装当前用户的协作指令，不启动服务、注册仓库或改变活跃会话。
-func initialize(args []string) error {
-	flags := flag.NewFlagSet("init", flag.ContinueOnError)
+func initialize(options *cliOptions) *cobra.Command {
+	command := &cobra.Command{Use: "init", Short: "Install or check the workflow skill"}
+	flags := command.Flags()
 	check := flags.Bool("check", false, "check installed skill and link without writing")
 	destination := flags.String("skills-dir", "", "agent discovery directory (default: ~/.agents/skills, shared by Pi and Codex)")
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
+
+	command.RunE = func(_ *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			return errors.New("usage: ink init [--check] [--skills-dir DIR]")
 		}
-		return err
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return err
+		}
+		data := os.Getenv("XDG_DATA_HOME")
+		if data == "" {
+			data = filepath.Join(home, ".local", "share")
+		}
+		if !filepath.IsAbs(data) {
+			return errors.New("XDG_DATA_HOME must be absolute")
+		}
+		if *destination == "" {
+			*destination = filepath.Join(home, ".agents", "skills")
+		}
+		dest, err := filepath.Abs(*destination)
+		if err != nil {
+			return err
+		}
+		root := filepath.Join(data, "ink-commons", "skills")
+		if options.data != "" {
+			state, err := options.directory()
+			if err != nil {
+				return err
+			}
+			root = filepath.Join(state, "skills")
+		}
+		if err := installWorkflow(root, dest, *check); err != nil {
+			return err
+		}
+		if options.json {
+			return printJSON(map[string]any{"skill": skills.Name, "checked": *check, "status": "ok"})
+		}
+		if *check {
+			fmt.Printf("Skill check passed: %s\n", filepath.Join(dest, skills.Name))
+		} else {
+			fmt.Printf("Skill installed and linked: %s\n", filepath.Join(dest, skills.Name))
+		}
+		fmt.Println("This checks files only; it does not prove a running agent loaded the skill. Start a new session, or explicitly read SKILL.md in an existing session before further workflow work.")
+		return nil
 	}
-	if flags.NArg() != 0 {
-		return errors.New("usage: ink init [--check] [--skills-dir DIR]")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	data := os.Getenv("XDG_DATA_HOME")
-	if data == "" {
-		data = filepath.Join(home, ".local", "share")
-	}
-	if !filepath.IsAbs(data) {
-		return errors.New("XDG_DATA_HOME must be absolute")
-	}
-	if *destination == "" {
-		*destination = filepath.Join(home, ".agents", "skills")
-	}
-	dest, err := filepath.Abs(*destination)
-	if err != nil {
-		return err
-	}
-	root := filepath.Join(data, "ink-commons", "skills")
-	if err := installWorkflow(root, dest, *check); err != nil {
-		return err
-	}
-	if *check {
-		fmt.Printf("Skill check passed: %s\n", filepath.Join(dest, skills.Name))
-	} else {
-		fmt.Printf("Skill installed and linked: %s\n", filepath.Join(dest, skills.Name))
-	}
-	fmt.Println("This checks files only; it does not prove a running agent loaded the skill. Start a new session, or explicitly read SKILL.md in an existing session before further workflow work.")
-	return nil
+	return command
 }
 
 func workflowTarget(root string) string {

@@ -7,7 +7,7 @@ daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`�
 
 ## 存储与作用域
 
-- JSON 的 `DaemonConfig` 管理静态启动参数：`poll_seconds`、`github_command`、`providers`（参见 [HTTP Adapter 配置](adapters.md)）。状态目录和部署 gate 沿用启动参数；凭据来自 daemon 环境。修改这些参数需要重启。
+- 静态启动参数及初始策略见 [完整配置示例](../config.example.json) 和 [JSON Schema](../config.schema.json)。`providers` 是按名称索引的 HTTP Adapter 配置，每项独立声明 `url`、`capabilities`、可选的 `token_env`、`managed` 和 `require_ack`。路由的 `provider` 引用该名称。修改静态参数需要重启。
 - SQLite 的 `GlobalConfig` 管理全局运行期默认值。
 - SQLite 的 `RepositoryOverride` 只保存单仓库显式覆盖；注册记录即使为空对象也表示已注册。
 - `EffectiveConfig` 合并内置默认值、全局配置和仓库覆盖，返回值、来源和单调递增的配置 generation。PR 的显式负责人指派位于最高层，持久化在中心工作项。
@@ -23,7 +23,7 @@ daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`�
 | `task_mode` | `legacy` 或 `cooperative` / legacy | 全局、仓库 |
 | `review` | ReviewFeatures / null | 全局、仓库；整体替换；null 关闭 |
 | `auto_merge` | AutoMergeConfig / null | 全局、仓库；整体替换；null 关闭 |
-| `postApproval` | ApprovalHook / null | 全局、仓库；整体替换；null 禁用 |
+| `post_approval` | ApprovalHook / null | 全局、仓库；整体替换；null 禁用 |
 | `task_blocked` | TaskBlockedHook / null | 全局、仓库；整体替换；默认关闭 |
 | `execution.ack_seconds` | int / 120 | 全局、仓库，按字段覆盖 |
 | `execution.heartbeat_seconds` | int / 180 | 同上 |
@@ -36,7 +36,11 @@ daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`�
 
 运行期 execution 数值必须为正整数，超时 / 退避上限 604800 秒，max_attempts 上限 100。零值不会表示继承；请用 `unset`。旧 JSON 中零值表示默认的历史语义在导入时转换为缺省。
 
-## GitHub CLI 适配
+## GitHub 身份与 CLI 适配
+
+用 `github_reader` 指定观察仓库和 PR 的凭据，用独立的 `github_merger` 指定自动合入身份。每个角色从 `token_env`、`app` 和 `helper` 中选择一个来源。配置文件只引用环境变量名、App 密钥文件或 helper 命令。GitHub App 的 `app_id`、`installation_id` 和 `private_key_file` 对应服务身份；helper 用 `command`、`args` 和 `identity` 指定。凭据取值和权限验证由 daemon 完成。详见 [GitHub 凭据契约](github-contracts.md)。
+
+### GitHub CLI 适配
 
 `github_command` 和 `github_merger_command` 指向服务用户可运行的绝对路径。可以在启动 JSON 中设置 `github_read_args` 和 `github_merge_args`，分别替换读取和合入命令的参数前缀。参数按数组逐项传入，不经过 shell。`{repo}` 会替换为当前请求的 `owner/repo`。合入参数也用于显式复用 reader App 时的合入调用。
 
@@ -45,6 +49,8 @@ daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`�
 参数数组只放命令选项。凭据由服务用户运行的客户端或包装器提供。直接使用 `gh` 时，它会采用该进程可用的 GitHub 身份。需要仓库范围的短期 App 凭据时，使用可按 `{repo}` 申请凭据的包装器。自动合入沿用现有身份策略和摘要校验。
 
 ## CLI
+
+完整命令和 `--data`、`--json` 用法见 [CLI 参考](cli.md)。
 
 先启动 daemon，再集中设置默认值和注册仓库；无需进入目标 checkout：
 
@@ -61,15 +67,15 @@ ink config get reviewer_login --repo owner/repository --effective
 ink config get reviewer_login --repo owner/repository --pr 42 --effective
 
 ink config set execution.max_attempts 5 --repo owner/repository
-ink config set postApproval null --repo owner/repository
-ink config unset postApproval --repo owner/repository
+ink config set post_approval null --repo owner/repository
+ink config unset post_approval --repo owner/repository
 ```
 
 所有操作必须显式选择 `--global` 或 `--repo`。`set` 值支持 JSON，也接受未加 JSON 双引号的普通字符串；字符串 `null`、`false` 或数字如需作为字符串，必须额外使用 JSON 双引号。`--effective` 仅用于 get/list，输出最终值和 `builtin`、`global`、`repository`、`pr` 来源。`--json` 输出含 revision 的 API JSON，便于脚本处理。
 
 `--pr` 的 effective 视图展示当前配置与 PR 显式指派的合并结果；正在进行的任务实际使用其 `config_snapshot`，应通过工作项 / task API 查看。配置查询不触发派发。修改配置立即提交 SQLite，不用重启；下一次任务准备时重新读取，不要求等待下一轮 GitHub 同步。轮询周期仍是静态启动参数。
 
-注册只存传入的覆盖项，不展开全局默认值。对已注册仓库不带覆盖项再次 register 返回当前配置；完全相同的显式覆盖项重复注册是幂等的。冲突不会覆盖已有配置，应通过 set/unset 管理。显式值即使与当前全局值相等也会保留，直到 unset。当前没有注销接口。
+注册只存传入的覆盖项，不展开全局默认值。对已注册仓库不带覆盖项再次 register 返回当前配置；完全相同的显式覆盖项重复注册是幂等的。冲突不会覆盖已有配置，应通过 set/unset 管理。显式值即使与当前全局值相等也会保留，直到 unset。用 `ink repo update --values JSON` 一次提交多个仓库覆盖项。
 
 ## API 与写入一致性
 
@@ -79,12 +85,20 @@ CLI 经仅本地 daemon 用户可访问的 Unix socket 调用：
 - `GET /v1/config?repo=owner/repository&effective=true`：合并结果和逐键来源。
 - 添加 `key=reviewer_login` 查询单键；原始视图以 `present` 区分缺省和显式 null。
 - 添加 `pr=42&effective=true` 查看 PR 显式指派来源，仅支持已观察 PR。
-- `POST /v1/config?repo=owner/repository&key=postApproval`，body `{"value":null}`：设置值。
-- `DELETE /v1/config?repo=owner/repository&key=postApproval`：删除覆盖项。
+- `POST /v1/config?repo=owner/repository&key=post_approval`，body `{"value":null}`：设置值。
+- `DELETE /v1/config?repo=owner/repository&key=post_approval`：删除覆盖项。
+- `PATCH /v1/repositories/{owner}/{repo}`：原子写入仓库覆盖项，body 是配置键值对象。
+- `DELETE /v1/repositories/{owner}/{repo}`：注销并返回 `{"repo":"owner/repo","status":"removed"}`。
 
 写入在 Service 锁和单个 SQLite 事务内完成：读取 → 修改 → 校验最终配置及所有受影响仓库 → 递增 generation → 提交。修改全局配置不能使已注册仓库失去 reviewer 或产生不合法的路由 / review 组合。非法请求、SQL 错误均不会提交部分更新。
 
 `runtime_config` 使用专用 sqlc 查询和独立更新接口，不参与工作流的完整状态快照保存。投递和状态恢复中的旧快照不能覆盖配置。CLI 不直接打开数据库，不支持绕过 daemon 的外部 writer；不要在运行期间手工编辑 SQLite。
+
+## 仓库注销
+
+`ink repo remove owner/repo` 停止该仓库的 GitHub 观察、新任务派发和 push 来源登记。注销同一事务中清理已排队的 push 来源、撤销尚未执行的任务并递增配置 generation。历史工作项、审批收据和通知仍可查询。显式重新注册后，从下一轮开始按当前 GitHub 状态继续观察。
+
+仓库存在未结清的执行或 handoff、待确认的通知、待运行的 `post_approval`、在途或结果待确认的合入、准备中或 active 的工作区时，接口返回 HTTP 409，并保留原配置和全部状态。已经进入结果未知且按规则停止自动重放的 hook 作为历史收据保留。正在发现 PR、处理工作项或执行 hook 时，等待该仓库后台操作完成后重试。历史独立工作区若没有记录所属仓库，先安全释放该分配。注销只读取工作区状态，释放操作仍通过 `ink workspace release` 执行，保留其现有的 dirty 和已发布检查。
 
 ## 任务生效边界
 
@@ -100,10 +114,10 @@ CLI 经仅本地 daemon 用户可访问的 Unix socket 调用：
 
 历史读取在发起请求和返回结果前均核对当前任务的快照权限、来源及读取边界。当前仓库关闭历史开关可撤销访问；之后重新开启不能扩大已派发任务的快照权限，改派开发者也不会切换该 reviewer 任务的来源 thread。
 
-轮询最多同时发现 4 个仓库、处理 8 个 PR。同一 PR 的后台工作串行执行。批准后先持久化待执行事件，合入判断完成后由独立的 2 个 worker 执行 postApproval。执行前重验 PR head、批准和配置。hook 默认超时 60 秒，可通过 `timeout_seconds` 覆盖。按仓库、PR、SHA 去重，失败或结果不明的事件不会自动重放。
+轮询最多同时发现 4 个仓库、处理 8 个 PR。同一 PR 的后台工作串行执行。批准后先持久化待执行事件，合入判断完成后由独立的 2 个 worker 执行 post_approval。执行前重验 PR head、批准和配置。hook 默认超时 60 秒，可通过 `timeout_seconds` 覆盖。按仓库、PR、SHA 去重，失败或结果不明的事件不会自动重放。
 
 ## 初始化与备份
 
-`ink state init` 显式创建 schema v6 数据库。首次启动在同一事务写入启动 JSON 中的 `repository_defaults`、`execution` 和 `repositories`。静态仓库条目按完整覆盖写入，未设置的可空字段保留为显式 `null`。之后用 `ink config` 更新 SQLite 中的运行期配置。
+`ink state init` 显式创建 schema v7 数据库。首次启动在同一事务写入启动 JSON 中的 `repository_defaults`、`execution` 和 `repositories`。静态仓库条目按完整覆盖写入，未设置的可空字段保留为显式 `null`。之后用 `ink config` 更新 SQLite 中的运行期配置。
 
 用 `ink state backup` 保存可恢复的 SQLite 快照。JSON 导出供诊断和人工核对。旧库切换按[单实例检查清单](migration.md)执行。

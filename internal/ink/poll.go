@@ -48,6 +48,17 @@ func (l *pullLocks) tryLock(id pullKey) (func(), bool) {
 	}, true
 }
 
+func (l *pullLocks) activeRepository(repo string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id := range l.busy {
+		if id.repo == repo {
+			return true
+		}
+	}
+	return false
+}
+
 type pollJob struct {
 	repo    Repository
 	number  int
@@ -163,6 +174,15 @@ func (s *Service) Poll(ctx context.Context) {
 // The open list discovers PR numbers. A worker reads the actual PR after it
 // owns the key, so overlapping observations cannot apply stale list payloads.
 func (s *Service) pollRepo(ctx context.Context, repo Repository, recoveryByPR map[int]recovery, send func(pollJob)) error {
+	// PR number zero reserves the discovery request for this repository.
+	unlock, ok := s.pullLocks.tryLock(pullKey{repo.Repo, 0})
+	if !ok {
+		return nil
+	}
+	defer unlock()
+	if registered, err := s.registeredForPoll(ctx, repo.Repo); err != nil || !registered {
+		return err
+	}
 	path := "/repos/" + repo.Repo + "/pulls"
 	pulls, listErr := listPages[Pull](ctx, s.up.observer(), path+"?state=open")
 	pending, pendingErr := statedb.New(s.store.db).ListPollPending(ctx, repo.Repo)
@@ -216,6 +236,9 @@ func (s *Service) pollPull(ctx context.Context, job pollJob) error {
 	if !job.observe {
 		return recoveryErr
 	}
+	if registered, err := s.registeredForPoll(ctx, repo.Repo); err != nil || !registered {
+		return errors.Join(recoveryErr, err)
+	}
 	observed, err := s.observePull(ctx, repo, number)
 	if err != nil || observed == nil {
 		return errors.Join(recoveryErr, err)
@@ -233,6 +256,15 @@ func (s *Service) pollPull(ctx context.Context, job pollJob) error {
 		queued = s.queueApproval(ctx, *hook, unlock)
 	}
 	return errors.Join(recoveryErr, hookErr, err)
+}
+
+// Serialize registration checks with removal. A reservation acquired during
+// removal only proceeds if the repository still exists after the commit.
+func (s *Service) registeredForPoll(ctx context.Context, repo string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found, err := statedb.New(s.store.db).HasRuntimeConfig(ctx, repo)
+	return found != 0, err
 }
 
 type observationKey struct{}

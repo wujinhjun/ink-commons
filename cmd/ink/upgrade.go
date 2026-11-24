@@ -5,12 +5,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 )
 
-func upgradeServices(args []string) error {
+func upgradeServices(args []string, quiet bool) error {
 	binary, err := os.Executable()
 	if err != nil {
 		return err
@@ -34,5 +35,8 @@ func upgradeServices(args []string) error {
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
+	if quiet {
+		command.Stdout, command.Stderr = io.Discard, io.Discard
+	}
 	return command.Run()
 }

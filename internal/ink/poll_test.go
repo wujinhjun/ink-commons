@@ -121,7 +121,7 @@ func TestPollSlowHookRunsAfterMergeAndLeavesOtherPRsFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	hook := ApprovalHook{Command: []string{script, marker}, TimeoutSeconds: 2}
-	if _, err := f.s.changeConfig(f.repo.Repo, "postApproval", jsonValue(hook), false); err != nil {
+	if _, err := f.s.changeConfig(f.repo.Repo, "post_approval", jsonValue(hook), false); err != nil {
 		t.Fatal(err)
 	}
 	original := f.s.up.http.Transport
@@ -310,7 +310,7 @@ func TestPendingApprovalSurvivesRestartAndMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	hook := ApprovalHook{Command: []string{script}}
-	if _, err := f.s.changeConfig(f.repo.Repo, "postApproval", jsonValue(hook), false); err != nil {
+	if _, err := f.s.changeConfig(f.repo.Repo, "post_approval", jsonValue(hook), false); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -376,11 +376,11 @@ func TestPollRetriesFailedApprovalReservationBeforeMerging(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.s.changeConfig(f.repo.Repo, "postApproval", jsonValue(ApprovalHook{Command: []string{script}}), false); err != nil {
+	if _, err := f.s.changeConfig(f.repo.Repo, "post_approval", jsonValue(ApprovalHook{Command: []string{script}}), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.s.store.db.Exec(`CREATE TRIGGER reject_pending_approval BEFORE UPDATE ON work_items
-		WHEN json_extract(NEW.payload, '$.postApproval[0].state') = 'pending'
+		WHEN json_extract(NEW.payload, '$.post_approval[0].state') = 'pending'
 		BEGIN SELECT RAISE(ABORT, 'approval journal write failed'); END`); err != nil {
 		t.Fatal(err)
 	}

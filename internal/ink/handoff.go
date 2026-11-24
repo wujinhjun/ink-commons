@@ -152,6 +152,10 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		reply(out, 200, handoffResponse(w, t, false))
 		return
 	}
+	if _, err := s.store.effectiveConfig(w.Repo); err != nil {
+		fail(out, err)
+		return
+	}
 	if len(input.Token) < 32 || len(input.Token) > 256 {
 		fail(out, apiError{400, "a private random claim token of 32-256 bytes is required"})
 		return

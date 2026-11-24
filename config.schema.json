@@ -1,0 +1,690 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ink Commons daemon configuration",
+  "description": "Static startup configuration and initial SQLite policy. The daemon also checks provider admission, credential isolation and effective runtime policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "poll_seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 86400
+    },
+    "workspace_full_slots": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 32
+    },
+    "log_level": {
+      "type": "string",
+      "enum": [
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ]
+    },
+    "log_format": {
+      "type": "string",
+      "enum": [
+        "text",
+        "json"
+      ]
+    },
+    "github_reader": {
+      "$ref": "#/$defs/github_credential"
+    },
+    "github_merger": {
+      "$ref": "#/$defs/github_credential"
+    },
+    "github_command": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "github_command_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "github_merger_command": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "github_merger_command_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "github_read_args": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "github_merge_args": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "providers": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/provider"
+      }
+    },
+    "repository_defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewer_login": {
+          "type": "string"
+        },
+        "reviewer_command": {
+          "type": "string"
+        },
+        "human_developer": {
+          "type": "string"
+        },
+        "task_mode": {
+          "type": "string",
+          "enum": [
+            "legacy",
+            "cooperative"
+          ]
+        },
+        "reviewer_route": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/route"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "post_approval": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "command": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "string",
+                      "pattern": "^/"
+                    }
+                  ],
+                  "items": {
+                    "type": "string"
+                  },
+                  "minItems": 1
+                },
+                "timeout_seconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 3600
+                }
+              },
+              "required": [
+                "command"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "auto_merge": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "method": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                },
+                "reuse_reader_identity": {
+                  "type": "boolean"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_blocked": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "route": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/route"
+                    },
+                    {
+                      "required": [
+                        "session"
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "review": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "require_same_channel": {
+                  "type": "boolean"
+                },
+                "reuse_development_thread": {
+                  "type": "boolean"
+                },
+                "context": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "thread_history": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "repositories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reviewer_login": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "reviewer_command": {
+            "type": "string"
+          },
+          "human_developer": {
+            "type": "string"
+          },
+          "task_mode": {
+            "type": "string",
+            "enum": [
+              "legacy",
+              "cooperative"
+            ]
+          },
+          "reviewer_route": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/route"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "post_approval": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "command": {
+                    "type": "array",
+                    "prefixItems": [
+                      {
+                        "type": "string",
+                        "pattern": "^/"
+                      }
+                    ],
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  },
+                  "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3600
+                  }
+                },
+                "required": [
+                  "command"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "auto_merge": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "",
+                      "merge",
+                      "squash",
+                      "rebase"
+                    ]
+                  },
+                  "reuse_reader_identity": {
+                    "type": "boolean"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "task_blocked": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "route": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/route"
+                      },
+                      {
+                        "required": [
+                          "session"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "review": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "require_same_channel": {
+                    "type": "boolean"
+                  },
+                  "reuse_development_thread": {
+                    "type": "boolean"
+                  },
+                  "context": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "thread_history": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "repo": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "not": {
+              "pattern": "^(\\.|\\.\\.)/|/(\\.|\\.\\.)$"
+            }
+          }
+        },
+        "required": [
+          "repo",
+          "reviewer_login"
+        ]
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ack_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        },
+        "heartbeat_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        },
+        "execution_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        },
+        "backoff_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        },
+        "result_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    }
+  },
+  "dependentRequired": {
+    "github_merger_command": [
+      "github_merger_command_sha256"
+    ],
+    "github_merger_command_sha256": [
+      "github_merger_command"
+    ],
+    "github_command_sha256": [
+      "github_command"
+    ]
+  },
+  "allOf": [
+    {
+      "not": {
+        "required": [
+          "github_reader",
+          "github_command"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "github_merger",
+          "github_merger_command"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https?://",
+          "format": "uri"
+        },
+        "token_env": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "managed": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "prepare",
+              "deliver",
+              "wake",
+              "notify",
+              "blocked_notice",
+              "placement",
+              "conversation_context",
+              "status",
+              "stop"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "require_ack": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "url",
+        "capabilities"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "managed": {
+                "const": true
+              }
+            },
+            "required": [
+              "managed"
+            ]
+          },
+          "then": {
+            "required": [
+              "token_env"
+            ],
+            "properties": {
+              "capabilities": {
+                "allOf": [
+                  {
+                    "contains": {
+                      "const": "deliver"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "const": "status"
+                    }
+                  },
+                  {
+                    "contains": {
+                      "const": "stop"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "capabilities": {
+                "not": {
+                  "contains": {
+                    "enum": [
+                      "status",
+                      "stop"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "require_ack": {
+                "const": true
+              }
+            },
+            "required": [
+              "require_ack"
+            ]
+          },
+          "then": {
+            "properties": {
+              "capabilities": {
+                "contains": {
+                  "const": "notify"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "github_credential": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "token_env": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "app": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "app_id": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "installation_id": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9223372036854775807
+            },
+            "private_key_file": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          },
+          "required": [
+            "app_id",
+            "installation_id",
+            "private_key_file"
+          ]
+        },
+        "helper": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "string",
+              "pattern": "^/"
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "identity": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+            }
+          },
+          "required": [
+            "command",
+            "identity"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "token_env"
+          ]
+        },
+        {
+          "required": [
+            "app"
+          ]
+        },
+        {
+          "required": [
+            "helper"
+          ]
+        }
+      ]
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "target": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string",
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "provider",
+        "target"
+      ]
+    }
+  }
+}

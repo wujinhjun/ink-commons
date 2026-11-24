@@ -94,7 +94,7 @@ func TestServeRefusesMissingState(t *testing.T) {
 }
 
 func TestStateSchemaRejectsUnsupportedVersions(t *testing.T) {
-	for _, version := range []int{0, 1, 2, 3, 4, 5, 7} {
+	for _, version := range []int{0, 1, 2, 3, 4, 5, 6, 8} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			s, dir := initTestStore(t)
 			if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
@@ -102,7 +102,7 @@ func TestStateSchemaRejectsUnsupportedVersions(t *testing.T) {
 			}
 			s.db.Close()
 			path := filepath.Join(dir, stateDatabase)
-			if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("version %d (expected 6)", version)) {
+			if _, err := openStore(path); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("version %d (expected 7)", version)) {
 				t.Fatalf("open unsupported version: %v", err)
 			}
 			db, err := openSQLite(path)

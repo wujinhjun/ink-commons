@@ -6,6 +6,10 @@
 
 package statedb
 
+import (
+	"database/sql"
+)
+
 type Push struct {
 	Repo       string
 	Ref        string
@@ -57,4 +61,5 @@ type WorkspaceAllocation struct {
 	State        string
 	OwnerRoute   string
 	TaskID       string
+	Repository   sql.NullString
 }

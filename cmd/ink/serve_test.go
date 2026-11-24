@@ -22,7 +22,7 @@ func TestServeRetainsActionableStartupDiagnostics(t *testing.T) {
 		{"bad type", `{"poll_seconds": "private-route-target"}`, "", "expected int"},
 		{"unknown field", `{"private-route-target": "Bearer ghp_private-token"}`, "", "unknown JSON configuration field"},
 		{"missing database", "{}", "", "ink state init"},
-		{"old schema", "{}", "old", "schema version 5 (expected 6)"},
+		{"old schema", "{}", "old", "schema version 5 (expected 7)"},
 		{"malformed database row", "{}", "malformed row", "cannot read runtime configuration rows"},
 		{"bad log level", `{"log_level": "ghp_private-token"}`, "ready", "invalid log_level"},
 		{"bad log format", `{"log_format": "private-route-target"}`, "ready", "log_format must be text or json"},
@@ -71,7 +71,7 @@ func TestServeRetainsActionableStartupDiagnostics(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := serve([]string{"-config", config, "-data", dir})
+			err := run([]string{"serve", "-config", config, "-data", dir})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("serve error = %v, want %q", err, tc.want)
 			}

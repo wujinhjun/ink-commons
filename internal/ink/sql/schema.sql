@@ -42,7 +42,8 @@ CREATE TABLE workspace_allocations (
 	common_dir TEXT NOT NULL, source TEXT NOT NULL, path TEXT NOT NULL,
 	kind TEXT NOT NULL, preference TEXT NOT NULL,
 	ref TEXT NOT NULL, branch TEXT NOT NULL, head TEXT NOT NULL, previous_head TEXT NOT NULL,
-	state TEXT NOT NULL, owner_route TEXT NOT NULL, task_id TEXT NOT NULL
+	state TEXT NOT NULL, owner_route TEXT NOT NULL, task_id TEXT NOT NULL,
+	repository TEXT
 );
 CREATE UNIQUE INDEX workspace_active_path ON workspace_allocations(path)
 WHERE state IN ('preparing', 'active');

@@ -189,7 +189,7 @@ func (s *Service) activateWorkspace(ctx context.Context, req workspaceRequest, a
 		if workspaceStillReleased(ctx, a) {
 			return a, true, apiError{409, err.Error()}
 		}
-		return a, false, apiError{409, fmt.Sprintf("%v; workspace %s remains preparing; inspect %s, then retry request %s or run ink workspace release --id %s", err, a.ID, a.Path, a.RequestID, a.ID)}
+		return a, false, apiError{409, fmt.Sprintf("%s; workspace %s remains preparing; inspect ink workspace list, then retry the same request or run ink workspace release --id %s", StartupDiagnostic(err), a.ID, a.ID)}
 	}
 	active, err := s.workspaceState(ctx, a, "active")
 	return active, false, err
@@ -293,7 +293,7 @@ func (s *Service) reserveWorkspace(ctx context.Context, req workspaceRequest, co
 	}
 	for _, tree := range repo.Worktree {
 		if req.Branch != "" && tree.Branch == req.Branch {
-			return a, apiError{409, "branch is already checked out in " + tree.Path}
+			return a, apiError{409, "branch is already checked out; inspect ink workspace list"}
 		}
 	}
 	if req.Preference != "lite" {
@@ -318,18 +318,19 @@ func (s *Service) reserveWorkspace(ctx context.Context, req workspaceRequest, co
 		}
 		a.Path = filepath.Join(dir, "lite-"+a.ID)
 	}
-	return a, insertWorkspace(ctx, s.store.db, a)
+	remote, _ := workspace.Git(ctx, a.Source, "remote", "get-url", "origin")
+	return a, insertWorkspace(ctx, s.store.db, a, GitHubRepository(strings.TrimSpace(string(remote))))
 }
 
 func insertWorkspace(ctx context.Context, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, a WorkspaceAllocation) error {
+}, a WorkspaceAllocation, repo string) error {
 	route, err := json.Marshal(a.Owner)
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, "INSERT INTO workspace_allocations ("+workspaceColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		a.ID, a.RequestID, a.Common, a.Source, a.Path, a.Kind, a.Preference, a.Ref, a.Branch, a.Head, a.Previous, a.State, string(route), a.TaskID)
+	_, err = db.ExecContext(ctx, "INSERT INTO workspace_allocations ("+workspaceColumns+", repository) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		a.ID, a.RequestID, a.Common, a.Source, a.Path, a.Kind, a.Preference, a.Ref, a.Branch, a.Head, a.Previous, a.State, string(route), a.TaskID, repo)
 	return err
 }
 

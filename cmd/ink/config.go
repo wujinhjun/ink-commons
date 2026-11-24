@@ -10,7 +10,6 @@ import (
 	"maps"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -49,10 +48,14 @@ var providerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) {
-	var file struct {
-		RepositoryDefaults ink.Repository   `json:"repository_defaults,omitempty"`
-		Repositories       []ink.Repository `json:"repositories"`
-		Reliability        ink.Reliability  `json:"execution"`
+	return readConfig(path, true)
+}
+
+func readConfig(path string, admitManaged bool) (ink.Config, map[string]execution.Executor, error) {
+	var file *struct {
+		RepositoryDefaults json.RawMessage   `json:"repository_defaults,omitempty"`
+		Repositories       []json.RawMessage `json:"repositories"`
+		Reliability        ink.Reliability   `json:"execution"`
 		DaemonConfig
 		GitHubReader *ink.GitHubCredential `json:"github_reader,omitempty"`
 		GitHubMerger *ink.GitHubCredential `json:"github_merger,omitempty"`
@@ -68,6 +71,9 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	if err := decoder.Decode(&file); err != nil {
 		return cfg, nil, err
 	}
+	if file == nil {
+		return cfg, nil, fmt.Errorf("expected one configuration object")
+	}
 	var extra json.RawMessage
 	switch err := decoder.Decode(&extra); err {
 	case io.EOF:
@@ -77,9 +83,6 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		return cfg, nil, err
 	}
 	cfg.Reliability = file.Reliability
-	if err := cfg.Reliability.Validate(); err != nil {
-		return cfg, nil, err
-	}
 	cfg.PollSeconds = file.PollSeconds
 	cfg.LogLevel, cfg.LogFormat = file.LogLevel, file.LogFormat
 	cfg.WorkspaceFullSlots = file.WorkspaceFullSlots
@@ -90,40 +93,25 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	cfg.GitHubReadArgs = file.GitHubReadArgs
 	cfg.GitHubMergeArgs = file.GitHubMergeArgs
 	cfg.GitHubReader, cfg.GitHubMerger = file.GitHubReader, file.GitHubMerger
-	if cfg.GitHubCommand != "" && !filepath.IsAbs(cfg.GitHubCommand) {
-		return cfg, nil, fmt.Errorf("github_command must be an absolute App CLI path")
+	if len(file.RepositoryDefaults) != 0 {
+		cfg.RepositoryDefaults, err = ink.ParseStaticRepository(file.RepositoryDefaults, true)
+		if err != nil {
+			return cfg, nil, err
+		}
 	}
-	if err := cfg.ValidateGitHubCommands(); err != nil {
-		return cfg, nil, err
+	for _, raw := range file.Repositories {
+		repo, err := ink.ParseStaticRepository(raw, false)
+		if err != nil {
+			return cfg, nil, err
+		}
+		cfg.Repositories = append(cfg.Repositories, repo)
 	}
-	if cfg.PollSeconds < 0 || cfg.PollSeconds > 86400 {
-		return cfg, nil, fmt.Errorf("poll_seconds must be between 0 and 86400")
-	}
-	if cfg.PollSeconds == 0 {
-		cfg.PollSeconds = 60
-	}
-	cfg.RepositoryDefaults = file.RepositoryDefaults
-	if err := cfg.RepositoryDefaults.TaskBlocked.Validate(); err != nil {
-		return cfg, nil, err
-	}
-	if err := cfg.RepositoryDefaults.AutoMerge.Validate(); err != nil {
-		return cfg, nil, err
-	}
-	if cfg.RepositoryDefaults.Repo != "" {
-		return cfg, nil, fmt.Errorf("repository_defaults must not set repo")
-	}
-	if err := cfg.RepositoryDefaults.PostApproval.Validate(); err != nil {
-		return cfg, nil, err
-	}
-	if err := cfg.RepositoryDefaults.ValidateReviewFeatures(); err != nil {
-		return cfg, nil, err
-	}
-
 	client := &http.Client{
 		Timeout:       25 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	providers := make(map[string]execution.Executor, len(file.Providers))
+	adapters := make([]*httpagent.Executor, 0, len(file.Providers))
 	for _, name := range slices.Sorted(maps.Keys(file.Providers)) {
 		if !providerName.MatchString(name) {
 			return cfg, nil, fmt.Errorf("invalid provider name")
@@ -132,52 +120,33 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		var token string
 		if entry.TokenEnv != "" {
 			if !environmentName.MatchString(entry.TokenEnv) {
-				return cfg, nil, fmt.Errorf("provider %s: invalid token_env", name)
+				return cfg, nil, fmt.Errorf("invalid provider token_env")
 			}
 			token = os.Getenv(entry.TokenEnv)
 			if strings.TrimSpace(token) == "" {
-				return cfg, nil, fmt.Errorf("provider %s: token_env is unset or empty", name)
+				return cfg, nil, fmt.Errorf("provider token_env is unset or empty")
 			}
 		}
 		agent, err := httpagent.New(client, entry.URL, token, entry.Capabilities, entry.Managed, entry.RequireACK)
 		if err != nil {
-			return cfg, nil, fmt.Errorf("provider %s: %w", name, err)
+			return cfg, nil, fmt.Errorf("provider configuration: %w", err)
 		}
-		if err := agent.CheckManaged(context.Background()); err != nil {
-			return cfg, nil, fmt.Errorf("provider %s: %w", name, err)
-		}
+
 		providers[name] = agent
+		adapters = append(adapters, agent)
 	}
-	if route := cfg.RepositoryDefaults.ReviewerRoute; route != nil {
-		if err := execution.ValidateDestination(providers, *route, true); err != nil {
-			return cfg, nil, err
-		}
+	if err := cfg.ValidateStaticPolicy(providers); err != nil {
+		return cfg, nil, err
 	}
-	seen := make(map[string]bool)
-	for _, repo := range file.Repositories {
-		if err := repo.TaskBlocked.Validate(); err != nil {
-			return cfg, nil, err
-		}
-		if err := repo.AutoMerge.Validate(); err != nil {
-			return cfg, nil, err
-		}
-		repo.Repo = strings.ToLower(repo.Repo)
-		if err := repo.PostApproval.Validate(); err != nil {
-			return cfg, nil, err
-		}
-		if !ink.ValidRepository(repo.Repo) || seen[repo.Repo] || repo.ReviewerLogin == "" {
-			return cfg, nil, fmt.Errorf("each repository needs a unique owner/repo and reviewer_login")
-		}
-		seen[repo.Repo] = true
-		if route := repo.ReviewerRoute; route != nil {
-			if err := execution.ValidateDestination(providers, *route, true); err != nil {
-				return cfg, nil, fmt.Errorf("%s reviewer: %w", repo.Repo, err)
+	if admitManaged {
+		for _, agent := range adapters {
+			if err := agent.CheckManaged(context.Background()); err != nil {
+				return cfg, nil, fmt.Errorf("managed provider admission: %w", err)
 			}
 		}
-		if err := repo.ValidateReviewFeatures(); err != nil {
-			return cfg, nil, err
-		}
-		cfg.Repositories = append(cfg.Repositories, repo)
+	}
+	if cfg.PollSeconds == 0 {
+		cfg.PollSeconds = 60
 	}
 	return cfg, providers, nil
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,7 +20,7 @@ type Repository struct {
 	TaskBlocked     *TaskBlockedHook `json:"task_blocked,omitempty"`
 	TaskMode        string           `json:"task_mode,omitempty"`
 	Review          *ReviewFeatures  `json:"review,omitempty"`
-	PostApproval    *ApprovalHook    `json:"postApproval,omitempty"`
+	PostApproval    *ApprovalHook    `json:"post_approval,omitempty"`
 	ReviewerCommand string           `json:"reviewer_command,omitempty"`
 	Repo            string           `json:"repo"`
 	HumanDeveloper  string           `json:"human_developer,omitempty"`
@@ -110,7 +111,7 @@ var configFields = func() map[string]configField {
 			return nil
 		}},
 		"reviewer_route": {jsonValue(nil), true, checked[execution.Route]},
-		"postApproval":   {jsonValue(nil), true, checked[ApprovalHook]},
+		"post_approval":  {jsonValue(nil), true, checked[ApprovalHook]},
 		"task_blocked":   {jsonValue(nil), true, checked[TaskBlockedHook]},
 		"review":         {jsonValue(nil), true, checked[ReviewFeatures]},
 		"auto_merge":     {jsonValue(nil), true, checked[AutoMergeConfig]},
@@ -207,12 +208,111 @@ func resolveConfig(name string, global GlobalConfig, override RepositoryOverride
 	return effective, nil
 }
 
+// ParseStaticRepository checks raw policy with the runtime key registry
+// before decoding it into the static seed representation.
+func ParseStaticRepository(raw json.RawMessage, defaults bool) (Repository, error) {
+	var values ConfigValues
+	var repo Repository
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return repo, err
+	}
+	if values == nil {
+		return repo, diagnosticError("repository policy must be an object")
+	}
+	if defaults {
+		if _, exists := values["repo"]; exists {
+			return repo, diagnosticError("repository_defaults must not set repo")
+		}
+	} else {
+		if err := json.Unmarshal(values["repo"], &repo.Repo); err != nil {
+			return repo, diagnosticError("each repository needs owner/repo")
+		}
+		delete(values, "repo")
+	}
+	for key := range values {
+		if strings.HasPrefix(key, "execution.") {
+			return repo, diagnosticError("put static execution policy in the top-level execution object")
+		}
+	}
+	if err := validateValues(values); err != nil {
+		return repo, err
+	}
+	if err := json.Unmarshal(jsonValue(values), &repo); err != nil {
+		return repo, err
+	}
+	repo.Repo = strings.ToLower(strings.TrimSpace(repo.Repo))
+	return repo, nil
+}
+
+// ValidateStaticPolicy uses the same effective policy and route checks as
+// runtime config writes and registration. Static entries retain full overrides.
+func (c Config) ValidateStaticPolicy(providers map[string]execution.Executor) error {
+	if c.GitHubCommand != "" && !filepath.IsAbs(c.GitHubCommand) {
+		return fmt.Errorf("github_command must be an absolute App CLI path")
+	}
+	up, err := configuredUpstream(c)
+	if err != nil {
+		return err
+	}
+	if c.RepositoryDefaults.Repo != "" {
+		return fmt.Errorf("repository_defaults must not set repo")
+	}
+	if c.PollSeconds < 0 || c.PollSeconds > 86400 {
+		return fmt.Errorf("poll_seconds must be between 0 and 86400")
+	}
+	if c.WorkspaceFullSlots < 0 || c.WorkspaceFullSlots > 32 {
+		return fmt.Errorf("workspace_full_slots must be between 0 and 32")
+	}
+	if _, err := newLogger(io.Discard, c.LogLevel, c.LogFormat); err != nil {
+		return err
+	}
+	if err := c.Reliability.Validate(); err != nil {
+		return err
+	}
+	global := staticGlobal(c)
+	defaults, err := resolveConfig("", global, nil, 0)
+	if err != nil {
+		return err
+	}
+	if err := ValidateRepositoryProvider(defaults.Repository, providers); err != nil {
+		return err
+	}
+	seen := make(map[string]bool)
+	for _, repo := range c.Repositories {
+		if !ValidRepository(repo.Repo) || seen[repo.Repo] {
+			return fmt.Errorf("each repository needs a unique owner/repo")
+		}
+		seen[repo.Repo] = true
+		effective, err := resolveConfig(repo.Repo, global, RepositoryOverride(repositoryValues(repo)), 0)
+		if err != nil {
+			return err
+		}
+		if err := ValidateRepositoryProvider(effective.Repository, providers); err != nil {
+			return err
+		}
+		if err := validateAutoMergeIdentity(up, effective.Repository); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func staticGlobal(config Config) GlobalConfig {
+	global := sparseRepositoryValues(config.RepositoryDefaults)
+	var reliability map[string]json.RawMessage
+	_ = json.Unmarshal(jsonValue(config.Reliability), &reliability)
+	for key, value := range reliability {
+		global["execution."+key] = value
+	}
+	return GlobalConfig(global)
+}
+
 // Static repository entries seed complete overrides, including empty values.
 func repositoryValues(repo Repository) ConfigValues {
 	return ConfigValues{
 		"reviewer_login": jsonValue(repo.ReviewerLogin), "reviewer_command": jsonValue(repo.ReviewerCommand),
 		"human_developer": jsonValue(repo.HumanDeveloper), "reviewer_route": jsonValue(repo.ReviewerRoute),
-		"postApproval": jsonValue(repo.PostApproval), "review": jsonValue(repo.Review), "auto_merge": jsonValue(repo.AutoMerge),
+		"post_approval": jsonValue(repo.PostApproval), "review": jsonValue(repo.Review), "auto_merge": jsonValue(repo.AutoMerge),
 		"task_mode": jsonValue(normalTaskMode(repo.TaskMode)), "task_blocked": jsonValue(repo.TaskBlocked),
 	}
 }

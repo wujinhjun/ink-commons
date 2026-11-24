@@ -1,5 +1,64 @@
 {
   "poll_seconds": 60,
+  "workspace_full_slots": 2,
   "log_level": "info",
-  "log_format": "text"
+  "log_format": "json",
+  "github_reader": {
+    "token_env": "INK_GITHUB_READER_TOKEN"
+  },
+  "github_merger": {
+    "token_env": "INK_GITHUB_MERGER_TOKEN"
+  },
+  "providers": {
+    "reviews": {
+      "url": "http://127.0.0.1:9191/v1/execute",
+      "managed": false,
+      "capabilities": ["wake", "notify"],
+      "require_ack": true
+    },
+    "automation": {
+      "url": "http://127.0.0.1:9192/v1/execute",
+      "managed": false,
+      "capabilities": ["deliver"]
+    }
+  },
+  "repository_defaults": {
+    "reviewer_login": "reviewer-bot",
+    "task_mode": "cooperative",
+    "reviewer_route": {
+      "provider": "reviews",
+      "target": "review-project",
+      "session": "review-session"
+    }
+  },
+  "repositories": [
+    {
+      "repo": "example/project",
+      "reviewer_login": "reviewer-bot",
+      "human_developer": "developer",
+      "task_mode": "cooperative",
+      "reviewer_route": {
+        "provider": "reviews",
+        "target": "review-project",
+        "session": "review-session"
+      },
+      "post_approval": {
+        "command": ["/usr/local/bin/after-approval", "--notify"],
+        "timeout_seconds": 60
+      },
+      "auto_merge": {
+        "enabled": false,
+        "method": "squash",
+        "reuse_reader_identity": false
+      }
+    }
+  ],
+  "execution": {
+    "ack_seconds": 120,
+    "heartbeat_seconds": 180,
+    "execution_seconds": 3600,
+    "backoff_seconds": 30,
+    "result_seconds": 120,
+    "max_attempts": 3
+  }
 }

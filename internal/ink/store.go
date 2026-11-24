@@ -20,7 +20,7 @@ import (
 )
 
 const stateDatabase = "state.sqlite3"
-const schemaVersion = 6
+const schemaVersion = 7
 
 // The lock filename is shared with deployed daemons and the macOS service manager.
 const stateLock = "state.json.lock"
@@ -80,6 +80,12 @@ func checkSchema(db *sql.DB) error {
 	if version != schemaVersion {
 		return fmt.Errorf("unsupported state schema version %d (expected %d); check the data directory, restore a compatible SQLite backup, or initialize a separate directory with ink state init", version, schemaVersion)
 	}
+	return verifyStateTables(db)
+}
+
+func verifyStateTables(db interface {
+	Query(string, ...any) (*sql.Rows, error)
+}) error {
 	// Fail before polling if a workflow table is missing from a damaged database.
 	for _, table := range []string{"work_items", "work_tasks", "work_notifications", "pushes", "runtime_config", "workspace_allocations"} {
 		rows, err := db.Query("SELECT * FROM " + table + " LIMIT 0")
@@ -126,7 +132,7 @@ func InitializeState(dir string) error {
 	}
 	for _, entry := range entries {
 		if entry.Name() != stateLock {
-			return fmt.Errorf("initialization requires a fresh state directory: %s contains %s", dir, entry.Name())
+			return errors.New("initialization requires a fresh state directory")
 		}
 	}
 	return createStateDatabase(filepath.Join(dir, stateDatabase))
@@ -338,4 +344,28 @@ func lockState(dir string) (*os.File, error) {
 		return nil, fmt.Errorf("lock daemon state (stop ink serve first): %w", err)
 	}
 	return f, nil
+}
+
+// CheckState inspects the existing state without initializing or changing it.
+func CheckState(dir string) error {
+	if err := checkStateDir(dir); err != nil {
+		return err
+	}
+	store, err := openStore(filepath.Join(dir, stateDatabase))
+	if err != nil {
+		return err
+	}
+	defer store.db.Close()
+	socket, err := os.Lstat(filepath.Join(dir, "ink.sock"))
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("daemon socket missing; start ink serve with this state directory")
+	}
+	if err != nil {
+		return err
+	}
+	owner, ok := socket.Sys().(*syscall.Stat_t)
+	if !ok || owner.Uid != uint32(os.Geteuid()) || socket.Mode()&os.ModeSocket == 0 || socket.Mode().Perm() != 0600 {
+		return errors.New("ink.sock must be a private Unix socket owned by the current UID")
+	}
+	return nil
 }

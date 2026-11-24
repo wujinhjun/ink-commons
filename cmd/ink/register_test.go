@@ -50,7 +50,7 @@ func TestRegisterDetectsGitRemoteAndUsesLocalDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chdir(cwd)
-	if err := register([]string{"--github-login", "reviewer", "--provider", "chat", "--target", "review-project"}); err != nil {
+	if err := run([]string{"register", "--github-login", "reviewer", "--provider", "chat", "--target", "review-project"}); err != nil {
 		t.Fatal(err)
 	}
 	repo := <-received
@@ -65,9 +65,9 @@ func TestRepositoryDefaultsAndApprovalConfig(t *testing.T) {
 		body  string
 		valid bool
 	}{
-		{`{"repositories":[],"repository_defaults":{"reviewer_login":"reviewer","postApproval":{"command":["/usr/local/bin/after-approval","--notify"]}}}`, true},
-		{`{"repository_defaults":{"postApproval":{"command":["relative"]}}}`, false},
-		{`{"repository_defaults":{"postApproval":{"command":["/bin/true"],"timeout_seconds":-1}}}`, false},
+		{`{"repositories":[],"repository_defaults":{"reviewer_login":"reviewer","post_approval":{"command":["/usr/local/bin/after-approval","--notify"]}}}`, true},
+		{`{"repository_defaults":{"post_approval":{"command":["relative"]}}}`, false},
+		{`{"repository_defaults":{"post_approval":{"command":["/bin/true"],"timeout_seconds":-1}}}`, false},
 		{`{"repository_defaults":{"repo":"acme/project"}}`, false},
 		{`{"repository_defaults":{"auto_merge":{"enabled":true,"method":"unsafe"}}}`, false},
 	} {

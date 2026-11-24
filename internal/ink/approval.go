@@ -27,10 +27,10 @@ func (h *ApprovalHook) Validate() error {
 		return nil
 	}
 	if len(h.Command) == 0 || !filepath.IsAbs(h.Command[0]) {
-		return fmt.Errorf("postApproval.command requires an absolute executable path")
+		return fmt.Errorf("post_approval.command requires an absolute executable path")
 	}
 	if h.TimeoutSeconds < 0 || h.TimeoutSeconds > 3600 {
-		return fmt.Errorf("postApproval.timeout_seconds must be between 0 and 3600")
+		return fmt.Errorf("post_approval.timeout_seconds must be between 0 and 3600")
 	}
 	return nil
 }
@@ -135,7 +135,7 @@ func pendingApproval(work *Work, effective EffectiveConfig) *approvalCandidate {
 		return nil
 	}
 	repo, number := work.Repo, work.Pull.Number
-	event := ApprovalEvent{ID: fmt.Sprintf("%s:%s", key(repo, number), sha), Event: "postApproval", Repository: repo, PullNumber: number, PullURL: work.Pull.URL, SHA: sha, ReviewID: review.ID, ReviewURL: review.URL, Reviewer: review.User.Login}
+	event := ApprovalEvent{ID: fmt.Sprintf("%s:%s", key(repo, number), sha), Event: "post_approval", Repository: repo, PullNumber: number, PullURL: work.Pull.URL, SHA: sha, ReviewID: review.ID, ReviewURL: review.URL, Reviewer: review.User.Login}
 	return &approvalCandidate{event: event, version: work.Version, revision: effective.Revision, hook: effective.Repository.PostApproval}
 }
 

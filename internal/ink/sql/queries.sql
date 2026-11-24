@@ -50,3 +50,19 @@ SELECT scope, payload, revision FROM runtime_config ORDER BY scope;
 -- name: PutRuntimeConfig :exec
 INSERT INTO runtime_config(scope, payload, revision) VALUES (?, ?, ?)
 ON CONFLICT(scope) DO UPDATE SET payload = excluded.payload, revision = excluded.revision;
+
+-- name: DeleteRuntimeConfig :exec
+DELETE FROM runtime_config WHERE scope = ?;
+
+-- name: DeleteRepositoryPushes :exec
+DELETE FROM pushes WHERE repo = ?;
+
+-- name: ListRepositoryWork :many
+SELECT revision, payload FROM work_items WHERE repo = ?;
+
+-- name: ListLiveWorkspaceClaims :many
+SELECT repository, task_id FROM workspace_allocations
+WHERE state IN ('preparing', 'active');
+
+-- name: HasRuntimeConfig :one
+SELECT EXISTS (SELECT 1 FROM runtime_config WHERE scope = ?);

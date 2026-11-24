@@ -19,20 +19,20 @@ func TestInstallHookUsesConfiguredPathAndPreservesExistingHook(t *testing.T) {
 		}
 	}
 	flags := []string{"install", "--checkout", dir}
-	if err := hookCommand(flags); err != nil {
+	if err := run(append([]string{"hook"}, flags...)); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "custom-hooks", "pre-push")
 	if status, err := hookStatus(path); status != "installed" || err != nil {
 		t.Fatalf("hook status %q, %v", status, err)
 	}
-	if err := hookCommand(flags); err != nil {
+	if err := run(append([]string{"hook"}, flags...)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("custom"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := hookCommand(flags); err == nil {
+	if err := run(append([]string{"hook"}, flags...)); err == nil {
 		t.Fatal("unmanaged hook was accepted")
 	}
 	if content, err := os.ReadFile(path); err != nil || string(content) != "custom" {
@@ -50,7 +50,7 @@ func TestHookStatusMatchesActualGitHubPushURLs(t *testing.T) {
 	}
 	git("init", "-q")
 	git("remote", "add", "origin", "ssh://git@github.com/Acme/Upstream.git")
-	if err := hookCommand([]string{"install", "--checkout", dir}); err != nil {
+	if err := run([]string{"hook", "install", "--checkout", dir}); err != nil {
 		t.Fatal(err)
 	}
 	status := func(repo, want string) {
@@ -62,7 +62,7 @@ func TestHookStatusMatchesActualGitHubPushURLs(t *testing.T) {
 		defer reader.Close()
 		old := os.Stdout
 		os.Stdout = writer
-		err = hookCommand([]string{"status", "--checkout", dir, "--repo", repo})
+		err = run([]string{"hook", "status", "--checkout", dir, "--repo", repo})
 		os.Stdout = old
 		writer.Close()
 		if err != nil {
