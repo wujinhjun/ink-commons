@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func awaitPollSignal(t *testing.T, ch <-chan struct{}) {
@@ -212,6 +214,9 @@ func TestWorkflowClockAndRedactedStructuredLogs(t *testing.T) {
 		return w.Result(), nil
 	})
 	s.warnError("provider request", &os.PathError{Op: secret, Path: secret, Err: errors.New(secret)})
+	for _, status := range []int{http.StatusForbidden, http.StatusTooManyRequests, http.StatusBadGateway} {
+		s.warnError("review placement", fmt.Errorf("provider details %s: %w", secret, execution.HTTPStatusError(status)))
+	}
 	s.warnError("approval hook", fmt.Errorf("provider details %s: %w", secret, context.DeadlineExceeded))
 	_, dbErr := s.store.db.Exec("SELECT * FROM missing_private_table")
 	s.warnError("SQLite operation", dbErr)
@@ -238,7 +243,7 @@ func TestWorkflowClockAndRedactedStructuredLogs(t *testing.T) {
 			t.Fatalf("invalid structured warning: %s", line)
 		}
 	}
-	for _, want := range []string{"auto_merge_unknown", repo.Repo, "upstream HTTP 403 (rate limit)", "operation timed out", "SQLite code 1", "filesystem operation"} {
+	for _, want := range []string{"auto_merge_unknown", repo.Repo, "upstream HTTP 403 (rate limit)", "operation timed out", "SQLite code 1", "filesystem operation", "provider HTTP 403", "provider HTTP 429", "provider HTTP 502"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing diagnostic %q: %s", want, out.String())
 		}

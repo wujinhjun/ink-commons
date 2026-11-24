@@ -15,7 +15,9 @@ import (
 func readConfigRecords(tx *sql.Tx) ([]ConfigRecord, error) {
 	rows, err := statedb.New(tx).ListRuntimeConfig(context.Background())
 	if err != nil {
-		return nil, err
+		// database/sql scan errors can quote the stored value when a row has an
+		// invalid column type. Preserve the read stage and safe error details.
+		return nil, diagnosticError("cannot read runtime configuration rows: " + redactedError(err))
 	}
 	var records []ConfigRecord
 	for _, row := range rows {

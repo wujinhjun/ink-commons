@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wujinhjun/ink-commons/internal/execution"
 	"modernc.org/sqlite"
 )
 
@@ -51,6 +52,8 @@ func errorDiagnostic(err error) (string, bool) {
 	switch e := err.(type) {
 	case diagnosticError:
 		return string(e), true
+	case execution.HTTPStatusError:
+		return fmt.Sprintf("provider HTTP %d", int(e)), true
 	case *sqlite.Error:
 		return fmt.Sprintf("SQLite code %d (%s)", e.Code(), sqlite.ErrorCodeString[e.Code()&0xff]), true
 	case *json.SyntaxError:

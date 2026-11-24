@@ -23,6 +23,7 @@ func TestServeRetainsActionableStartupDiagnostics(t *testing.T) {
 		{"unknown field", `{"private-route-target": "Bearer ghp_private-token"}`, "", "unknown JSON configuration field"},
 		{"missing database", "{}", "", "ink state init"},
 		{"old schema", "{}", "old", "schema version 5 (expected 6)"},
+		{"malformed database row", "{}", "malformed row", "cannot read runtime configuration rows"},
 		{"bad log level", `{"log_level": "ghp_private-token"}`, "ready", "invalid log_level"},
 		{"bad log format", `{"log_format": "private-route-target"}`, "ready", "log_format must be text or json"},
 		{"lock held", "{}", "locked", "lock daemon state (stop ink serve first)"},
@@ -43,13 +44,18 @@ func TestServeRetainsActionableStartupDiagnostics(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch tc.state {
-			case "old":
+			case "old", "malformed row":
 				db, err := sql.Open("sqlite", filepath.Join(dir, "state.sqlite3"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := db.Exec("PRAGMA user_version = 5"); err != nil {
-					db.Close()
+				defer db.Close()
+				if tc.state == "old" {
+					_, err = db.Exec("PRAGMA user_version = 5")
+				} else {
+					_, err = db.Exec("INSERT INTO runtime_config (scope, payload, revision) VALUES ('', '{}', ?)", "Bearer ghp_private-token private-route-target")
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
 				if err := db.Close(); err != nil {
