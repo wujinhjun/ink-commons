@@ -168,8 +168,8 @@ func (s *Service) unregister(ctx context.Context, name string) error {
 			if !tasks[allocation.TaskID] {
 				continue
 			}
-		} else if !allocation.Repository.Valid {
-			// Older standalone allocations carry no immutable repository binding.
+		} else if !allocation.Repository.Valid || allocation.Repository.String == "" {
+			// Older rows may store an unknown repository as an empty string.
 			return apiError{409, "a live standalone workspace has no recorded repository; release it before removing repositories"}
 		} else if allocation.Repository.String != name {
 			continue

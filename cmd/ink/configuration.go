@@ -63,7 +63,7 @@ func configurationCommand(options *cliOptions, action string) *cobra.Command {
 		}
 		expected := map[string]int{"list": 0, "get": 1, "unset": 1, "set": 2}[action]
 		if len(args) != expected {
-			return fmt.Errorf("config %s expects %d args arguments", action, expected)
+			return fmt.Errorf("config %s expects %d positional arguments", action, expected)
 		}
 		if *effective && action != "get" && action != "list" {
 			return errors.New("--effective applies to get/list")

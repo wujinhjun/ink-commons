@@ -330,7 +330,7 @@ func insertWorkspace(ctx context.Context, db interface {
 		return err
 	}
 	_, err = db.ExecContext(ctx, "INSERT INTO workspace_allocations ("+workspaceColumns+", repository) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		a.ID, a.RequestID, a.Common, a.Source, a.Path, a.Kind, a.Preference, a.Ref, a.Branch, a.Head, a.Previous, a.State, string(route), a.TaskID, repo)
+		a.ID, a.RequestID, a.Common, a.Source, a.Path, a.Kind, a.Preference, a.Ref, a.Branch, a.Head, a.Previous, a.State, string(route), a.TaskID, sql.NullString{String: repo, Valid: repo != ""})
 	return err
 }
 

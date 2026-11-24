@@ -206,3 +206,35 @@ func TestRepositoryMutationChecksMergeIdentityWhenReviewerCommandChanges(t *test
 	configAPI(t, s, http.MethodPost, "", "reviewer_command", command, 200)
 	configAPI(t, s, http.MethodDelete, "acme/override", "reviewer_command", "", 400)
 }
+
+func TestRemoveRepositoryRejectsUnknownStandaloneWorkspace(t *testing.T) {
+	for _, name := range []string{"no origin", "non-GitHub origin"} {
+		t.Run(name, func(t *testing.T) {
+			source, _ := workspaceTestSource(t)
+			if name == "no origin" {
+				workspaceTestGit(t, source, "remote", "rename", "origin", "upstream")
+			}
+			s, _ := centralConfigService(t, Config{Repositories: []Repository{{Repo: "acme/project", ReviewerLogin: "reviewer"}}}, nil)
+			ctx := context.Background()
+			allocation, err := s.acquireWorkspace(ctx, workspaceRequest{Source: source, RequestID: "standalone", Preference: "lite"})
+			if err != nil || allocation.State != "active" {
+				t.Fatalf("acquire standalone workspace: state=%q, err=%v", allocation.State, err)
+			}
+			var unknown bool
+			if err := s.store.db.QueryRow("SELECT repository IS NULL FROM workspace_allocations WHERE id = ?", allocation.ID).Scan(&unknown); err != nil || !unknown {
+				t.Fatalf("expected SQL NULL for unknown workspace repository, err=%v", err)
+			}
+			const path = "/v1/repositories/acme/project"
+			lifecycleRequest(t, s, http.MethodDelete, path, "", 409)
+
+			// Verify the guard also protects existing rows with the old encoding.
+			if _, err := s.store.db.Exec("UPDATE workspace_allocations SET repository = '' WHERE id = ?", allocation.ID); err != nil {
+				t.Fatal(err)
+			}
+			lifecycleRequest(t, s, http.MethodDelete, path, "", 409)
+			if _, err := s.store.effectiveConfig("acme/project"); err != nil {
+				t.Fatalf("repository registration was changed: %v", err)
+			}
+		})
+	}
+}
