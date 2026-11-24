@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -11,7 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func Serve(ctx context.Context, cfg Config, dir string, providers map[string]execution.Executor) error {

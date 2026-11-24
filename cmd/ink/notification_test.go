@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -24,7 +26,7 @@ func TestNotificationAckUsesLocalDaemonAndPrintsDeduplicationReceipt(t *testing.
 		{"bad receipt", `{"status":"accepted"}`, 200, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, err := os.MkdirTemp("/private/tmp", "ink-ack-")
+			dir, err := os.MkdirTemp("/tmp", "ink-ack-")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -90,7 +92,7 @@ func TestNotificationStatusUsesReadOnlyEscapedEventQuery(t *testing.T) {
 		{"wrong event", `{"event_id":"other","merge":{"state":"merged"}}`, 200, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, err := os.MkdirTemp("/private/tmp", "ink-status-")
+			dir, err := os.MkdirTemp("/tmp", "ink-status-")
 			if err != nil {
 				t.Fatal(err)
 			}

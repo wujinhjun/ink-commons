@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -10,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ledger"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ledger"
 )
 
 type reliableExecutor struct {

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func TestAuthenticatedStatusAndStop(t *testing.T) {

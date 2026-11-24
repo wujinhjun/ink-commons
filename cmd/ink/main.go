@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -15,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 func main() {

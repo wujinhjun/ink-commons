@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -73,7 +75,7 @@ func TestStackMergePollsPersistedRequestAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := notificationWork(t, f.s, f.repo, f.pull)
-	if run := work.AutoMerges[0]; run.State != "pending" || run.RequestID != testStackRequestID || run.MergeSHA != "" {
+	if run := work.AutoMerges[0]; run.State != "pending" || run.RequestID != testStackRequestID || run.SHA != f.pull.Head.SHA || run.MergeSHA != "" {
 		t.Fatalf("unexpected pending run: %+v", run)
 	}
 	if status := mergeStatus(work, f.repo, f.pull.Head.SHA); status.State != "waiting" {
@@ -93,7 +95,7 @@ func TestStackMergePollsPersistedRequestAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	work = notificationWork(t, s, f.repo, f.pull)
-	if run := work.AutoMerges[0]; run.State != "unknown" || run.RequestID != testStackRequestID {
+	if run := work.AutoMerges[0]; run.State != "unknown" || run.RequestID != testStackRequestID || run.SHA != f.pull.Head.SHA {
 		t.Fatalf("transient error lost the request: %+v", run)
 	}
 	if err := s.autoMerge(ctx, disabled, 42); err != nil {

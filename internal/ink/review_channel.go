@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -5,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type reviewChannelBinding struct {

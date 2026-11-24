@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -12,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type testTransport func(*http.Request) (*http.Response, error)

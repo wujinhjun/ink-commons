@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -10,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func readNoticeStatus(t *testing.T, s *Service, id string, code int) *execution.MergeStatus {

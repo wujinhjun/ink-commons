@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -12,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 type historyExecutor struct {

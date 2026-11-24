@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -10,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 const prePushHook = `#!/bin/sh

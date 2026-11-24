@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -7,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func (w *Work) raiseAlert(code, key, message string, now time.Time) {

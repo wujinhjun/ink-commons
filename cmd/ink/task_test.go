@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -11,11 +13,11 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-task-")
+	dir, err := os.MkdirTemp("/tmp", "ink-task-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +89,10 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 
 func TestTaskCredentialRejectsSymlinksAndPublicFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "claim.json")
-	if err := os.WriteFile(path, []byte(`{}`), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readTaskCredential(path); err == nil {
@@ -127,7 +132,7 @@ func TestTaskModeConfigurationIsValidated(t *testing.T) {
 }
 
 func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-task-route-")
+	dir, err := os.MkdirTemp("/tmp", "ink-task-route-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +191,7 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 }
 
 func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-task-reject-")
+	dir, err := os.MkdirTemp("/tmp", "ink-task-reject-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +265,7 @@ func TestExplicitTaskRoutePreservesExactValues(t *testing.T) {
 }
 
 func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-task-legacy-route-")
+	dir, err := os.MkdirTemp("/tmp", "ink-task-legacy-route-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +361,10 @@ func TestTaskLockRejectsSymlinksAndPublicFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "claim.json")
 	target := filepath.Join(dir, "target")
-	if err := os.WriteFile(target, []byte("target"), 0644); err != nil {
+	if err := os.WriteFile(target, []byte("target"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path+".lock"); err != nil {
@@ -372,7 +380,10 @@ func TestTaskLockRejectsSymlinksAndPublicFiles(t *testing.T) {
 	if err := os.Remove(path + ".lock"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path+".lock", []byte("public"), 0644); err != nil {
+	if err := os.WriteFile(path+".lock", []byte("public"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path+".lock", 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := lockTaskCredential(path); err == nil {

@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -13,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type wakeExecutor struct {
@@ -179,6 +181,11 @@ func TestCooperativeHandoffFullLoopWithGitHubObservingFirst(t *testing.T) {
 	if got := f.claim(t, reviewTask, claimA, 200); got["first"] != true {
 		t.Fatal(got)
 	}
+	f.restart(t)
+	if got := f.claim(t, reviewTask, claimA, 200); got["first"] != false {
+		t.Fatalf("replaying the persisted claim acquired a second turn: %v", got)
+	}
+	f.claim(t, reviewTask, claimB, 409)
 	// GitHub's result creates a successor, but it must remain unclaimable.
 	f.reviews = []Review{reviewFor(7, f.pull.Head.SHA, "reviewer", "CHANGES_REQUESTED")}
 	f.observe(t)

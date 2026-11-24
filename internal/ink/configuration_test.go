@@ -1,9 +1,11 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"context"
 	"encoding/json"
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 	"net/http"
 	"net/http/httptest"
 	"net/url"

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func request(task, attempt string, n int) execution.Delivery {

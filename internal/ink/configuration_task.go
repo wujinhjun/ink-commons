@@ -1,10 +1,12 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"encoding/json"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 // Task snapshots are persisted before prepare/deliver/wake/claim. Retries keep

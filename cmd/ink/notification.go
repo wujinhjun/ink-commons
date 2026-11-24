@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -12,7 +14,7 @@ import (
 	"os"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func notificationCommand(args []string) error {

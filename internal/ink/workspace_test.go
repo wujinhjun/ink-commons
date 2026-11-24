@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -8,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/workspace"
+	"github.com/wujinhjun/ink-commons/internal/workspace"
 )
 
 func workspaceTestGit(t *testing.T, repo string, args ...string) {
@@ -72,8 +74,16 @@ func TestWorkspaceFullLiteLifecycle(t *testing.T) {
 	if err := os.WriteFile(dirty, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
+	s.Close()
+	s = open()
 	if _, err := s.finishWorkspace(ctx, full.ID, "release"); err == nil {
 		t.Fatal("dirty Full worktree released")
+	}
+	if retry := acquire("first", "auto", "feature/full"); retry.State != "active" || retry.Path != full.Path {
+		t.Fatalf("dirty workspace lost its active reservation: %+v", retry)
+	}
+	if _, err := s.acquireWorkspace(ctx, workspaceRequest{Source: source, RequestID: "while-dirty", Preference: "full"}); err == nil {
+		t.Fatal("dirty Full slot was made available to another request")
 	}
 	if err := os.Remove(dirty); err != nil {
 		t.Fatal(err)

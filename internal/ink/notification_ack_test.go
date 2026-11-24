@@ -1,10 +1,12 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func receiptRequest(s *Service, event string) *httptest.ResponseRecorder {
@@ -70,6 +72,8 @@ func TestApprovalNotificationAcceptedButDroppedRetriesUntilAgentReceipt(t *testi
 		t.Fatal("ignored retry backoff")
 	}
 	s.Close()
+	// An in-flight event keeps its saved ACK policy even if the provider changes.
+	e.requireACK = false
 	s2, err := NewService(Config{}, path, map[string]execution.Executor{"test": e})
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +84,8 @@ func TestApprovalNotificationAcceptedButDroppedRetriesUntilAgentReceipt(t *testi
 		t.Fatal(err)
 	}
 	n2 := notificationWork(t, s2, repo, p).Notifications[0]
-	if len(e.notices) != 2 || e.notices[0].EventID != e.notices[1].EventID || n2.Attempts != 2 || time.Until(n2.RetryAt) < 3*time.Minute {
+	if len(e.notices) != 2 || e.notices[0].EventID != e.notices[1].EventID || e.routes[0] != e.routes[1] ||
+		!n2.RequireACK || n2.State != "awaiting_ack" || n2.Attempts != 2 || time.Until(n2.RetryAt) < 3*time.Minute {
 		t.Fatalf("restart did not retry same event with backoff: %+v", n2)
 	}
 	receiptFirst(t, s2, n.EventID, true)

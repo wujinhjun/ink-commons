@@ -330,8 +330,10 @@ def stage(args, *, reuse=False):
             archive = run(['git', '-C', repo, 'archive', revision], stdout=subprocess.PIPE).stdout
             with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
                 bundle.extractall(source, filter='data')
+            module = run(['go', 'list', '-m'], cwd=source,
+                         stdout=subprocess.PIPE, text=True).stdout.strip()
             run(['go', 'build', '-trimpath', '-ldflags',
-                 '-X ink-commons/internal/ink.BuildRevision=' + revision,
+                 f'-X {module}/internal/ink.BuildRevision={revision}',
                  '-o', candidate / 'ink', './cmd/ink'], cwd=source)
             for name in ('runtime.py', 'manage.py'):
                 shutil.copy2(source / 'deploy/macos' / name, candidate / name)

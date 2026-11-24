@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -14,7 +16,7 @@ import (
 	"strings"
 	"syscall"
 
-	"ink-commons/internal/ink/statedb"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 	_ "modernc.org/sqlite"
 )
 

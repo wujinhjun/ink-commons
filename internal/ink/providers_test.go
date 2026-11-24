@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -9,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
-	"ink-commons/internal/execution/httpagent"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution/httpagent"
 )
 
 func TestHTTPProviderDispatchWithoutCCConnect(t *testing.T) {

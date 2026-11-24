@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -6,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 func stateCommand(args []string) error {
