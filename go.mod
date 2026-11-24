@@ -1,4 +1,4 @@
-module ink-commons
+module github.com/wujinhjun/ink-commons
 
 go 1.23
 

@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"ink-commons/skills"
+	"github.com/wujinhjun/ink-commons/skills"
 )
 
 // init 只安装当前用户的协作指令，不启动服务、注册仓库或改变活跃会话。

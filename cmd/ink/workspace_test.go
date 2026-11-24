@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/workspace"
+	"github.com/wujinhjun/ink-commons/internal/workspace"
 )
 
 func TestWorkspaceListFallsBackWhenDaemonDisablesAPI(t *testing.T) {

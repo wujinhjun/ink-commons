@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 const Name = "cc-connect"

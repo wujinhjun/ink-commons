@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func GitHubRepository(remote string) string {

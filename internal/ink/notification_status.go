@@ -3,7 +3,7 @@ package ink
 import (
 	"net/http"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 // 只返回当前持久化观测；不调用 GitHub、不触发合入或修改通知回执。

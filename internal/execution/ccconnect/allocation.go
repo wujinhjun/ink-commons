@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 const discordAPI = "https://discord.com/api/v10"

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 func TestRequireSameReviewChannel(t *testing.T) {

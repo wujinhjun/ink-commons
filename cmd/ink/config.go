@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
-	"ink-commons/internal/execution/httpagent"
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution/httpagent"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 // DaemonConfig contains only static process/provider settings. Mutable policy

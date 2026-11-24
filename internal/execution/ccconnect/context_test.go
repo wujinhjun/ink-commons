@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func contextExecutor(t *testing.T, kind int, messages []execution.ConversationMessage, inspect func(*http.Request)) *Executor {

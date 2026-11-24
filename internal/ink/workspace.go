@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -15,8 +17,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"ink-commons/internal/execution"
-	"ink-commons/internal/workspace"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/workspace"
 )
 
 const workspaceSchema = `

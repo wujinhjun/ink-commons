@@ -13,7 +13,7 @@ import (
 	"sort"
 	"time"
 
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 func exportConfiguration(args []string) error {

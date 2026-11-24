@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ledger/ledgerdb"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ledger/ledgerdb"
 	_ "modernc.org/sqlite"
 )
 

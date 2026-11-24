@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 func stateCommand(args []string) error {

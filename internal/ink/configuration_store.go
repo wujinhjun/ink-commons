@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sort"
 
-	"ink-commons/internal/ink/statedb"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 const legacyConfigScope = "@legacy-json"

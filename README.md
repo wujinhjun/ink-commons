@@ -12,7 +12,7 @@
 
 ## 开始
 
-需要 Go 1.23+ 和 Git。daemon 跟踪中心注册的仓库，业务仓库无需配置文件或 hook。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。可以把任务留给人工处理，或配置执行端自动接单。
+支持 Linux 和 macOS，需要 Go 1.23+ 和 Git。daemon 跟踪中心注册的仓库，业务仓库无需配置文件或 hook。私有仓库使用具备 Pull requests 读取权限的 GitHub token，通过 `INK_GITHUB_TOKEN` 注入。配置中的 `reviewer_login` 要和 GitHub 上实际提交 review 的身份一致。可以把任务留给人工处理，或配置执行端自动接单。
 
 ```sh
 go build -o ink ./cmd/ink

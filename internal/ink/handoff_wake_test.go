@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 func TestTaskWakeRetryDelay(t *testing.T) {
@@ -69,7 +69,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 						t.Fatalf("Discord request was not reserved: %+v", wake)
 					}
 					reservedAt = *wake.Allocation.ReservedAt
-					return nil, io.EOF
+					return nil, context.DeadlineExceeded
 				case "GET /api/v10/channels/123":
 					sourceReads++
 					if sourceReads == 1 {
@@ -188,7 +188,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			}
 			retry()
 			w = notificationWork(t, s, repo, p)
-			if creates != 1 || wakes != 0 || !strings.Contains(w.Task.Handoff.Wake.Error, "create Discord thread in channel 77: upstream transport failure: EOF") {
+			if creates != 1 || wakes != 0 || !strings.Contains(w.Task.Handoff.Wake.Error, "create Discord thread in channel 77: upstream transport failure: context deadline exceeded") {
 				t.Fatalf("expected ambiguous creation with original error and no wake: %+v", w.Task.Handoff.Wake)
 			}
 			s.Close()
@@ -196,7 +196,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			retry()
 			w = notificationWork(t, s, repo, p)
 			h := w.Task.Handoff
-			if creates != 1 || h.Wake.RecoveryAttempts != 1 || !strings.Contains(h.Wake.AllocationError, "EOF") {
+			if creates != 1 || h.Wake.RecoveryAttempts != 1 || !strings.Contains(h.Wake.AllocationError, context.DeadlineExceeded.Error()) {
 				t.Fatalf("wrong recovery bookkeeping: %+v, creates=%d", h.Wake, creates)
 			}
 			if outcome == "missing" || outcome == "ambiguous" {
@@ -205,7 +205,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 				}
 				h = notificationWork(t, s, repo, p).Task.Handoff
 				if creates != 1 || wakes != 0 || h.Wake.RecoveryAttempts != maxAllocationRecoveryAttempts || h.Wake.canRecover() ||
-					archiveReads != maxAllocationRecoveryAttempts || !strings.Contains(h.Wake.Error, "EOF") {
+					archiveReads != maxAllocationRecoveryAttempts || !strings.Contains(h.Wake.Error, context.DeadlineExceeded.Error()) {
 					t.Fatalf("unresolved allocation should stay fenced: %+v, creates=%d, wakes=%d", h.Wake, creates, wakes)
 				}
 				return

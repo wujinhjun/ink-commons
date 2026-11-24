@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 const maxAllocationRecoveryAttempts = 6

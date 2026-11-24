@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 // ReviewFeatures is opt-in. An explicit empty object overrides registration

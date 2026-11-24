@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 func TestRegisterDetectsGitRemoteAndUsesLocalDaemon(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-reg-")
+	dir, err := os.MkdirTemp("/tmp", "ink-reg-")
 	if err != nil {
 		t.Fatal(err)
 	}

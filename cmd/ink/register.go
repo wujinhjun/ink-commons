@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 func register(args []string) error {

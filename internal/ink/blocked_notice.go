@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 // A nil hook disables delivery. An empty object uses the development conversation.

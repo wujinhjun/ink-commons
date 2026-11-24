@@ -10,7 +10,7 @@ import (
 )
 
 func TestConfigCLIUsesCentralSocketAndPreservesTypedValues(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-config-")
+	dir, err := os.MkdirTemp("/tmp", "ink-config-")
 	if err != nil {
 		t.Fatal(err)
 	}

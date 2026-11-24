@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 func TestContextCLIUsesPrivateDaemonAndBoundSHA(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-ctx-")
+	dir, err := os.MkdirTemp("/tmp", "ink-ctx-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestReviewFeatureConfiguration(t *testing.T) {
 }
 
 func TestRegisterExplicitFeatureFlags(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-feat-")
+	dir, err := os.MkdirTemp("/tmp", "ink-feat-")
 	if err != nil {
 		t.Fatal(err)
 	}

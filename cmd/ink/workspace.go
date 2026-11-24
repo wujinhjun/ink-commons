@@ -17,8 +17,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"ink-commons/internal/ink"
-	"ink-commons/internal/workspace"
+	"github.com/wujinhjun/ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/workspace"
 )
 
 func workspaceCommand(args []string) error {

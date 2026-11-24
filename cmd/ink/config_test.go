@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 func TestLegacyCCConnectConfigAndRoute(t *testing.T) {

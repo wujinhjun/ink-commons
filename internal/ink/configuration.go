@@ -7,7 +7,7 @@ import (
 	"io"
 	"strings"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 // ConfigValues contains only explicit overrides. A missing key inherits; a JSON

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type reviewChannelBinding struct {
