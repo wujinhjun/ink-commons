@@ -44,7 +44,8 @@ func newAutoMergeFixture(t *testing.T) *autoMergeFixture {
 	r := Review{ID: 1, SHA: f.pull.Head.SHA, State: "APPROVED", SubmittedAt: time.Now()}
 	r.User.Login = "reviewer"
 	f.reviews = []Review{r}
-	s, err := newFixtureService(t, Config{Repositories: []Repository{f.repo}}, f.path, nil)
+	t.Setenv("INK_TEST_MERGER_PAT", "fixture-merger-pat")
+	s, err := newFixtureService(t, Config{Repositories: []Repository{f.repo}, GitHubMerger: fixtureMergerCredential()}, f.path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +61,10 @@ func newAutoMergeFixture(t *testing.T) *autoMergeFixture {
 		t.Fatal(err)
 	}
 	return f
+}
+
+func fixtureMergerCredential() *GitHubCredential {
+	return &GitHubCredential{TokenEnv: "INK_TEST_MERGER_PAT"}
 }
 
 func (f *autoMergeFixture) installTransport(t *testing.T) {

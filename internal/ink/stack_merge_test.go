@@ -85,12 +85,22 @@ func TestStackMergePollsPersistedRequestAfterRestart(t *testing.T) {
 	f.s.Close()
 	disabled := f.repo
 	disabled.AutoMerge = &AutoMergeConfig{}
-	s, err := NewService(Config{Repositories: []Repository{disabled}}, f.path, nil)
+	s, err := NewService(Config{Repositories: []Repository{disabled}, GitHubMerger: fixtureMergerCredential()}, f.path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.s = s
 	f.stackTransport(t, handler)
+	t.Setenv("INK_TEST_MERGER_PAT", "replacement-merger-pat")
+	if err := s.autoMerge(ctx, disabled, 42); err != nil {
+		t.Fatal(err)
+	}
+	work = notificationWork(t, s, f.repo, f.pull)
+	if run := work.AutoMerges[0]; polls != 0 || run.State != "unknown" || run.RequestID != testStackRequestID ||
+		run.MergerIdentity == "" || !strings.Contains(run.Reason, "original GitHub merger identity is unavailable") {
+		t.Fatalf("replacement credential changed or queried the pending request: %+v", run)
+	}
+	t.Setenv("INK_TEST_MERGER_PAT", "fixture-merger-pat")
 	if err := s.autoMerge(ctx, disabled, 42); err != nil {
 		t.Fatal(err)
 	}
@@ -349,6 +359,7 @@ cat "$dir/$file"
 		t.Fatal(err)
 	}
 	f.s.up.command = command
+	f.s.up.mergerCredential = nil
 	if err := f.s.autoMerge(ctx, f.repo, 42); err != nil {
 		t.Fatal(err)
 	}

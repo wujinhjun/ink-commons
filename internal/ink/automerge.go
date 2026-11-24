@@ -4,8 +4,6 @@ package ink
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -37,6 +35,8 @@ func (c *AutoMergeConfig) Validate() error {
 
 type AutoMergeRun struct {
 	preflight           *mergePreflight
+	Strategy            string    `json:"strategy,omitempty"`
+	MergerIdentity      string    `json:"merger_identity,omitempty"`
 	RequestID           string    `json:"request_id,omitempty"`
 	ReuseReaderIdentity bool      `json:"reuse_reader_identity,omitempty"`
 	SHA                 string    `json:"sha"`
@@ -143,25 +143,6 @@ func (u upstream) checksReady(ctx context.Context, repo, sha string) (bool, erro
 	return false, diagnosticError("too many check-run pages")
 }
 
-func (u upstream) merge(ctx context.Context, repo string, number int, sha, method string) (string, error) {
-	if !ValidRepository(repo) || number <= 0 || !validSHA(sha) {
-		return "", fmt.Errorf("invalid merge target")
-	}
-	path := fmt.Sprintf("/repos/%s/pulls/%d/merge", repo, number)
-	data, _ := json.Marshal(map[string]string{"sha": sha, "merge_method": method})
-	var result struct {
-		Merged bool   `json:"merged"`
-		SHA    string `json:"sha"`
-	}
-	if _, _, err := u.gitHubJSON(ctx, http.MethodPut, path, "code", "", data, &result); err != nil {
-		return "", err
-	}
-	if !result.Merged || !validSHA(result.SHA) {
-		return "", diagnosticError("merge outcome not confirmed")
-	}
-	return result.SHA, nil
-}
-
 // 合入账本与完成通知一起持久化；预留或终态记录会阻止重复 merge，
 // 结果不明的外部写入不重放。
 type mergePreflight struct {
@@ -215,8 +196,7 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 			current.AutoMerge.ReuseReaderIdentity != run.ReuseReaderIdentity || w.Phase != "approved" || w.Pull.Head.SHA != run.SHA || !strings.EqualFold(w.Reviewer.GitHubLogin, run.Reviewer) {
 			return false, nil
 		}
-		merger, err := s.up.merger(run.ReuseReaderIdentity)
-		if err != nil || sameAppCommand(w.Reviewer.GitHubCommand, merger.command) {
+		if run.MergerIdentity == "" {
 			return false, nil
 		}
 		// Gate the new merge on a durable receipt, so a write failure
@@ -286,7 +266,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	for _, run := range w.AutoMerges {
 		if run.inFlight() && run.RequestID != "" {
 			s.mu.Unlock()
-			return s.pollStackMerge(ctx, repo, number, run)
+			return s.reconcileMerge(ctx, repo, number, run)
 		}
 	}
 	// An unresolved write fences subsequent heads until GitHub reports an
@@ -365,12 +345,9 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	if pull.Mergeable == nil || !*pull.Mergeable || pull.MergeableState != "clean" {
 		return wait("GitHub has not reported a clean, mergeable PR")
 	}
-	mergeUpstream, err := s.up.merger(run.ReuseReaderIdentity)
+	mergeUpstream, err := s.up.resolveMerger(repo.Repo, run.ReuseReaderIdentity, reviewerCommand)
 	if err != nil {
 		return wait(err.Error())
-	}
-	if sameAppCommand(reviewerCommand, mergeUpstream.command) {
-		return wait("reviewer and merger must use separate GitHub Apps")
 	}
 	refs := []string{run.SHA}
 	if validSHA(pull.MergeCommitSHA) && pull.MergeCommitSHA != run.SHA {
@@ -401,6 +378,8 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	if fresh.State != "open" || fresh.Draft || fresh.Head.SHA != run.SHA || fresh.Base != pull.Base || !sameStack(fresh.Stack, pull.Stack) || fresh.MergeCommitSHA != pull.MergeCommitSHA || fresh.Mergeable == nil || !*fresh.Mergeable || fresh.MergeableState != "clean" {
 		return wait("PR changed during preflight")
 	}
+	run.Strategy = directStrategyName
+	run.MergerIdentity = mergeUpstream.expectedIdentity
 	run.State = "unknown"
 	run.Reason = "merge request reserved; outcome not yet confirmed"
 	run.UpdatedAt = s.now()
@@ -408,24 +387,13 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	if err != nil || !reserved {
 		return err
 	}
-	if fresh.Stack != nil {
-		return s.startStackMerge(ctx, repo, number, run, mergeUpstream)
+	target := run.mergeTarget(repo, number)
+	target.Stack = fresh.Stack
+	outcome := strategyFor(run.Strategy).Submit(ctx, githubMergeOperations{mergeUpstream}, target)
+	if outcome.err != nil {
+		s.warnError("automatic merge request failed", outcome.err, "repo", repo.Repo, "number", number)
 	}
-	mergeSHA, err := mergeUpstream.merge(ctx, repo.Repo, number, run.SHA, run.Method)
-	if err != nil {
-		s.warnError("automatic merge request failed", err, "repo", repo.Repo, "number", number)
-	}
-	switch {
-	case errors.Is(err, errAppCommandNotStarted):
-		run.State = "waiting"
-		run.Reason = err.Error()
-	case err != nil:
-		run.Reason = "merge request failed or response was lost: " + err.Error() + "; verify GitHub before taking action"
-	default:
-		run.State = "merged"
-		run.Reason = ""
-		run.MergeSHA = mergeSHA
-	}
-	_, saveErr := s.updateAutoMerge(repo, number, run, false)
-	return saveErr
+	s.applyMergeResult(ctx, target, &run, outcome)
+	_, err = s.updateAutoMerge(repo, number, run, false)
+	return err
 }

@@ -243,7 +243,7 @@ func TestWorkflowClockAndRedactedStructuredLogs(t *testing.T) {
 			t.Fatalf("invalid structured warning: %s", line)
 		}
 	}
-	for _, want := range []string{"auto_merge_unknown", repo.Repo, "upstream HTTP 403 (rate limit)", "operation timed out", "SQLite code 1", "filesystem operation", "provider HTTP 403", "provider HTTP 429", "provider HTTP 502"} {
+	for _, want := range []string{"auto_merge_unknown", repo.Repo, "upstream HTTP 403 (secondary rate limit)", "operation timed out", "SQLite code 1", "filesystem operation", "provider HTTP 403", "provider HTTP 429", "provider HTTP 502"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing diagnostic %q: %s", want, out.String())
 		}

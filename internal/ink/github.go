@@ -27,14 +27,38 @@ import (
 var repoName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 func ValidRepository(name string) bool {
-	return repoName.MatchString(name)
+	owner, repo, _ := strings.Cut(name, "/")
+	return repoName.MatchString(name) && owner != "." && owner != ".." && repo != "." && repo != ".."
 }
 
 var shaPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
 
 func (c Config) ValidateGitHubCommands() error {
-	if (c.GitHubReadArgs != nil || c.GitHubMergeArgs != nil) && c.GitHubCommand == "" {
-		return fmt.Errorf("GitHub CLI arguments require github_command")
+	for _, credential := range []*GitHubCredential{c.GitHubReader, c.GitHubMerger} {
+		if credential != nil {
+			if err := credential.validate(); err != nil {
+				return err
+			}
+		}
+	}
+	if (c.GitHubReader != nil && (c.GitHubCommand != "" || c.GitHubToken != "")) ||
+		(c.GitHubMerger != nil && c.GitHubMergerCommand != "") {
+		return diagnosticError("configure only one GitHub credential source per role")
+	}
+	if (c.GitHubCommand != "" && !safeCredentialCommand(c.GitHubCommand)) ||
+		(c.GitHubMergerCommand != "" && !safeCredentialCommand(c.GitHubMergerCommand)) {
+		return diagnosticError("GitHub command requires an absolute App wrapper")
+	}
+	if c.GitHubReader != nil && c.GitHubMerger != nil && c.GitHubReader.sameIdentity(*c.GitHubMerger) {
+		return diagnosticError("GitHub reader and merger credentials must be separate")
+	}
+	if (c.GitHubReader != nil && c.GitHubReader.Helper != nil && sameAppCommand(c.GitHubReader.Helper.Command, c.GitHubMergerCommand)) ||
+		(c.GitHubMerger != nil && c.GitHubMerger.Helper != nil && sameAppCommand(c.GitHubMerger.Helper.Command, c.GitHubCommand)) {
+		return diagnosticError("GitHub reader and merger commands must be separate")
+	}
+	if (c.GitHubReadArgs != nil && c.GitHubCommand == "") ||
+		(c.GitHubMergeArgs != nil && c.GitHubCommand == "" && c.GitHubMergerCommand == "") {
+		return fmt.Errorf("GitHub CLI arguments require the corresponding GitHub command")
 	}
 	for _, args := range [][]string{c.GitHubReadArgs, c.GitHubMergeArgs} {
 		for _, arg := range args {
@@ -44,8 +68,8 @@ func (c Config) ValidateGitHubCommands() error {
 		}
 	}
 	if c.GitHubMergerCommand != "" {
-		if c.GitHubCommand == "" || !filepath.IsAbs(c.GitHubMergerCommand) || c.GitHubMergerSHA256 == "" {
-			return fmt.Errorf("merger requires a dedicated absolute command, checksum and separate reader")
+		if c.GitHubMergerSHA256 == "" {
+			return fmt.Errorf("merger requires a dedicated absolute command and checksum")
 		}
 		if sameAppCommand(c.GitHubCommand, c.GitHubMergerCommand) {
 			return fmt.Errorf("merger and reader must use separate App commands")
@@ -93,48 +117,35 @@ func checkCommandDigest(command, digest string) error {
 }
 
 type upstream struct {
-	lastOK        *atomic.Int64
-	command       string
-	commandDigest string
-	readArgs      []string
-	mergeArgs     []string
-	mergerCommand string
-	mergerDigest  string
-	token         string
-	http          *http.Client
-	github        string
+	credential, mergerCredential *GitHubCredential
+	expectedIdentity             string
+	tokens                       *tokenCache
+	throttle                     *githubThrottle
+	secretEnv                    []string
+	lastOK                       *atomic.Int64
+	command                      string
+	commandDigest                string
+	readArgs                     []string
+	mergeArgs                    []string
+	mergerCommand                string
+	mergerDigest                 string
+	token                        string
+	http                         *http.Client
+	github                       string
 }
 
 func newUpstream(token string) upstream {
 	return upstream{
-		lastOK: new(atomic.Int64),
-		token:  token,
-		github: "https://api.github.com",
+		lastOK:   new(atomic.Int64),
+		tokens:   &tokenCache{entries: make(map[tokenSlot]tokenCacheEntry), running: make(map[tokenSlot]chan struct{})},
+		throttle: &githubThrottle{primary: make(map[githubRole]cooldown)},
+		token:    token,
+		github:   "https://api.github.com",
 		http: &http.Client{
 			Timeout:       10 * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
-}
-
-// Only explicitly opted-in repositories may use the reader App for merge calls.
-func (u upstream) merger(reuseReader bool) (upstream, error) {
-	if reuseReader {
-		if u.command == "" {
-			return upstream{}, fmt.Errorf("auto_merge.reuse_reader_identity requires a GitHub App command")
-		}
-		u.token = ""
-		return u, nil
-	}
-	if u.mergerCommand != "" {
-		u.command, u.commandDigest = u.mergerCommand, u.mergerDigest
-		u.token = ""
-		return u, nil
-	}
-	if u.command != "" || u.token != "" {
-		return upstream{}, fmt.Errorf("automatic merge requires a dedicated GitHub merger App")
-	}
-	return u, nil
 }
 
 func (u upstream) gitHubGet(ctx context.Context, path string, result any) (http.Header, error) {
@@ -149,18 +160,39 @@ func (u upstream) gitHubJSON(ctx context.Context, method, path, profile, version
 }
 
 func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, profile, version string, input []byte, result any, acceptedErrors ...int) (http.Header, int, error) {
+	repo, err := repositoryScope(repo, method, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	role := githubReader
+	if profile == "code" {
+		role = githubMerger
+	}
+	started := time.Now()
+	if err := u.throttle.waiting(started, role); err != nil {
+		return nil, 0, notSubmitted(err)
+	}
 	var res *http.Response
-	var err error
+	var token string
 	if u.command != "" {
+		if u.expectedIdentity != "" {
+			if err := u.checkMergeIdentity(repo); err != nil {
+				return nil, 0, notSubmitted(err)
+			}
+		}
 		res, err = u.commandResponse(ctx, repo, method, path, profile, version, input)
 	} else {
-		var req *http.Request
-		req, err = http.NewRequestWithContext(ctx, method, u.github+path, bytes.NewReader(input))
-		if err != nil {
-			return nil, 0, diagnosticError("invalid upstream request")
+		var tokenErr error
+		token, tokenErr = u.requestToken(ctx, repo, role)
+		if tokenErr != nil {
+			return nil, 0, notSubmitted(tokenErr)
 		}
-		if u.token != "" {
-			req.Header.Set("Authorization", "Bearer "+u.token)
+		req, requestErr := http.NewRequestWithContext(ctx, method, u.github+path, bytes.NewReader(input))
+		if requestErr != nil {
+			return nil, 0, notSubmitted(diagnosticError("invalid upstream request"))
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
 		if version != "" {
@@ -169,17 +201,12 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 		if input != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
+		if err := u.throttle.waiting(time.Now(), role); err != nil {
+			return nil, 0, notSubmitted(err)
+		}
 		res, err = u.http.Do(req)
 		if err != nil {
-			var timeout net.Error
-			switch {
-			case errors.Is(err, context.Canceled):
-				err = diagnosticError("upstream request cancelled")
-			case errors.Is(err, context.DeadlineExceeded), errors.As(err, &timeout) && timeout.Timeout():
-				err = diagnosticError("upstream request timed out")
-			default:
-				err = diagnosticError("upstream transport failure")
-			}
+			err = transportDiagnostic(err)
 		}
 	}
 	if err != nil {
@@ -187,19 +214,32 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 	}
 	defer res.Body.Close()
 	status := res.StatusCode
+	if status == http.StatusUnauthorized && token != "" {
+		u.tokens.invalidate(u.apiHost(), repo, role, token)
+	}
+	if err := u.throttle.response(res, started, time.Now(), role); err != nil {
+		return nil, status, err
+	}
 	if (status < 200 || status >= 300) && !slices.Contains(acceptedErrors, status) {
-		message := fmt.Sprintf("upstream HTTP %d", status)
-		if status == http.StatusTooManyRequests || (status == http.StatusForbidden &&
-			(res.Header.Get("X-RateLimit-Remaining") == "0" || res.Header.Get("Retry-After") != "")) {
-			message += " (rate limit)"
-		}
-		return nil, status, diagnosticError(message)
+		return nil, status, diagnosticError(fmt.Sprintf("upstream HTTP %d", status))
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 32<<20)).Decode(result); err != nil {
 		return nil, status, diagnosticError(fmt.Sprintf("invalid upstream response (HTTP %d)", status))
 	}
 	u.lastOK.Store(time.Now().Unix())
 	return res.Header, status, nil
+}
+
+func transportDiagnostic(err error) error {
+	var timeout net.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		return diagnosticError("upstream request cancelled")
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &timeout) && timeout.Timeout():
+		return diagnosticError("upstream request timed out")
+	default:
+		return diagnosticError("upstream transport failure")
+	}
 }
 
 func listPages[T any](ctx context.Context, u upstream, path string) ([]T, error) {
@@ -243,6 +283,9 @@ func (u upstream) commandResponse(ctx context.Context, repo, method, path, profi
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	if !safeCredentialCommand(u.command) {
+		return nil, notSubmitted(diagnosticError("GitHub command requires an explicit App wrapper"))
+	}
 	prefix := u.readArgs
 	if profile == "code" {
 		prefix = u.mergeArgs
@@ -262,9 +305,19 @@ func (u upstream) commandResponse(ctx context.Context, repo, method, path, profi
 		args = append(args, "--input", "-")
 	}
 	if err := checkCommandDigest(u.command, u.commandDigest); err != nil {
-		return nil, fmt.Errorf("%w: %v", errAppCommandNotStarted, err)
+		return nil, notSubmitted(diagnosticError(err.Error()))
 	}
 	cmd := exec.CommandContext(ctx, u.command, args...)
+	cleanup, err := isolateCredentialCommand(cmd, u.secretEnv)
+	if err != nil {
+		return nil, notSubmitted(err)
+	}
+	defer cleanup()
+	role := githubReader
+	if profile == "code" {
+		role = githubMerger
+	}
+	cmd.Env = append(cmd.Env, "INK_GITHUB_ROLE="+string(role))
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
 	}

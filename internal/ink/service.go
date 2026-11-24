@@ -63,6 +63,10 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 			return nil, err
 		}
 	}
+	up, err := configuredUpstream(config)
+	if err != nil {
+		return nil, err
+	}
 	store, err := openStore(path)
 	if err != nil {
 		return nil, err
@@ -71,11 +75,6 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 		store.db.Close()
 		return nil, err
 	}
-	up := newUpstream(config.GitHubToken)
-	up.command = config.GitHubCommand
-	up.commandDigest = config.GitHubCommandSHA256
-	up.readArgs, up.mergeArgs = config.GitHubReadArgs, config.GitHubMergeArgs
-	up.mergerCommand, up.mergerDigest = config.GitHubMergerCommand, config.GitHubMergerSHA256
 	stateDir := filepath.Dir(path)
 	if resolved, err := filepath.EvalSymlinks(stateDir); err == nil {
 		stateDir = resolved
