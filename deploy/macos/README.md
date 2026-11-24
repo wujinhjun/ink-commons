@@ -9,6 +9,7 @@
 ```sh
 cd ink-deploy &&
 shasum -a 256 -c SHA256SUMS &&
+./ink state init -data "$HOME/.local/state/ink-commons" &&
 python3.12 manage.py deploy --config ./config.example.json \
   --github-command /absolute/path/to/github-reader
 ```
@@ -63,6 +64,8 @@ python3.12 manage.py set-release-repo fork-owner/ink-fork
 
 ## 从旧版本升级
 
+跨 SQLite v6 边界时，先按[单实例切换检查清单](../../docs/migration.md)停旧并备份。部署器固定使用 `~/.local/state/ink-commons`，因此先归档原路径，再在同一路径显式建 v6 库，然后激活新版。
+
 旧版 LaunchAgent 和 LaunchDaemon 都从已校验的新版发布包启动第一次升级。若 `~/.local/lib/ink-commons/ink` 是普通可执行文件，使用上文的 `stage` 和 `activate` 手动迁移。若入口是版本链接，保留链接及其指向的 release，再运行下方的 `upgrade`。升级脚本从该版本读取部署配置，并在切换时备份和移除旧同砚 LaunchAgent 的 plist。旧 LaunchDaemon 可在原系统域更新。cc-connect 等外部服务若仍引用旧 release 的程序，清理旧 release 前先为对应服务配置独立的安装路径。
 
 ```sh
@@ -77,7 +80,7 @@ python3.12 ./manage.py upgrade --apply
 
 `~/.config/ink-commons/config.json` 是手动暂存的默认输入。活动 release 的 `config.json` 是服务生效的静态启动配置，也是自动升级继承的来源。要应用新的手工配置，可以在暂存时显式指定文件。
 
-运行期仓库、reviewer、合入策略和执行参数以 SQLite 为准。JSON 中的 `repositories`、`repository_defaults` 和 `execution` 是旧数据库首次导入字段，暂存会逐项标记。SQLite 初始化后，通过 `ink config` 维护这些策略。
+运行期仓库、reviewer、合入策略和执行参数以 SQLite 为准。JSON 中的 `repositories`、`repository_defaults` 和 `execution` 在新库首次启动时写入，暂存会逐项标记。SQLite 初始化后，通过 `ink config` 维护这些策略。
 
 执行 `(umask 077; ink config export > runtime-policy.json)` 可导出声明。部署时传 `--runtime-declaration runtime-policy.json`，暂存、升级及 status 会比对并报告有变化的范围。声明仅用于比对。文件缺失、不可读或格式错误时报告诊断，暂存、升级和回滚继续执行。首次安装尚无运行中 daemon 时报告 `unavailable`。声明可能包含本机路由和命令配置，应按私有文件保存。
 

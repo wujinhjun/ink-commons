@@ -40,12 +40,12 @@ func expireNotification(t *testing.T, s *Service, repo Repository, p Pull) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Work[key(repo.Repo, p.Number)].Notifications[0].RetryAt = time.Now().Add(-time.Second)
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -191,7 +191,7 @@ func TestApprovalNotificationStaleReceiptDoesNotAnnounceApproval(t *testing.T) {
 				t.Fatal(err)
 			}
 			event := e.notices[0].EventID
-			st, err := s.store.load()
+			st, err := loadFixture(s.store)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +207,7 @@ func TestApprovalNotificationStaleReceiptDoesNotAnnounceApproval(t *testing.T) {
 				w.Developer.Route.Session = "new-session"
 			}
 			w.derive()
-			if err := s.store.save(st); err != nil {
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			receiptFirst(t, s, event, false)
@@ -269,12 +269,14 @@ func TestPollCCConnectApprovalBusyDropRecoveredWithoutRuntimeChanges(t *testing.
 	}
 	s, repo, p, r, _ := notificationFixture(t, executor)
 	service = s
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Work[key(repo.Repo, p.Number)].Developer.Route.Session = "discord:123"
-	if err := s.store.save(st); err != nil {
+	work := st.Work[key(repo.Repo, p.Number)]
+	work.Developer.Route.Session = "discord:123"
+	work.DeveloperOverride = cloneAssignee(work.Developer)
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	s.up.http.Transport = testTransport(func(req *http.Request) (*http.Response, error) {
@@ -320,12 +322,14 @@ func TestApprovalNotificationRetriesAndReceiptsSurviveAutoMerge(t *testing.T) {
 		})
 	}
 	configure()
-	st, err := f.s.store.load()
+	st, err := loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Work[key(f.repo.Repo, 42)].Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
-	if err := f.s.store.save(st); err != nil {
+	work := st.Work[key(f.repo.Repo, 42)]
+	work.Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
+	work.DeveloperOverride = cloneAssignee(work.Developer)
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	f.onMerge = func() { f.pull.State, f.pull.Merged = "closed", true; f.pull.MergeCommitSHA = strings.Repeat("d", 40) }

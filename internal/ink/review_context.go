@@ -132,13 +132,12 @@ func (s *Service) reviewContext(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError{403, "review.context.thread_history is disabled"})
 		return
 	}
-	st, err := s.store.load()
+	work, err := s.store.loadWork(key(repoName, number))
 	if err != nil {
 		s.mu.Unlock()
 		fail(w, err)
 		return
 	}
-	work := st.Work[key(repoName, number)]
 	if work == nil {
 		s.mu.Unlock()
 		fail(w, apiError{404, "PR not observed yet"})
@@ -183,8 +182,7 @@ func (s *Service) reviewContext(w http.ResponseWriter, r *http.Request) {
 	// reassignment may not redirect a frozen reviewer task to another source.
 	s.mu.Lock()
 	currentRepo, enabled := s.repo(repoName)
-	latest, loadErr := s.store.load()
-	live := latest.Work[key(repoName, number)]
+	live, loadErr := s.store.loadWork(key(repoName, number))
 	valid := false
 	if loadErr == nil && enabled && currentRepo.Review != nil && currentRepo.Review.Context.ThreadHistory && live != nil {
 		currentBinding, bindErr := bindReviewContext(live, currentRepo)

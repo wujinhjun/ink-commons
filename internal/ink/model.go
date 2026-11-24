@@ -73,7 +73,6 @@ type Attempt struct {
 	RecoveryReason  string             `json:"recovery_reason,omitempty"`
 	RetryAt         time.Time          `json:"retry_at,omitempty"`
 	State           string             `json:"state"`
-	Legacy          bool               `json:"legacy,omitempty"`
 	ID              string             `json:"attempt_id"`
 	Number          int                `json:"number"`
 	Route           execution.Route    `json:"route"`
@@ -115,8 +114,8 @@ type Workflow struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Work struct {
+	storedRevision    int64
 	MergeConflict     *MergeConflict      `json:"merge_conflict,omitempty"`
-	InheritsConfig    *bool               `json:"inherits_config,omitempty"`
 	ReviewerOverride  *Assignee           `json:"reviewer_override,omitempty"`
 	DeveloperOverride *Assignee           `json:"developer_override,omitempty"`
 	RoundConfig       *TaskConfigSnapshot `json:"round_config,omitempty"`

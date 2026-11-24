@@ -17,7 +17,7 @@ import (
 func TestRegistrationPersistsAndPollsWithoutRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), stateDatabase)
 	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "reviewer", Review: &ReviewFeatures{Context: ReviewContextFeatures{ThreadHistory: true}}}}
-	s, err := NewService(cfg, path, nil)
+	s, err := newFixtureService(t, cfg, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestApprovalHookFilteringDedupRestartAndNewSHA(t *testing.T) {
 	}
 	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer", PostApproval: &ApprovalHook{Command: []string{script, output}}}
 	cfg := Config{Repositories: []Repository{repo}}
-	s, err := NewService(cfg, path, nil)
+	s, err := newFixtureService(t, cfg, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,9 +86,9 @@ func TestApprovalHookFilteringDedupRestartAndNewSHA(t *testing.T) {
 	pull.State = "open"
 	pull.Head.SHA = strings.Repeat("a", 40)
 	// The daemon only executes hooks on PRs whose ownership is resolved.
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	st.Work[key(repo.Repo, 42)] = &Work{Repo: repo.Repo, Pull: pull, Linked: true, Reviewer: Assignee{GitHubLogin: "reviewer"}}
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	review := Review{ID: 1, State: "APPROVED", SHA: pull.Head.SHA}
@@ -148,7 +148,7 @@ func TestApprovalHookFilteringDedupRestartAndNewSHA(t *testing.T) {
 	if event.SHA != pull.Head.SHA || event.ReviewID != 3 || event.Event != "postApproval" || event.Repository != repo.Repo {
 		t.Fatalf("bad payload: %+v", event)
 	}
-	st, _ = s.store.load()
+	st, _ = loadFixture(s.store)
 	runs := st.Work[key(repo.Repo, 42)].Approvals
 	if len(runs) != 2 || runs[0].State != "succeeded" || runs[1].State != "succeeded" {
 		t.Fatalf("bad hook outcomes: %+v", runs)
@@ -168,7 +168,7 @@ func TestApprovalHookFailureNotReplayed(t *testing.T) {
 				t.Fatal(err)
 			}
 			repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer", PostApproval: &ApprovalHook{Command: []string{script}, TimeoutSeconds: 1}}
-			s, err := NewService(Config{}, filepath.Join(dir, stateDatabase), nil)
+			s, err := newFixtureService(t, Config{}, filepath.Join(dir, stateDatabase), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -185,9 +185,9 @@ func TestApprovalHookFailureNotReplayed(t *testing.T) {
 			if mode == "unknown" {
 				work.Approvals = []ApprovalRun{{ApprovalEvent: ApprovalEvent{SHA: pull.Head.SHA}, State: "unknown"}}
 			}
-			st, _ := s.store.load()
+			st, _ := loadFixture(s.store)
 			st.Work[key(repo.Repo, 42)] = work
-			if err := s.store.save(st); err != nil {
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			for i := 0; i < 2; i++ {
@@ -195,7 +195,7 @@ func TestApprovalHookFailureNotReplayed(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			st, _ = s.store.load()
+			st, _ = loadFixture(s.store)
 			runs := st.Work[key(repo.Repo, 42)].Approvals
 			want := "failed"
 			if mode == "unknown" {
@@ -205,31 +205,5 @@ func TestApprovalHookFailureNotReplayed(t *testing.T) {
 				t.Fatalf("unexpected runs: %+v", runs)
 			}
 		})
-	}
-}
-
-func TestSQLiteV1RegistrationMigration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), stateDatabase)
-	s, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := storedFixture()
-	if err := s.save(original); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec("DROP TABLE workspace_allocations; DROP TABLE runtime_config; DROP TABLE repositories; PRAGMA user_version=1"); err != nil {
-		t.Fatal(err)
-	}
-	s.db.Close()
-	s, err = openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.db.Close()
-	checkState(t, s, original)
-	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
-		t.Fatal(version, err)
 	}
 }

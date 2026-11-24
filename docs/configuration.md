@@ -99,12 +99,8 @@ CLI 经仅本地 daemon 用户可访问的 Unix socket 调用：
 
 postApproval 在事件准备执行时重新读取配置，把 hook 和 generation 写入批准事件记录后执行。继续按仓库、PR、SHA 去重，不自动重放失败或结果不明的事件。自动合入仍按现有流程在保留副作用前重新核对中心配置和 GitHub 状态。
 
-## 兼容迁移与备份
+## 初始化与备份
 
-schema version 4 从 version 1 / 2 / 3 升级，新增独立配置表，并阻止旧二进制打开后丢弃新字段。首次启动在事务中导入旧 JSON 的 repository_defaults / execution 和旧仓库记录；之后即使旧 JSON 改变，也不会重新导入覆盖运行期修改。JSON 仍需符合可识别的历史格式；迁移后建议移除其中所有运行期字段。
+`ink state init` 显式创建 schema v6 数据库。首次启动在同一事务写入启动 JSON 中的 `repository_defaults`、`execution` 和 `repositories`。静态仓库条目按完整覆盖写入，未设置的可空字段保留为显式 `null`。之后用 `ink config` 更新 SQLite 中的运行期配置。
 
-迁移保留已有行为：旧 JSON 仓库按原先优先级覆盖同名 SQLite 注册记录；原 SQLite repositories 表作为历史记录保留，旧 JSON 的运行期输入副本保存在 `@legacy-json` 归档作用域，既不参与解析也不作为可写配置暴露。新记录、归档和首次导入标记（全局记录）在同一事务提交；失败可重试。
-
-旧注册记录已展开默认值，无法推断原来哪些字段是显式的，因此作为完整覆盖保留。原来为空的 route / hook / review / auto_merge 保存为显式 null，防止升级后意外启用继承。旧 PR 的负责人和会话作为保留指派（`inherits_config:false`）继续使用；已有任务补充标记为 legacy 的快照，不更改已投递请求。操作者可对仓库逐键 unset 恢复继承；旧 PR 可通过显式 assign 改派。
-
-SQLite backup 包含完整配置、归档和任务快照；JSON export 也包含 configurations，可被新版完整恢复。导出后还原仍须遵循 README 的停止 daemon、初始化标记和迁移备份归档规则。旧二进制不能直接读取 version 4 数据库或新版导出；回滚前需保留完整备份并使用兼容工具显式转换。
+用 `ink state backup` 保存可恢复的 SQLite 快照。JSON 导出供诊断和人工核对。旧库切换按[单实例检查清单](migration.md)执行。

@@ -24,12 +24,12 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	work, err := s.store.loadNotification(input.EventID)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	for _, work := range st.Work {
+	if work != nil {
 		for i := range work.Notifications {
 			n := &work.Notifications[i]
 			if n.EventID != input.EventID {
@@ -60,7 +60,7 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 				}
 				n.FinishedAt, n.RetryAt, n.Error = time.Now(), time.Time{}, ""
 				work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-				if err := s.store.save(st); err != nil {
+				if err := s.store.saveWork(work); err != nil {
 					fail(w, err)
 					return
 				}

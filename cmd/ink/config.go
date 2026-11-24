@@ -19,7 +19,7 @@ import (
 )
 
 // DaemonConfig contains only static process/provider settings. Mutable policy
-// lives in SQLite; the legacy fields below are accepted solely for first import.
+// lives in SQLite; optional policy settings seed a newly initialized database.
 type DaemonConfig struct {
 	GitHubCommand       string   `json:"github_command,omitempty"`
 	GitHubCommandSHA256 string   `json:"github_command_sha256,omitempty"`
@@ -36,13 +36,9 @@ type DaemonConfig struct {
 
 func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) {
 	var file struct {
-		RepositoryDefaults ink.Repository `json:"repository_defaults,omitempty"`
-		Repositories       []struct {
-			ink.Repository
-			ReviewerProject string `json:"reviewer_project,omitempty"`
-			ReviewChannel   string `json:"review_channel_id,omitempty"`
-		} `json:"repositories"`
-		Reliability ink.Reliability `json:"execution"`
+		RepositoryDefaults ink.Repository   `json:"repository_defaults,omitempty"`
+		Repositories       []ink.Repository `json:"repositories"`
+		Reliability        ink.Reliability  `json:"execution"`
 		DaemonConfig
 	}
 	var cfg ink.Config
@@ -137,8 +133,7 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		}
 	}
 	seen := make(map[string]bool)
-	for _, entry := range file.Repositories {
-		repo := entry.Repository
+	for _, repo := range file.Repositories {
 		if err := repo.TaskBlocked.Validate(); err != nil {
 			return cfg, nil, err
 		}
@@ -153,12 +148,6 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 			return cfg, nil, fmt.Errorf("each repository needs a unique owner/repo and reviewer_login")
 		}
 		seen[repo.Repo] = true
-		if entry.ReviewerProject != "" || entry.ReviewChannel != "" {
-			if repo.ReviewerRoute != nil {
-				return cfg, nil, fmt.Errorf("%s: choose reviewer_route or the legacy reviewer fields", repo.Repo)
-			}
-			repo.ReviewerRoute = &execution.Route{Provider: ccconnect.Name, Target: entry.ReviewerProject, Parent: entry.ReviewChannel}
-		}
 		if route := repo.ReviewerRoute; route != nil {
 			if route.Provider == ccconnect.Name && file.CCConnectURL == "" {
 				return cfg, nil, fmt.Errorf("%s: configure cc_connect_url for the reviewer", repo.Repo)

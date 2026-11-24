@@ -6,6 +6,7 @@ package ledger
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,9 @@ import (
 	"github.com/wujinhjun/ink-commons/internal/execution/ledger/ledgerdb"
 	_ "modernc.org/sqlite"
 )
+
+//go:embed sql/schema.sql
+var schema string
 
 var ErrConflict = errors.New("execution ownership conflict")
 var ErrUnknown = errors.New("execution outcome unknown")
@@ -50,13 +54,7 @@ func Open(path string) (*Ledger, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`PRAGMA busy_timeout=5000;
- CREATE TABLE IF NOT EXISTS executions (
- attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, number INTEGER NOT NULL,
- resource TEXT NOT NULL, request TEXT NOT NULL, receipt TEXT NOT NULL,
- owner TEXT NOT NULL DEFAULT '', UNIQUE(task_id,number));
- CREATE TABLE IF NOT EXISTS sessions(task_id TEXT PRIMARY KEY, session TEXT NOT NULL);
- `)
+	_, err = db.Exec("PRAGMA busy_timeout=5000;\n" + schema)
 	if err != nil {
 		db.Close()
 		return nil, err

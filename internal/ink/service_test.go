@@ -88,7 +88,10 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 
 	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer-bot", ReviewerRoute: &execution.Route{Provider: "test", Target: "reviewer"}}
 	cfg := Config{Repositories: []Repository{repo}}
-	path := filepath.Join(t.TempDir(), stateDatabase)
+	path := filepath.Join(t.TempDir(), "state", stateDatabase)
+	if err := InitializeState(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
 	makeService := func() *Service {
 		service, err := NewService(cfg, path, map[string]execution.Executor{"test": executor})
 		if err != nil {
@@ -210,23 +213,5 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 	work("merged")
 	if executor.prepared != 1 || len(executor.deliveries) != 3 {
 		t.Fatal("manual assignments triggered bot deliveries")
-	}
-}
-
-func TestAmbiguousOrigin(t *testing.T) {
-	var pull Pull
-	pull.Head.SHA, pull.Head.Ref = strings.Repeat("a", 40), "feature"
-	pull.Head.Repo = &struct {
-		FullName string `json:"full_name"`
-	}{"acme/project"}
-	first := Push{Repo: "acme/project", Ref: pull.Head.Ref, SHA: pull.Head.SHA, Route: execution.Route{Provider: "test", Target: "dev", Session: "dev-session"}}
-	second := first
-	second.Route.Session = "other-session"
-	if matchOrigin([]Push{first, second}, pull) != nil {
-		t.Fatal("matched ambiguous origin")
-	}
-	second.Repo = "fork/project"
-	if route := matchOrigin([]Push{first, second}, pull); route == nil || *route != first.Route {
-		t.Fatal("did not match source repo")
 	}
 }

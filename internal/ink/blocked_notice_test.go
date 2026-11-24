@@ -61,12 +61,12 @@ func TestBlockedNoticeRetriesAfterRestart(t *testing.T) {
 	if executor.calls != 1 {
 		t.Fatal("restart ignored the persisted retry lease")
 	}
-	st, err := f.s.store.load()
+	st, err := loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Work[key(f.repo.Repo, 42)].Task.Handoff.BlockedNotice.RetryAt = time.Time{}
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	executor.err = nil

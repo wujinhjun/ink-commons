@@ -71,12 +71,11 @@ func (s *Service) postApproval(ctx context.Context, repo Repository, number int)
 		s.mu.Unlock()
 		return nil
 	}
-	st, err := s.store.load()
+	work, err := s.store.loadWork(key(repo.Repo, number))
 	if err != nil {
 		s.mu.Unlock()
 		return err
 	}
-	work := st.Work[key(repo.Repo, number)]
 	if work == nil || work.Phase != "approved" || work.handoffMergeBlocked() {
 		s.mu.Unlock()
 		return nil
@@ -102,7 +101,7 @@ func (s *Service) postApproval(ctx context.Context, repo Repository, number int)
 	// Reserve durably BEFORE exec. Interrupted or failed hooks are not automatically
 	// replayed: a hook may already have caused an external side effect.
 	work.Approvals = append(work.Approvals, ApprovalRun{ApprovalEvent: event, Hook: repo.PostApproval, ConfigRevision: effective.Revision, State: "unknown", StartedAt: time.Now()})
-	err = s.store.save(st)
+	err = s.store.saveWork(work)
 	s.mu.Unlock()
 	if err != nil {
 		return err
@@ -126,11 +125,10 @@ func (s *Service) postApproval(ctx context.Context, repo Repository, number int)
 	runErr := cmd.Run()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err = s.store.load()
+	work, err = s.store.loadWork(key(repo.Repo, number))
 	if err != nil {
 		return err
 	}
-	work = st.Work[key(repo.Repo, number)]
 	if work == nil {
 		return nil
 	}
@@ -149,5 +147,5 @@ func (s *Service) postApproval(ctx context.Context, repo Repository, number int)
 			}
 		}
 	}
-	return s.store.save(st)
+	return s.store.saveWork(work)
 }

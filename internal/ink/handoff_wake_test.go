@@ -133,7 +133,10 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			db := filepath.Join(t.TempDir(), stateDatabase)
+			db := filepath.Join(t.TempDir(), "state", stateDatabase)
+			if err := InitializeState(filepath.Dir(db)); err != nil {
+				t.Fatal(err)
+			}
 			open := func() *Service {
 				service, err := NewService(Config{Repositories: []Repository{repo}}, db, map[string]execution.Executor{ccconnect.Name: e})
 				if err != nil {
@@ -143,7 +146,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 				return service
 			}
 			s = open()
-			st, err := s.store.load()
+			st, err := loadFixture(s.store)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -153,7 +156,8 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 				Developer: Assignee{Route: &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}},
 				Reviewer:  Assignee{GitHubLogin: "reviewer", Route: repo.ReviewerRoute},
 			}
-			if err := s.store.save(st); err != nil {
+			st.Work[id].DeveloperOverride = cloneAssignee(st.Work[id].Developer)
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.observe(repo, p, nil); err != nil {
@@ -167,12 +171,12 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			}
 			retry := func() {
 				t.Helper()
-				st, err := s.store.load()
+				st, err := loadFixture(s.store)
 				if err != nil {
 					t.Fatal(err)
 				}
 				st.Work[id].Task.Handoff.Wake.RetryAt = time.Time{}
-				if err := s.store.save(st); err != nil {
+				if err := saveFixture(s.store, st); err != nil {
 					t.Fatal(err)
 				}
 				dispatch()

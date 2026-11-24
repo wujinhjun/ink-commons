@@ -17,7 +17,6 @@ type TaskConfigSnapshot struct {
 	Reviewer  Assignee         `json:"reviewer"`
 	Developer Assignee         `json:"developer"`
 	SHA       string           `json:"sha"`
-	Legacy    bool             `json:"legacy,omitempty"`
 }
 
 func cloneAssignee(a Assignee) *Assignee {
@@ -54,50 +53,37 @@ func (s *Service) refreshPendingConfig(w *Work, repo Repository) {
 			w.replaceTask(nil)
 		}
 	}
-	if w.InheritsConfig == nil {
-		managed := false
-		w.InheritsConfig = &managed
-		w.ReviewerOverride = cloneAssignee(w.Reviewer)
-		w.DeveloperOverride = cloneAssignee(w.Developer)
-	}
 	if w.Task != nil && taskStarted(w.Task) && w.Task.SHA == w.Pull.Head.SHA {
 		return
 	}
-	if *w.InheritsConfig {
-		reviewer := Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}
-		if repo.ReviewerRoute != nil {
-			route := *repo.ReviewerRoute
-			if route.Provider == ccconnect.Name && route.Session == "" {
-				route.Parent = ""
-			}
-			reviewer.Route = &route
+	reviewer := Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}
+	if repo.ReviewerRoute != nil {
+		route := *repo.ReviewerRoute
+		if route.Provider == ccconnect.Name && route.Session == "" {
+			route.Parent = ""
 		}
-		if w.ReviewerOverride != nil {
-			reviewer = *cloneAssignee(*w.ReviewerOverride)
-		}
-		if w.RoundConfig == nil || w.RoundConfig.SHA != w.Pull.Head.SHA {
-			// A session is runtime state. Reuse only when the configured destination and
-			// reviewer identity still match; otherwise prepare a new conversation.
-			if reviewer.GitHubLogin == w.Reviewer.GitHubLogin && compatibleRoute(reviewer.Route, w.Reviewer.Route) && reviewer.Route.Session == "" {
-				reviewer.Route.Session = w.Reviewer.Route.Session
-			}
-			w.Reviewer = reviewer
-		}
-		developer := Assignee{GitHubLogin: repo.HumanDeveloper}
-		if w.Origin != nil {
-			route := *w.Origin
-			developer.Route = &route
-		}
-		if w.DeveloperOverride != nil {
-			developer = *cloneAssignee(*w.DeveloperOverride)
-		}
-		w.Developer = developer
-	} else {
-		// Historical work did not record whether an assignment was explicit. Keep
-		// its saved identity and session rather than guessing an inheritance link.
-		w.ReviewerOverride = cloneAssignee(w.Reviewer)
-		w.DeveloperOverride = cloneAssignee(w.Developer)
+		reviewer.Route = &route
 	}
+	if w.ReviewerOverride != nil {
+		reviewer = *cloneAssignee(*w.ReviewerOverride)
+	}
+	if w.RoundConfig == nil || w.RoundConfig.SHA != w.Pull.Head.SHA {
+		// A session is runtime state. Reuse only when the configured destination and
+		// reviewer identity still match; otherwise prepare a new conversation.
+		if reviewer.GitHubLogin == w.Reviewer.GitHubLogin && compatibleRoute(reviewer.Route, w.Reviewer.Route) && reviewer.Route.Session == "" {
+			reviewer.Route.Session = w.Reviewer.Route.Session
+		}
+		w.Reviewer = reviewer
+	}
+	developer := Assignee{GitHubLogin: repo.HumanDeveloper}
+	if w.Origin != nil {
+		route := *w.Origin
+		developer.Route = &route
+	}
+	if w.DeveloperOverride != nil {
+		developer = *cloneAssignee(*w.DeveloperOverride)
+	}
+	w.Developer = developer
 	w.TaskMode = repo.TaskMode
 	w.Review = repo.Review
 	if t := w.Task; t != nil && !taskStarted(t) {
@@ -173,8 +159,7 @@ func (s *Service) freezeTaskConfig(w *Work) error {
 	return nil
 }
 
-// Deep copy used when migrating snapshots; no pointer can be shared across
-// mutable work state, runtime route allocation and historical policy.
+// Keep the round policy independent of the mutable task snapshot.
 func copyTaskSnapshot(snapshot *TaskConfigSnapshot) *TaskConfigSnapshot {
 	if snapshot == nil {
 		return nil

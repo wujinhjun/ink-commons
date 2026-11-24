@@ -39,7 +39,7 @@ func (e *historyExecutor) ReadConversation(_ context.Context, r execution.Route,
 func reviewContextFixture(t *testing.T, enabled bool, e execution.Executor) (*Service, Repository, Pull) {
 	t.Helper()
 	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer", ReviewerRoute: &execution.Route{Provider: ccconnect.Name, Target: "reviewer"}, Review: &ReviewFeatures{ReuseDevelopmentThread: true, Context: ReviewContextFeatures{ThreadHistory: enabled}}}
-	s, err := NewService(Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: e})
+	s, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: e})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +47,13 @@ func reviewContextFixture(t *testing.T, enabled bool, e execution.Executor) (*Se
 	p := Pull{Number: 42, State: "open", URL: "https://github.com/acme/project/pull/42"}
 	p.Head.SHA = strings.Repeat("a", 40)
 	w := &Work{Repo: repo.Repo, Pull: p, Linked: true, Developer: Assignee{Route: &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}}, Reviewer: Assignee{GitHubLogin: "reviewer", Route: repo.ReviewerRoute}}
-	st, err := s.store.load()
+	w.Origin = cloneRoute(w.Developer.Route)
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Work[key(repo.Repo, p.Number)] = w
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.observe(repo, p, nil); err != nil {
@@ -116,7 +117,7 @@ func TestReviewContextRejectsRetiredTaskAndConcurrentReassignment(t *testing.T) 
 	e.onRead = func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		st, err := s.store.load()
+		st, err := loadFixture(s.store)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,7 +125,7 @@ func TestReviewContextRejectsRetiredTaskAndConcurrentReassignment(t *testing.T) 
 		w.Reviewer = Assignee{GitHubLogin: "human"}
 		w.replaceTask(nil)
 		w.derive()
-		if err := s.store.save(st); err != nil {
+		if err := saveFixture(s.store, st); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -152,10 +153,10 @@ func TestReviewFeaturesRefreshForNewSHAAndPersistBoundary(t *testing.T) {
 	if cutoff == "" || cutoff != reviewHistoryBefore(w.Task.CreatedAt.In(time.FixedZone("other", -5*3600))) {
 		t.Fatal("unstable cutoff")
 	}
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	w = st.Work[key(repo.Repo, p.Number)]
 	w.Task.Runs = []Attempt{{ID: "old", State: "succeeded"}}
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	repo.Review = &ReviewFeatures{Context: ReviewContextFeatures{ThreadHistory: true}}
@@ -168,8 +169,8 @@ func TestReviewFeaturesRefreshForNewSHAAndPersistBoundary(t *testing.T) {
 	if !w.Review.Context.ThreadHistory || deliveryFor(w, w.Task, "new", 1).ContextBefore == "" {
 		t.Fatal("new task retained stale feature settings")
 	}
-	st, _ = s.store.load()
-	if err := s.store.save(st); err != nil {
+	st, _ = loadFixture(s.store)
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	w = notificationWork(t, s, repo, p)
@@ -214,7 +215,7 @@ func TestDispatchReviewReusesThreadAndProvidesContextCommand(t *testing.T) {
 func TestReviewContextAttemptCannotFollowNewDeveloperSource(t *testing.T) {
 	e := &historyExecutor{}
 	s, repo, p := reviewContextFixture(t, true, e)
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +223,7 @@ func TestReviewContextAttemptCannotFollowNewDeveloperSource(t *testing.T) {
 	request := deliveryFor(w, w.Task, "attempt", 1)
 	w.Task.Runs = []Attempt{{ID: "attempt", State: "accepted", Request: request}}
 	w.Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:456"}
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	res := contextRequest(t, s, "sha="+p.Head.SHA)
@@ -249,7 +250,7 @@ func TestReviewContextDisabledDuringReadReturnsNoMessages(t *testing.T) {
 func TestRegistrationReviewDefaultCanBeExplicitlyDisabled(t *testing.T) {
 	path := filepath.Join(t.TempDir(), stateDatabase)
 	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "reviewer", Review: &ReviewFeatures{ReuseDevelopmentThread: true, Context: ReviewContextFeatures{ThreadHistory: true}}}}
-	s, err := NewService(cfg, path, nil)
+	s, err := newFixtureService(t, cfg, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,14 +287,14 @@ func TestRegistrationReviewDefaultCanBeExplicitlyDisabled(t *testing.T) {
 func TestAutomaticReviewWithHistoryMissingSourceDoesNotStartAttempt(t *testing.T) {
 	e := &historyExecutor{}
 	s, repo, p := reviewContextFixture(t, true, e)
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	w := st.Work[key(repo.Repo, p.Number)]
 	w.Developer = Assignee{GitHubLogin: "human"}
 	w.Origin = nil
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
@@ -305,12 +306,14 @@ func TestAutomaticReviewWithHistoryMissingSourceDoesNotStartAttempt(t *testing.T
 	}
 	// Once the operator supplies the proper source, the first real attempt can
 	// proceed without a fake unknown run or manual stop confirmation.
-	st, err = s.store.load()
+	st, err = loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Work[key(repo.Repo, p.Number)].Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}
-	if err := s.store.save(st); err != nil {
+	work := st.Work[key(repo.Repo, p.Number)]
+	work.Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}
+	work.DeveloperOverride = cloneAssignee(work.Developer)
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
@@ -352,7 +355,7 @@ func TestReviewPreparationFailuresDoNotReserveAttempts(t *testing.T) {
 			}
 			history := strings.HasPrefix(scenario, "history")
 			s, repo, p := reviewContextFixture(t, history, e)
-			st, _ := s.store.load()
+			st, _ := loadFixture(s.store)
 			w := st.Work[key(repo.Repo, p.Number)]
 			switch scenario {
 			case "reuse only same project":
@@ -369,7 +372,9 @@ func TestReviewPreparationFailuresDoNotReserveAttempts(t *testing.T) {
 			if strings.Contains(scenario, "explicit parent") {
 				w.Reviewer.Route.Parent = "88"
 			}
-			if err := s.store.save(st); err != nil {
+			w.ReviewerOverride = cloneAssignee(w.Reviewer)
+			w.DeveloperOverride = cloneAssignee(w.Developer)
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
@@ -379,11 +384,13 @@ func TestReviewPreparationFailuresDoNotReserveAttempts(t *testing.T) {
 			if networkCalls != 0 || len(w.Task.Runs) != 0 || w.Task.Attempts != 0 || w.Task.Delivery != "pending" || w.Workflow.State != "needs_attention" {
 				t.Fatalf("local preparation failure started an attempt: %+v", w.Task)
 			}
-			st, _ = s.store.load()
+			st, _ = loadFixture(s.store)
 			w = st.Work[key(repo.Repo, p.Number)]
 			w.Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}
 			w.Reviewer.Route = &execution.Route{Provider: ccconnect.Name, Target: "reviewer"}
-			if err := s.store.save(st); err != nil {
+			w.ReviewerOverride = cloneAssignee(w.Reviewer)
+			w.DeveloperOverride = cloneAssignee(w.Developer)
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
@@ -418,7 +425,7 @@ func TestReuseOnlyExplicitPlacementAllowsMissingDevelopmentSource(t *testing.T) 
 				t.Fatal(err)
 			}
 			s, repo, p := reviewContextFixture(t, false, e)
-			st, _ := s.store.load()
+			st, _ := loadFixture(s.store)
 			w := st.Work[key(repo.Repo, p.Number)]
 			w.Developer = Assignee{GitHubLogin: "human"}
 			w.Origin = nil
@@ -427,7 +434,9 @@ func TestReuseOnlyExplicitPlacementAllowsMissingDevelopmentSource(t *testing.T) 
 			} else {
 				w.Reviewer.Route.Parent = "88"
 			}
-			if err := s.store.save(st); err != nil {
+			w.ReviewerOverride = cloneAssignee(w.Reviewer)
+			w.DeveloperOverride = cloneAssignee(w.Developer)
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.dispatch(context.Background(), repo, p.Number); err != nil {
@@ -559,7 +568,7 @@ func TestCooperativeContextRevalidatesFrozenBindingAfterRead(t *testing.T) {
 				}
 				s.mu.Lock()
 				defer s.mu.Unlock()
-				st, err := s.store.load()
+				st, err := loadFixture(s.store)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -569,7 +578,7 @@ func TestCooperativeContextRevalidatesFrozenBindingAfterRead(t *testing.T) {
 				} else {
 					snapshot.Source.Session = "discord:999"
 				}
-				if err := s.store.save(st); err != nil {
+				if err := saveFixture(s.store, st); err != nil {
 					t.Fatal(err)
 				}
 			}

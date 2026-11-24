@@ -8,7 +8,6 @@ import (
 	"log"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wujinhjun/ink-commons/internal/execution"
 	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 type Service struct {
@@ -55,84 +55,9 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 	if err != nil {
 		return nil, err
 	}
-	st, err := store.load()
-	if err != nil {
+	if err := store.initializeConfig(config); err != nil {
 		store.db.Close()
 		return nil, err
-	}
-	if err := store.migrateConfig(config, st); err != nil {
-		store.db.Close()
-		return nil, err
-	}
-	records, err := store.configRecords()
-	if err != nil {
-		store.db.Close()
-		return nil, err
-	}
-	for _, record := range records {
-		if record.Scope == legacyConfigScope {
-			continue
-		}
-		if _, err := effectiveFromRecords(records, record.Scope); err != nil {
-			store.db.Close()
-			return nil, err
-		}
-	}
-	changed := false
-	for _, w := range st.Work {
-		if w.InheritsConfig == nil {
-			managed := false
-			w.InheritsConfig = &managed
-			w.ReviewerOverride = cloneAssignee(w.Reviewer)
-			w.DeveloperOverride = cloneAssignee(w.Developer)
-		}
-		for _, t := range w.executionTasks() {
-			if t.ConfigSnapshot == nil && taskStarted(t) {
-				effective, err := store.effectiveConfig(w.Repo)
-				if err != nil {
-					// Historical state can contain work whose repository was removed.
-					// Preserve it for recovery without registering it again.
-					effective, err = resolveConfig("", nil, nil, 0)
-					if err != nil {
-						store.db.Close()
-						return nil, err
-					}
-					effective.Repository.Repo = w.Repo
-					effective.Execution = config.Reliability.defaults()
-				}
-				effective.Repository.ReviewerLogin = w.Reviewer.GitHubLogin
-				effective.Repository.ReviewerCommand = w.Reviewer.GitHubCommand
-				effective.Repository.ReviewerRoute = cloneAssignee(w.Reviewer).Route
-				effective.Repository.HumanDeveloper = w.Developer.GitHubLogin
-				effective.Repository.Review = w.Review
-				effective.Repository.TaskMode = normalTaskMode(w.TaskMode)
-				t.ConfigSnapshot = &TaskConfigSnapshot{EffectiveConfig: effective, Reviewer: *cloneAssignee(w.Reviewer), Developer: *cloneAssignee(w.Developer), Legacy: true, SHA: t.SHA, Source: cloneRoute(reviewSource(w))}
-				if t.Handoff != nil {
-					if t.Role == "reviewer" {
-						t.ConfigSnapshot.Reviewer = *cloneAssignee(t.Handoff.Assignee)
-					} else {
-						t.ConfigSnapshot.Developer = *cloneAssignee(t.Handoff.Assignee)
-					}
-				}
-				if len(t.Runs) > 0 {
-					t.ConfigSnapshot.Source = cloneRoute(t.Runs[len(t.Runs)-1].Request.Source)
-				}
-				if t.Role == "reviewer" && t.SHA == w.Pull.Head.SHA {
-					w.RoundConfig = copyTaskSnapshot(t.ConfigSnapshot)
-				}
-			}
-		}
-		if migrateExecution(w) {
-			changed = true
-		}
-		w.refreshWorkflow(time.Now(), config.Reliability.defaults())
-		changed = true
-	}
-	if changed {
-		if err := store.save(st); err != nil {
-			store.db.Close()
-			return nil, err
-		}
 	}
 	up := newUpstream(config.GitHubToken)
 	up.command = config.GitHubCommand
@@ -168,48 +93,24 @@ func (s *Service) repositories() []Repository {
 	return repos
 }
 
-func (s *Service) recordPushes(st *state, pushes []Push, now time.Time) {
+func (s *Service) recordPushes(pushes []Push, now time.Time) error {
+	accepted := make([]Push, 0, len(pushes))
 	for _, p := range pushes {
-		if _, ok := s.repo(p.Repo); !ok {
-			continue
-		}
-		p.At = now
-		replaced := false
-		for i, old := range st.Pushes {
-			if p.Repo == old.Repo && p.Ref == old.Ref && p.SHA == old.SHA && p.Route == old.Route {
-				st.Pushes[i] = p
-				replaced = true
-				break
-			}
-		}
-		if !replaced {
-			st.Pushes = append(st.Pushes, p)
+		if _, ok := s.repo(p.Repo); ok {
+			p.At = now
+			accepted = append(accepted, p)
 		}
 	}
-}
-
-func matchOrigin(pushes []Push, pull Pull) *execution.Route {
-	if pull.Head.Repo == nil || !validSHA(pull.Head.SHA) {
-		return nil
-	}
-	var match *execution.Route
-	for _, p := range pushes {
-		if !strings.EqualFold(p.Repo, pull.Head.Repo.FullName) || p.Ref != pull.Head.Ref || p.SHA != pull.Head.SHA {
-			continue
-		}
-		if match != nil && *match != p.Route {
-			return nil
-		}
-		route := p.Route
-		match = &route
-	}
-	return match
+	return s.store.savePushes(accepted, now)
 }
 
 func key(repo string, number int) string { return fmt.Sprintf("%s#%d", repo, number) }
 
 func (s *Service) Poll(ctx context.Context) {
 	defer func() { s.lastPoll.Store(time.Now().Unix()) }()
+	if err := statedb.New(s.store.db).PrunePushes(ctx, pushCutoff(time.Now())); err != nil {
+		log.Printf("prune expired push observations: %v", err)
+	}
 	if err := s.reconcileBlockedNotices(ctx); err != nil {
 		log.Printf("blocked task notifications: %v", err)
 	}
@@ -236,7 +137,7 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 		return err
 	}
 	s.mu.Lock()
-	snapshot, err := s.store.load()
+	pending, err := statedb.New(s.store.db).ListPollPending(ctx, repo.Repo)
 	s.mu.Unlock()
 	if err != nil {
 		return err
@@ -246,14 +147,15 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 	for _, pull := range pulls {
 		open[pull.Number] = true
 	}
-	for _, work := range snapshot.Work {
-		if work.Repo != repo.Repo || (work.Pull.State != "open" && !work.pendingMergedNotification() && !hasInFlightAutoMerge(work)) || open[work.Pull.Number] {
+	for _, pendingNumber := range pending {
+		number := int(pendingNumber)
+		if open[number] {
 			continue
 		}
 		var pull Pull
-		_, err := s.up.gitHubGet(ctx, fmt.Sprintf("%s/%d", path, work.Pull.Number), &pull)
+		_, err := s.up.gitHubGet(ctx, fmt.Sprintf("%s/%d", path, number), &pull)
 		if err != nil {
-			log.Printf("refresh %s: %v", key(repo.Repo, work.Pull.Number), err)
+			log.Printf("refresh %s: %v", key(repo.Repo, number), err)
 			continue
 		}
 		pulls = append(pulls, pull)
@@ -295,26 +197,12 @@ func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
 func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	work, err := s.store.loadWork(key(repo.Repo, pull.Number))
 	if err != nil {
 		return err
 	}
-	prunePushes(&st, time.Now())
-	id := key(repo.Repo, pull.Number)
-	work := st.Work[id]
 	if work == nil {
-		managed := true
-		work = &Work{InheritsConfig: &managed, Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
-		if repo.ReviewerRoute != nil {
-			route := *repo.ReviewerRoute
-			// Discord placement belongs to this PR's development conversation.
-			// Legacy repository parents must not silently move new reviews elsewhere.
-			if route.Provider == ccconnect.Name && route.Session == "" {
-				route.Parent = ""
-			}
-			work.Reviewer.Route = &route
-		}
-		st.Work[id] = work
+		work = &Work{Repo: repo.Repo}
 	}
 	work.Version++
 	work.Pull = pull
@@ -326,7 +214,11 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	repo = latest.Repository
 	s.refreshPendingConfig(work, repo)
 	if pull.State == "open" && !work.Linked {
-		if origin := matchOrigin(st.Pushes, pull); origin != nil {
+		origin, err := s.store.matchOrigin(pull, time.Now())
+		if err != nil {
+			return err
+		}
+		if origin != nil {
 			work.Origin, work.Linked, work.Developer.Route = origin, true, origin
 		}
 	}
@@ -340,7 +232,7 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 		}
 	}
 	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	return s.store.save(st)
+	return s.store.saveWork(work)
 }
 
 func mergeReviews(previous, current []Review) []Review {
@@ -363,25 +255,13 @@ func mergeReviews(previous, current []Review) []Review {
 	return current
 }
 
-func prunePushes(st *state, now time.Time) {
-	cutoff := now.Add(-7 * 24 * time.Hour)
-	kept := st.Pushes[:0]
-	for _, push := range st.Pushes {
-		if push.At.After(cutoff) {
-			kept = append(kept, push)
-		}
-	}
-	st.Pushes = kept
-}
-
 func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Work, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	work, err := s.store.loadWork(id)
 	if err != nil {
 		return nil, err
 	}
-	work := st.Work[id]
 	if work != nil {
 		if err := s.preparePendingConfig(work); err != nil {
 			return nil, err
@@ -395,14 +275,14 @@ func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Wo
 	if err := s.validateReviewPreparation(work); err != nil {
 		work.Task.Error = "review preparation: " + err.Error()
 		work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-		return nil, s.store.save(st)
+		return nil, s.store.saveWork(work)
 	}
 
 	if current, err := channelCheck.result(s, work); !current || err != nil {
 		if err != nil {
 			work.Task.Error = "review preparation: " + err.Error()
 			work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-			return nil, s.store.save(st)
+			return nil, s.store.saveWork(work)
 		}
 		return nil, nil
 	}
@@ -425,7 +305,7 @@ func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Wo
 	attemptID := uuid.NewString()
 	work.Task.RetryAt = time.Time{}
 	work.Task.Runs = append(work.Task.Runs, Attempt{ID: attemptID, Number: work.Task.Attempts, Route: *route, Request: deliveryFor(work, work.Task, attemptID, work.Task.Attempts), State: "unknown", CreatedAt: time.Now()})
-	if err := s.store.save(st); err != nil {
+	if err := s.store.saveWork(work); err != nil {
 		return nil, err
 	}
 	s.delivering[id] = true
@@ -436,11 +316,10 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Reload so hooks and operations on other PRs can save while delivery runs.
-	st, err := s.store.load()
+	live, err := s.store.loadWork(id)
 	if err != nil {
 		return err
 	}
-	live := st.Work[id]
 	if live == nil {
 		return nil
 	}
@@ -462,7 +341,7 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 		}
 	}
 	live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	return s.store.save(st)
+	return s.store.saveWork(live)
 }
 
 func (s *Service) dispatch(ctx context.Context, repo Repository, number int) error {
@@ -541,8 +420,7 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 	}
 	// Do not deliver a task superseded while its session was being allocated.
 	s.mu.Lock()
-	latest, loadErr := s.store.load()
-	live := latest.Work[id]
+	live, loadErr := s.store.loadWork(id)
 	current := loadErr == nil && live != nil && live.Task != nil && live.Task.ID == task.ID
 	s.mu.Unlock()
 	if loadErr != nil {

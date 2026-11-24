@@ -44,16 +44,16 @@ func newAutoMergeFixture(t *testing.T) *autoMergeFixture {
 	r := Review{ID: 1, SHA: f.pull.Head.SHA, State: "APPROVED", SubmittedAt: time.Now()}
 	r.User.Login = "reviewer"
 	f.reviews = []Review{r}
-	s, err := NewService(Config{Repositories: []Repository{f.repo}}, f.path, nil)
+	s, err := newFixtureService(t, Config{Repositories: []Repository{f.repo}}, f.path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.s = s
 	t.Cleanup(func() { f.s.Close() })
 	f.installTransport(t)
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	st.Work[key(f.repo.Repo, 42)] = &Work{Repo: f.repo.Repo, Pull: f.pull, Linked: true, Reviewer: Assignee{GitHubLogin: "reviewer"}}
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.observe(f.repo, f.pull, f.reviews); err != nil {
@@ -78,7 +78,7 @@ func (f *autoMergeFixture) installTransport(t *testing.T) {
 			if input["sha"] != strings.Repeat("a", 40) || input["merge_method"] != f.repo.AutoMerge.method() {
 				t.Fatalf("unguarded merge: %+v", input)
 			}
-			st, err := f.s.store.load()
+			st, err := loadFixture(f.s.store)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -200,9 +200,9 @@ func TestAutoMergeDisabledAndNonQualifyingReviews(t *testing.T) {
 			case "changes requested":
 				f.reviews[0].State = "CHANGES_REQUESTED"
 			case "unlinked":
-				st, _ := f.s.store.load()
+				st, _ := loadFixture(f.s.store)
 				st.Work[key(f.repo.Repo, 42)].Linked = false
-				if err := f.s.store.save(st); err != nil {
+				if err := saveFixture(f.s.store, st); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -285,7 +285,7 @@ func TestAutoMergeConcurrentReservationAndWaitingCannotOverwrite(t *testing.T) {
 func TestAutoMergeRegistrationRequiresRepositoryOptIn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), stateDatabase)
 	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "reviewer", AutoMerge: &AutoMergeConfig{Enabled: true, Method: "squash"}}}
-	s, err := NewService(cfg, path, nil)
+	s, err := newFixtureService(t, cfg, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestHistoricalUnknownsAllReconcileWhenPRCloses(t *testing.T) {
 	for _, merged := range []bool{false, true} {
 		f := newAutoMergeFixture(t)
 		oldSHA := strings.Repeat("e", 40)
-		st, err := f.s.store.load()
+		st, err := loadFixture(f.s.store)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -385,7 +385,7 @@ func TestHistoricalUnknownsAllReconcileWhenPRCloses(t *testing.T) {
 			{SHA: oldSHA, Reviewer: "reviewer", State: "unknown", Reason: "response lost"},
 			{SHA: f.pull.Head.SHA, Reviewer: "reviewer", State: "unknown", Reason: "response lost"},
 		}
-		if err := f.s.store.save(st); err != nil {
+		if err := saveFixture(f.s.store, st); err != nil {
 			t.Fatal(err)
 		}
 		f.pull.State = "closed"

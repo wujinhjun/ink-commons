@@ -39,13 +39,23 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 	}
 	id := key(repo.Repo, number)
 	s.mu.Lock()
-	st, err := s.store.load()
+	w, err := s.store.loadWork(id)
 	if err != nil {
 		s.mu.Unlock()
 		return err
 	}
-	w := st.Work[id]
-	if w == nil || (w.Phase != "approved" && w.Phase != "merged") {
+	if w == nil {
+		s.mu.Unlock()
+		return nil
+	}
+	if w.supersedeStaleNotifications(time.Now()) {
+		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		if err := s.store.saveWork(w); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	if w.Phase != "approved" && w.Phase != "merged" {
 		s.mu.Unlock()
 		return nil
 	}
@@ -53,7 +63,7 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 	index := -1
 	for i, n := range w.Notifications {
 		if n.SHA == sha && n.Event == event {
-			if (n.State != "unknown" && n.State != "awaiting_ack") || (!n.RequireACK && !(n.Event == "pr_merged" && n.Attempts == 0)) || time.Now().Before(n.RetryAt) {
+			if !n.pendingDelivery() || time.Now().Before(n.RetryAt) {
 				s.mu.Unlock()
 				return nil
 			}
@@ -92,7 +102,7 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 			w.Notifications[index].FinishedAt = time.Now()
 			w.Notifications[index].RetryAt = time.Time{}
 			w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-			err = s.store.save(st)
+			err = s.store.saveWork(w)
 			s.mu.Unlock()
 			return err
 		}
@@ -142,7 +152,7 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 		w.Notifications[index] = n
 	}
 	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	err = s.store.save(st)
+	err = s.store.saveWork(w)
 	s.mu.Unlock()
 	if err != nil || n.State != "unknown" {
 		return err
@@ -157,33 +167,38 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, loadErr := s.store.load()
+	live, loadErr := s.store.loadWork(id)
 	if loadErr != nil {
 		return loadErr
 	}
-	if live := st.Work[id]; live != nil {
+	if live != nil {
 		for i := range live.Notifications {
 			if live.Notifications[i].EventID == n.EventID && live.Notifications[i].Attempts == n.Attempts && live.Notifications[i].State == "unknown" {
 				live.Notifications[i] = n
 			}
 		}
 		live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		return s.store.saveWork(live)
 	}
-	return s.store.save(st)
+	return nil
 }
 
-// Closed PRs normally fall out of polling. Reserved notifications still need
-// initial delivery or receipt recovery until consumed or superseded.
-func (w *Work) pendingMergedNotification() bool {
-	if w.Phase != "merged" {
-		return false
-	}
-	for _, n := range w.Notifications {
-		if n.SHA == w.Pull.Head.SHA && ((n.Event == "pr_merged" && n.State == "unknown" && n.Attempts == 0) || (n.RequireACK && (n.State == "unknown" || n.State == "awaiting_ack"))) {
-			return true
+func (n NotificationRun) pendingDelivery() bool {
+	return (n.State == "unknown" || n.State == "awaiting_ack") &&
+		(n.RequireACK || (n.Event == "pr_merged" && n.Attempts == 0))
+}
+
+// A closed unmerged PR and a changed head invalidate the old receipt lease.
+func (w *Work) supersedeStaleNotifications(now time.Time) bool {
+	changed := false
+	for i := range w.Notifications {
+		n := &w.Notifications[i]
+		if n.pendingDelivery() && (n.SHA != w.Pull.Head.SHA || (w.Pull.State == "closed" && w.Phase != "merged")) {
+			n.State, n.FinishedAt, n.RetryAt = "superseded", now, time.Time{}
+			changed = true
 		}
 	}
-	return false
+	return changed
 }
 
 // 与确认合入的账本更新在同一事务预留事件，不回填升级前的历史合并。

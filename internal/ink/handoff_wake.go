@@ -34,12 +34,11 @@ func retryablePlacementRead(err error) bool {
 // executor attempts: only claim grants permission to do work.
 func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck reviewChannelCheck) (bool, error) {
 	s.mu.Lock()
-	st, err := s.store.load()
+	w, err := s.store.loadWork(id)
 	if err != nil {
 		s.mu.Unlock()
 		return false, err
 	}
-	w := st.Work[id]
 	if w != nil {
 		if err := s.preparePendingConfig(w); err != nil {
 			s.mu.Unlock()
@@ -68,14 +67,14 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 	if !ok {
 		h.Wake.Error = "provider does not support cooperative task wakes"
 		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-		err = s.store.save(st)
+		err = s.store.saveWork(w)
 		s.mu.Unlock()
 		return true, err
 	}
 	if err := s.validateReviewPreparation(w); err != nil {
 		h.Wake.Error = "review preparation: " + err.Error()
 		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-		saveErr := s.store.save(st)
+		saveErr := s.store.saveWork(w)
 		s.mu.Unlock()
 		return true, saveErr
 	}
@@ -97,7 +96,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 					h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.PreparationAttempts))
 				}
 				w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-				err = s.store.save(st)
+				err = s.store.saveWork(w)
 			}
 			s.mu.Unlock()
 			return true, err
@@ -120,7 +119,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 				w.RoundConfig = nil
 			}
 			h.Wake.Error = err.Error()
-			err = s.store.save(st)
+			err = s.store.saveWork(w)
 			s.mu.Unlock()
 			return true, err
 		}
@@ -143,7 +142,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 		h.Wake.Attempts++
 		h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.Attempts))
 	}
-	if err = s.store.save(st); err != nil {
+	if err = s.store.saveWork(w); err != nil {
 		s.mu.Unlock()
 		return true, err
 	}
@@ -166,12 +165,12 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 			prepareErr = execution.ValidateDestination(s.providers, prepared, false)
 		}
 		s.mu.Lock()
-		live, loadErr := s.store.load()
+		lw, loadErr := s.store.loadWork(id)
 		if loadErr != nil {
 			s.mu.Unlock()
 			return true, loadErr
 		}
-		lw, lt := findTask(live, t.ID)
+		lt := lw.findTask(t.ID)
 		if lt == nil || lt.Handoff == nil {
 			s.mu.Unlock()
 			return true, nil
@@ -193,7 +192,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 			}
 		}
 		lw.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-		err = s.store.save(live)
+		err = s.store.saveWork(lw)
 		s.mu.Unlock()
 		if err != nil || prepareErr != nil {
 			return true, err
@@ -202,8 +201,8 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 	// Recheck after allocation. A delayed wake is harmless because claim performs
 	// the same eligibility check under the state lock.
 	s.mu.Lock()
-	live, err := s.store.load()
-	current, latest := findTask(live, t.ID)
+	current, err := s.store.loadWork(id)
+	latest := current.findTask(t.ID)
 	eligible := err == nil && latest != nil && current.Task == latest && latest.Handoff != nil && latest.Handoff.State == "pending" && !current.executionBlocked()
 	s.mu.Unlock()
 	if err != nil || !eligible {
@@ -212,11 +211,11 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 	sendErr := waker.WakeTask(ctx, prepared, d)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live, err = s.store.load()
+	current, err = s.store.loadWork(id)
 	if err != nil {
 		return true, err
 	}
-	current, latest = findTask(live, t.ID)
+	latest = current.findTask(t.ID)
 	if latest != nil && latest.Handoff != nil {
 		latest.Handoff.Wake.Error = ""
 		if sendErr != nil {
@@ -226,8 +225,9 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 			latest.Handoff.Wake.AcceptedAt = &now
 		}
 		current.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		return true, s.store.saveWork(current)
 	}
-	return true, s.store.save(live)
+	return true, nil
 }
 
 func (w *TaskWake) recordPreparationError(err error, recovering bool) {

@@ -52,7 +52,7 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 	t := w.Task
 	for _, task := range w.executionTasks() {
 		for _, a := range task.Runs {
-			if !execution.Terminal(a.State) && (a.Legacy || a.Error != "" || task.reliability(c).expired(a, now)) {
+			if !execution.Terminal(a.State) && (a.Error != "" || task.reliability(c).expired(a, now)) {
 				w.raiseAlert("execution_unresolved", a.ID, "旧执行尚未确认结束，后续任务已保留并等待处理。轮次 "+a.ID+"："+a.Error, now)
 			}
 		}

@@ -22,28 +22,12 @@ func (r Route) Valid(allocate bool) bool {
 	return strings.TrimSpace(r.Provider) != "" && strings.TrimSpace(r.Target) != "" && (allocate || strings.TrimSpace(r.Session) != "")
 }
 
-// UnmarshalJSON accepts the original cc-connect route in persisted state and API requests.
+// UnmarshalJSON rejects unknown fields, including inside configuration values.
 func (r *Route) UnmarshalJSON(data []byte) error {
 	type route Route
-	var value struct {
-		route
-		Project    string `json:"project"`
-		SessionKey string `json:"session_key"`
-	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
-		return err
-	}
-	if value.Project != "" || value.SessionKey != "" {
-		if value.route != (route{}) {
-			return fmt.Errorf("cannot mix legacy and provider route fields")
-		}
-		*r = Route{Provider: "cc-connect", Target: value.Project, Session: value.SessionKey}
-		return nil
-	}
-	*r = Route(value.route)
-	return nil
+	return decoder.Decode((*route)(r))
 }
 
 // ReviewPlacement records the Discord destination resolved before execution starts.

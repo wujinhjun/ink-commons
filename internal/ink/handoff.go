@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 // TaskHandoff is a cooperative business handoff, never an executor termination
@@ -58,15 +59,15 @@ type handoffInput struct {
 	Submission *HandoffSubmission `json:"submission,omitempty"`
 }
 
-func findTask(st state, id string) (*Work, *Task) {
-	for _, w := range st.Work {
+func (w *Work) findTask(id string) *Task {
+	if w != nil {
 		for _, t := range w.executionTasks() {
 			if t.ID == id {
-				return w, t
+				return t
 			}
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 func claimHash(token string) string {
@@ -132,12 +133,11 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	w, t, err := s.store.loadTask(r.PathValue("task"))
 	if err != nil {
 		fail(out, err)
 		return
 	}
-	w, t := findTask(st, r.PathValue("task"))
 	if t == nil || t.Handoff == nil {
 		fail(out, apiError{404, "cooperative task not found"})
 		return
@@ -184,7 +184,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if w.Task != t || h.State != "pending" || w.Pull.State != "open" || w.Pull.Draft || !w.Linked || w.executionBlocked() {
-			fail(out, apiError{409, "task is not eligible; wait for the previous handoff or resolve legacy execution"})
+			fail(out, apiError{409, "task is not eligible; wait for the previous handoff or resolve the previous execution"})
 			return
 		}
 		if reviewChannelUnverified(w, t) {
@@ -266,7 +266,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	if err := s.store.save(st); err != nil {
+	if err := s.store.saveWork(w); err != nil {
 		fail(out, err)
 		return
 	}
@@ -278,12 +278,19 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 // successor creation and its pending wake record share one SQLite transaction.
 func (s *Service) reconcileHandoffs(ctx context.Context) error {
 	s.mu.Lock()
-	st, err := s.store.load()
+	ids, err := statedb.New(s.store.db).ListHandoffPending(ctx)
 	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	for _, w := range st.Work {
+	for _, id := range ids {
+		w, err := s.store.loadWork(id)
+		if err != nil {
+			return err
+		}
+		if w == nil {
+			continue
+		}
 		for _, t := range w.executionTasks() {
 			if h := t.Handoff; h != nil && h.State == "submitted" {
 				if ctx.Err() != nil {
@@ -345,11 +352,10 @@ func (s *Service) verifyHandoff(ctx context.Context, snapshot *Work, task *Task)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live, err := s.store.load()
+	w, t, err := s.store.loadTask(task.ID)
 	if err != nil {
 		return err
 	}
-	w, t := findTask(live, task.ID)
 	if t == nil || t.Handoff == nil || w.Version != snapshot.Version || t.Handoff.State != "submitted" || t.Handoff.ClaimHash != task.Handoff.ClaimHash || t.Handoff.Submission == nil || *t.Handoff.Submission != result {
 		return nil
 	}
@@ -370,7 +376,7 @@ func (s *Service) verifyHandoff(ctx context.Context, snapshot *Work, task *Task)
 		w.derive()
 	}
 	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	return s.store.save(live)
+	return s.store.saveWork(w)
 }
 
 func (w *Work) refreshHandoffWorkflow(now time.Time, c Reliability) {

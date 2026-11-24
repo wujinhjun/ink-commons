@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 // Reliability values are seconds; zero selects a default, including MaxAttempts.
@@ -63,40 +63,6 @@ func taskRoute(w *Work, t *Task) *execution.Route {
 
 // Upgrade old deliveries conservatively: they might already be running and did
 // not receive an attempt identity. Only an operator can confirm them stopped.
-func migrateExecution(w *Work) bool {
-	t := w.Task
-	if t == nil || t.Handoff != nil {
-		return false
-	}
-	changed := false
-	if t.CreatedAt.IsZero() {
-		t.CreatedAt = time.Now()
-		changed = true
-	}
-	if t.ID == "" {
-		t.ID = uuid.NewString()
-		changed = true
-	}
-	// The old retry API retained Attempts when resetting Delivery to pending.
-	// Any evidence of a previous attempt without a run must remain unresolved,
-	// even if an earlier migration has already assigned a task ID.
-	if len(t.Runs) == 0 && (t.Attempts > 0 || t.Delivery == "accepted" || t.Delivery == "unknown") {
-		if t.Attempts < 1 {
-			t.Attempts = 1
-		}
-		route := taskRoute(w, t)
-		a := Attempt{ID: uuid.NewString(), Number: t.Attempts, State: "unknown", CreatedAt: time.Now(), Error: "legacy delivery: manual stop confirmation required", Legacy: true}
-		if route != nil {
-			a.Route = *route
-		}
-		a.Request = deliveryFor(w, t, a.ID, a.Number)
-		t.Runs = append(t.Runs, a)
-		t.Delivery, t.Error = "unknown", a.Error
-		changed = true
-	}
-	return changed
-}
-
 func deliveryFor(w *Work, t *Task, attemptID string, number int) execution.Delivery {
 	d := execution.Delivery{TaskID: t.ID, AttemptID: attemptID, Attempt: number, Repository: w.Repo, Number: w.Pull.Number, URL: w.Pull.URL, Role: t.Role, SHA: t.SHA, ReviewID: t.ReviewID, ReviewURL: t.ReviewURL}
 	if t.ConflictBase != nil {
@@ -203,12 +169,12 @@ func (c Reliability) expired(a Attempt, now time.Time) bool {
 // Reconcile independently of GitHub availability, including retired task versions.
 func (s *Service) reconcileExecutions(ctx context.Context) error {
 	s.mu.Lock()
-	st, err := s.store.load()
+	ids, err := statedb.New(s.store.db).ListExecutionPending(ctx)
 	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	for id := range st.Work {
+	for _, id := range ids {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -225,12 +191,11 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 		s.mu.Unlock()
 		return nil
 	}
-	st, err := s.store.load()
+	w, err := s.store.loadWork(id)
 	if err != nil {
 		s.mu.Unlock()
 		return err
 	}
-	w := st.Work[id]
 	if w == nil {
 		s.mu.Unlock()
 		return nil
@@ -253,7 +218,7 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 			if capability, exists := provider.(interface{ MonitoringEnabled() bool }); exists && !capability.MonitoringEnabled() {
 				ok = false
 			}
-			if !ok || a.Legacy {
+			if !ok {
 				if retired || expired {
 					a.State, a.Error = "unknown", "executor cannot confirm termination; manual stop confirmation required"
 				}
@@ -328,11 +293,10 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 func (s *Service) saveExecution(id string, w *Work) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, err := s.store.load()
+	live, err := s.store.loadWork(id)
 	if err != nil {
 		return err
 	}
-	live := current.Work[id]
 	if live == nil {
 		return nil
 	}
@@ -347,5 +311,5 @@ func (s *Service) saveExecution(id string, w *Work) error {
 		}
 	}
 	live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	return s.store.save(current)
+	return s.store.saveWork(live)
 }
