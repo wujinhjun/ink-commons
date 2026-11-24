@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.example.ink-adapter-ccconnect</string>
+    <key>UserName</key>
+    <string>INK_ADAPTER_USER</string>
+    <key>GroupName</key>
+    <string>INK_ADAPTER_GROUP</string>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-ec</string>
+        <string>set -a; . "$1"; set +a; shift; exec "$@"</string>
+        <string>ink-adapter-env</string>
+        <string>/path/to/ink/adapter.env</string>
+        <string>/path/to/bin/ink-adapter-ccconnect</string>
+        <string>--provider</string>
+        <string>INK_PROVIDER_NAME</string>
+        <string>--listen</string>
+        <string>127.0.0.1:8788</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
@@ -96,8 +95,7 @@ func cli() (*cliOptions, *cobra.Command) {
 		return fmt.Errorf("invalid flags; see %s --help", cmd.CommandPath())
 	})
 	root.AddCommand(serve(options), initialize(options), register(options), review(options), readContext(options),
-		versionCommand(options), prePushCommand(options), doctorCommand(options),
-		deploymentCommand(options, "upgrade"), deploymentCommand(options, "rollback"))
+		versionCommand(options), prePushCommand(options), doctorCommand(options))
 	skills := initialize(options)
 	skills.Use = "skills"
 	root.AddCommand(skills)
@@ -132,7 +130,7 @@ func versionCommand(options *cliOptions) *cobra.Command {
 	return &cobra.Command{Use: "version", Short: "Show the build revision", Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if options.json {
-				return json.NewEncoder(os.Stdout).Encode(map[string]string{"revision": ink.BuildRevision})
+				return json.NewEncoder(os.Stdout).Encode(map[string]string{"version": ink.BuildVersion, "revision": ink.BuildRevision})
 			}
 			fmt.Println(ink.BuildRevision)
 			return nil
@@ -155,40 +153,7 @@ func prePushCommand(options *cliOptions) *cobra.Command {
 		}}
 }
 
-func deploymentCommand(options *cliOptions, name string) *cobra.Command {
-	command := &cobra.Command{Use: name, Short: "Manage an existing macOS system deployment", Args: cobra.NoArgs}
-	command.Flags().String("tag", "", "published build tag")
-	command.Flags().Bool("dry-run", false, "preview deployment changes")
-	if name == "upgrade" {
-		command.Flags().String("channel", "", "stable or preview")
-		command.Flags().Bool("apply", false, "activate the prepared release")
-	}
-	command.RunE = func(_ *cobra.Command, _ []string) error {
-		args := []string{name}
-		command.LocalNonPersistentFlags().Visit(func(flag *pflag.Flag) {
-			if flag.Name == "help" {
-				return
-			}
-			if flag.Value.Type() == "bool" {
-				if flag.Value.String() == "true" {
-					args = append(args, "--"+flag.Name)
-				}
-				return
-			}
-			args = append(args, "--"+flag.Name+"="+flag.Value.String())
-		})
-		if err := upgradeServices(args, options.json); err != nil {
-			return err
-		}
-		if options.json {
-			return json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "completed", "action": name})
-		}
-		return nil
-	}
-	return command
-}
-
-// Existing deployment scripts use the Go flag package's single-dash spellings.
+// Existing CLI callers may use the Go flag package's single-dash spellings.
 func legacyFlags(args []string) []string {
 	result := append([]string{}, args...)
 	for i, arg := range result {

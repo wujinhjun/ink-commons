@@ -49,15 +49,14 @@ ink repo remove owner/repo --json
 | Command | Operation |
 | --- | --- |
 | `ink doctor [--config FILE]` | Reports `state`, `config`, `healthz` and `self_check` under `checks`. The JSON report includes `ok`. A failed check exits nonzero after emitting the report. Config validation uses the local environment and defaults to `config.json` when present. |
-| `ink serve [--config FILE] [--config-only]` | Runs the daemon. Config-only mode permits selected local operations while the polling gate is closed. With `--json`, a clean shutdown emits a stopped receipt. Daemon logs go to stderr. |
+| `ink serve [--config FILE] [--config-only] [--poll-gate FILE]` | Runs the daemon. Config-only mode permits selected local operations while the polling gate is closed. With `--poll-gate`, polling waits until the specified file exists. With `--json`, a clean shutdown emits a stopped receipt. Daemon logs go to stderr. |
 | `ink state init` | Creates a state database in a fresh directory. |
 | `ink state backup --output FILE` | Writes a SQLite snapshot while the daemon is stopped. |
 | `ink state export --output FILE` | Writes a JSON ledger snapshot while the daemon is stopped. |
 | `ink init [--check] [--skills-dir DIR]` | Installs or verifies the workflow skill for the current user. `skills` is an alias. An explicit `--data DIR` stores the skill bundle under `DIR/skills`. |
 | `ink hook install [--checkout DIR]` | Installs the optional pre-push provenance hook. |
 | `ink hook status [--checkout DIR] [--repo OWNER/REPO]` | Reports the hook's status. |
-| `ink version` | Prints the revision, available as `revision` in JSON. |
-| `ink upgrade`, `ink rollback --tag TAG` | Operate on the existing macOS system deployment. In JSON mode the wrapper emits a completion receipt. |
+| `ink version` | Prints the commit revision. JSON includes `version` and `revision`. |
 
 ## Agent handoff and workspaces
 

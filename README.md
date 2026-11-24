@@ -27,7 +27,7 @@ cp config.example.json config.json
 
 ### 接入 pre-push hook
 
-通过 [macOS 部署流程](deploy/macos/README.md) 安装后，可在受管 checkout 运行 `ink hook install`。安装器使用 Git 配置的 hook 路径，生成的 hook 调用部署写入的稳定入口 `~/.local/lib/ink-commons/ink`。
+如果已将 `ink` 安装或链接到 `~/.local/lib/ink-commons/ink`，可在受管 checkout 运行 `ink hook install`。安装器使用 Git 配置的 hook 路径，生成的 hook 调用该入口。
 
 从源码运行 `go build -o ink ./cmd/ink` 后，在受管 checkout 用 `git rev-parse --git-path hooks/pre-push` 查找 hook 位置。如果该位置空闲，把源码里的 `scripts/ink-pre-push` 安装为可执行的 `pre-push`。推送时让 Git 环境的 PATH 包含构建出的 `ink`，或使用 `INK_BIN=/absolute/path/to/source-built/ink git push …` 显式指定。
 
@@ -257,11 +257,11 @@ GitHub 的当前 PR 快照是状态来源。轮询间隔默认 60 秒。hook 路
 
 ## 为单条 PR 指定 reviewer
 
-GitHub 上开 Draft PR，等同砚发现并关联后，在 Mini 上执行：
+GitHub 上开 Draft PR，等同砚发现并关联后，以服务用户执行：
 
 ```sh
-ink review --github-login 'yanshi-reviewer[bot]' --github-command yanshi-reviewer \
-  --target mo-cangli-pi \
+ink review --github-login 'example-reviewer[bot]' --github-command example-reviewer \
+  --target example-review-project \
   https://github.com/owner/repository/pull/42
 ```
 
@@ -331,7 +331,7 @@ ink state backup -data /path/to/ink-state -output /safe/path/ink-backup.sqlite3
 ink state export -data /path/to/ink-state -output /safe/path/ink-diagnostics.json
 ```
 
-恢复时先停止 daemon，将现有数据库移到单独位置，确认备份为 v6，再将其复制到正确目录中的 `state.sqlite3` 并设置权限为 `0600`。JSON 导出供诊断与人工核对。
+恢复时先停止 daemon，将现有数据库移到单独位置，确认备份与目标版本兼容，再将其复制到正确目录中的 `state.sqlite3` 并设置权限为 `0600`。JSON 导出供诊断与人工核对。
 
 ## 审查等待与回流诊断
 
@@ -343,9 +343,11 @@ ink state export -data /path/to/ink-state -output /safe/path/ink-diagnostics.jso
 
 本功能兼容现有 cc-connect webhook，不需要 cc-connect 配套改动，也不调用新的执行或通知接口。诊断通过 API 和日志查看；可靠队列、Discord 自动诊断通知及缺少结论时自动唤醒 reviewer 留待后续接入。现有 webhook 的忙时丢弃与执行无法确认限制仍按前述保守方式处理。
 
-## macOS 服务与版本部署
+## 服务与版本部署
 
-Apple Silicon Mac 可从 GitHub Release 安装系统级 LaunchDaemon，同砚以普通用户身份运行。已安装的系统版可用 `ink upgrade` 暂存新版，再用 `ink upgrade --apply` 切换。从旧版升级时，从校验过的新版发布包运行 `manage.py upgrade --apply`，沿用已有部署配置。通过 `/healthz` 的 `revision` 核对实际运行版本。见 [macOS 部署与恢复](deploy/macos/README.md)。
+运行 `make build` 在 `bin/` 生成 daemon 和 adapter，`make test-race vet lint sqlc-check` 执行本地检查。
+
+GitHub Release 为 Linux 和 macOS 的 amd64、arm64 提供 daemon 和独立 adapter 的压缩包及 SHA256 校验清单。使用 [systemd 与 launchd 服务模板](deploy/README.md) 运行服务。通过 `/healthz` 的 `revision` 核对运行版本，切换和恢复见[单实例切换检查清单](docs/migration.md)。
 
 ### 自动合入身份
 

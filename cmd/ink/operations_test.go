@@ -119,7 +119,7 @@ func captureOperationsOutput(t *testing.T, args []string) []byte {
 
 func TestCLIRedactsPrivateDaemonErrorDetails(t *testing.T) {
 	for _, message := range []string{
-		"subprocess stderr: /Users/local/private/key.pem",
+		"subprocess stderr: /example/private/key.pem",
 		"invalid response from https://user:credential@example.invalid",
 		"Authorization: Bearer private-test-credential",
 	} {

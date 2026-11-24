@@ -653,7 +653,6 @@ func TestReassignmentPreservesCooperativeDeliveryIdentity(t *testing.T) {
 				f.reviews = []Review{reviewFor(7, f.pull.Head.SHA, "reviewer", "CHANGES_REQUESTED")}
 				f.observe(t)
 			}
-			task := f.work(t).Task
 			st, _ := loadFixture(f.s.store)
 			w := st.Work[key(f.repo.Repo, 42)]
 			w.Task.Handoff.Assignee.GitHubCommand = "/original-command"
@@ -667,7 +666,7 @@ func TestReassignmentPreservesCooperativeDeliveryIdentity(t *testing.T) {
 			if err := saveFixture(f.s.store, st); err != nil {
 				t.Fatal(err)
 			}
-			task = f.work(t).Task
+			task := f.work(t).Task
 			f.claim(t, task, claimA, 200)
 			st, _ = loadFixture(f.s.store)
 			w = st.Work[key(f.repo.Repo, 42)]
