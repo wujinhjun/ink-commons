@@ -7,7 +7,7 @@ daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`�
 
 ## 存储与作用域
 
-- JSON 的 `DaemonConfig` 管理静态启动参数：`poll_seconds`、`github_command`、`cc_connect_url`、`http_provider_url`、`http_provider_execution`。状态目录和部署 gate 沿用启动参数；凭据来自 daemon 环境。修改这些参数需要重启。
+- JSON 的 `DaemonConfig` 管理静态启动参数：`poll_seconds`、`github_command`、`providers`（参见 [HTTP Adapter 配置](adapters.md)）。状态目录和部署 gate 沿用启动参数；凭据来自 daemon 环境。修改这些参数需要重启。
 - SQLite 的 `GlobalConfig` 管理全局运行期默认值。
 - SQLite 的 `RepositoryOverride` 只保存单仓库显式覆盖；注册记录即使为空对象也表示已注册。
 - `EffectiveConfig` 合并内置默认值、全局配置和仓库覆盖，返回值、来源和单调递增的配置 generation。PR 的显式负责人指派位于最高层，持久化在中心工作项。

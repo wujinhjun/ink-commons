@@ -6,7 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution/adaptertest"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -261,7 +261,7 @@ func TestPollCCConnectApprovalBusyDropRecoveredWithoutRuntimeChanges(t *testing.
 		reply(w, 200, map[string]string{"status": "accepted"})
 	}))
 	defer hook.Close()
-	executor, err := ccconnect.New(hook.Client(), hook.URL, "hook-test", "")
+	executor, err := adaptertest.Discord(t, "test", hook.Client(), hook.URL, "hook-test", "")
 	if err != nil {
 		t.Fatal(err)
 	}

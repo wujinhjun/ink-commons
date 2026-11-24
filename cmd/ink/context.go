@@ -29,7 +29,7 @@ func readContext(args []string) error {
 		return err
 	}
 	if flags.NArg() != 1 || !regexp.MustCompile(`^[a-f0-9]{40}$`).MatchString(*sha) {
-		return errors.New("usage: ink context --sha HEAD_SHA [--before MESSAGE_ID] PR_URL")
+		return errors.New("usage: ink context --sha HEAD_SHA [--before CURSOR] PR_URL")
 	}
 	path, err := reviewPath(flags.Arg(0))
 	if err != nil {

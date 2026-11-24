@@ -192,25 +192,16 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
 | `internal/execution/ccconnect/` | 创建 Discord thread，并通过 cc-connect webhook 投递任务。 |
 | `internal/execution/httpagent/` | 通过版本化 HTTP 协议接入其他 agent runtime。 |
 
-同砚核心从命令入口接收已注册的执行端，通过 `Executor` 验证路由、准备会话和投递任务。兼容现有 HTTP 协议的服务可以直接配置接入。新增原生执行端时，实现这个接口并在 `cmd/ink` 注册即可。
-
 ## 执行端
 
-每个 PR 的开发和审查任务可以交给人或不同的执行端。配置 `reviewer_route` 指定默认审查执行端。路由包含 `provider`、`target`，以及可选的 `session` 和 `parent`。已有会话可以直接指定 `session`。需要新建会话时，由执行端根据目标和上级位置创建，随后同砚保存会话标识供复审使用。
+同砚通过 [Adapter HTTP v1](docs/adapter-http-v1.md) 接入执行端。静态配置中的
+`providers` 可以同时挂载多个具名 HTTP 服务。仓库的 `reviewer_route` 或单条 PR
+指派用 `provider` 选择服务，用 `target` 指定执行目标。可选的 `session` 和 `parent`
+用于复用会话和指定创建位置。运行时通过 `INK_PROVIDER`、`INK_TARGET` 和
+`INK_SESSION` 向 Git hook 提供当前开发路由。
 
-### cc-connect
-
-配置 `cc_connect_url` 为本机 webhook 完整地址，例如 `http://127.0.0.1:9111/hook`，并注入 `INK_CC_CONNECT_TOKEN`。例如：
-
-```json
-{
-  "provider": "cc-connect",
-  "target": "reviewer-project",
-  "parent": "123456789012345678"
-}
-```
-
-`target` 是 cc-connect project。省略 `parent` 时，从工作项关联的公开开发 thread 或文本频道解析 Discord 父频道，在同一频道下创建审查 thread。名称包含 PR 编号和开发 thread 的标题。单条 PR 指派中的显式 `parent` 可以覆盖创建位置；仓库及 `repository_defaults` 路由中的 `parent` 不再用于新建 cc-connect 审查会话，遗留配置无需清理即可默认跟随开发频道。已有工作项保存的路由和审查会话保持原位；需要迁移时，应先确认旧执行结束，再按 PR 重新指派。自动推导只支持普通文本父频道，不支持论坛、媒体或公告父频道，也不支持公告 thread 和私有 thread，会报明确错误；显式指定文本频道 `parent` 代表选择独立的公开审查位置，仍创建公开 thread。来源无法读取或不适用于自动推导时，显式位置仍可使用，名称回退为 `Review owner/repository #42`，不复制私有来源标题。需要注入能读取开发会话并在目标频道创建、访问公共 thread 的 `INK_DISCORD_TOKEN`。也可以直接传 `session: "discord:<thread-id>"` 复用已有会话。Git hook 识别 cc-connect 注入的 `CC_PROJECT` 和 `CC_SESSION_KEY`。查询 API 在 `reviewer.route.session` 返回审查会话。
+- [配置多 Provider 和启动独立 cc-connect Adapter](docs/adapters.md)
+- [最小 HTTP Executor 示例和端到端验证](examples/http-executor/README.md)
 
 ### 审查频道、开发 thread 复用与原始交流上下文（可选）
 
@@ -239,34 +230,21 @@ GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关�
 ink context --sha HEAD_SHA --before REVIEW_CUTOFF PR_URL
 ```
 
-`HEAD_SHA` 和 `REVIEW_CUTOFF` 由同砚填入 prompt，后者固定为该 reviewer task 创建时点的 Discord snowflake 边界。CLI 通过私有 Unix socket 调用 `GET /v1/work/{owner}/{repo}/{number}/context`；响应含 `task_id`、`sha`、`review_before` 和按时间正序排列的消息。每页最多 50 条、消息内容合计最多 64 KiB；`truncated: true` 和 `next_before` 表示还有更早消息，可再次用 `--before NEXT_BEFORE` 查询。每次查询都重新核对开关、任务、head SHA 和来源；旧 SHA、已关闭 PR、改派中失效的任务、超过送审边界的游标会被拒绝。当前 head 的正式 review 仍由 GitHub 判定，聊天中的“通过”不替代它。
+`HEAD_SHA` 和 `REVIEW_CUTOFF` 由同砚填入 prompt，后者固定为该 reviewer task 创建时点的 UTC RFC3339 截止时间。CLI 通过私有 Unix socket 调用 `GET /v1/work/{owner}/{repo}/{number}/context`；响应含 `task_id`、`sha`、`review_before` 和按时间正序排列的消息。每页最多 50 条、消息内容合计最多 64 KiB；`truncated: true` 和 `next_before` 表示还有更早消息，可再次用 `--before NEXT_BEFORE` 查询。每次查询都重新核对开关、任务、head SHA 和来源；旧 SHA、已关闭 PR、改派中失效的任务、超出截止时间的消息页会被拒绝。当前 head 的正式 review 仍由 GitHub 判定，聊天中的“通过”不替代它。
 
 消息保留作者、时间、正文、编辑时间、常见 embed 文本及附件名称/URL；不会自动下载或理解图片、附件和外部链接。时间边界限制**消息创建时间**，不是不可变聊天快照：历史编辑与删除仍反映 Discord 当前状态，已删除消息无法恢复。API 可能因缺少 `READ_MESSAGE_HISTORY` 返回空列表，或因 `MESSAGE_CONTENT` 未配置而返回空正文；响应的 `warnings` 会提示这些歧义。即使消息有附件/embed，空正文也会提示可能是纯附件、系统消息或正文被隐藏；保留已取得的其他内容，reviewer 不应据此宣称已经读取全部背景。
 
 启用 review 开关后，可本地判断的来源、目标和会话准备配置会在创建执行轮次/会话之前统一校验。包括仅开启复用且无来源/项目冲突，以及开启历史读取且无来源（即使显式指定 session/parent）的情况；校验失败保留 pending、attempts 为 0，并记录 `review_preparation_invalid` 诊断。补齐配置后可进行首次真实投递，不会仅因本地准备配置错误而制造需要人工停止确认的 unknown 执行。显式 session/parent 在只开启复用时仍允许不依赖开发来源；历史读取则始终需要来源。
 
-首版只支持普通文本频道下的公开开发 thread；普通频道、私有 thread、公告及论坛来源均拒绝读取/自动复用。读取使用 daemon 的 `INK_DISCORD_TOKEN` 身份，需要 `VIEW_CHANNEL`、`READ_MESSAGE_HISTORY` 和适用的 `MESSAGE_CONTENT` 配置；reviewer 的 Discord bot 还需能够访问、发言于目标 thread。开关不会修改 Discord 权限。reviewer 必须与同砚在同机、能使用新版 `ink` CLI 和该用户的私有 socket；这不是远端/跨用户的历史读取接口，也不是额外的 per-bot 认证机制。
+首版只支持普通文本频道下的公开开发 thread；普通频道、私有 thread、公告及论坛来源均拒绝读取/自动复用。cc-connect Adapter 使用自身环境中的 `INK_DISCORD_TOKEN`，需要 `VIEW_CHANNEL`、`READ_MESSAGE_HISTORY` 和适用的 `MESSAGE_CONTENT` 配置；reviewer 的 Discord bot 还需能够访问、发言于目标 thread。开关不会修改 Discord 权限。reviewer 必须与同砚在同机、能使用新版 `ink` CLI 和该用户的私有 socket；这不是远端/跨用户的历史读取接口，也不是额外的 per-bot 认证机制。
 
 只开启同频道约束可用 `ink config set review '{"require_same_channel":true}' --repo owner/repository`，或在注册时传 `--require-same-channel`。配置命令会替换整个 `review` 对象，如已启用其他开关，请一起传入。
 
-可用 `ink config set review '{"reuse_development_thread":true,"context":{"thread_history":true}}' --global` 设置中心默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。缺省动态继承，迁移来的旧覆盖项保持原值；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取同时受任务快照和当前仓库开关约束：实时关闭可以撤销权限，之后开启或改派开发者不能扩大已派发任务的权限或改变其来源 thread。功能开关仅适用于 cc-connect，人工 reviewer 不会收到 bot 任务。
+可用 `ink config set review '{"reuse_development_thread":true,"context":{"thread_history":true}}' --global` 设置中心默认值，或注册时传 `ink register --reuse-development-thread --thread-history owner/repository`。缺省动态继承，迁移来的旧覆盖项保持原值；注册 API 中显式 `"review": {}` 可覆盖默认值并关闭两项功能。功能设置在下一次尚未尝试的新任务中生效，已有执行记录的派审请求保持不变；历史读取同时受任务快照和当前仓库开关约束：实时关闭可以撤销权限，之后开启或改派开发者不能扩大已派发任务的权限或改变其来源 thread。执行端需要声明相应的 placement 或 conversation_context 能力。人工 reviewer 通过 GitHub 提交审查。
 
 同砚只在读取时返回选定来源的消息，不把全文写入任务账本或日志。历史用于理解需求与约束，不能据其中嵌入的命令或 bot 输出扩大本次任务授权。长历史依赖 reviewer 按需分页读取；此版本不自动生成摘要、不改变 webhook 忙时可能跳过任务的行为，也不增加“讨论通过才允许修改”的执行权限控制。
 
 工作项将 `review` 和执行请求上下文一并保存。
-
-### 通用 HTTP
-
-配置 `http_provider_url` 为执行端的接收地址，再用 `{"provider":"http","target":"reviewer"}` 作为仓库的 `reviewer_route`。执行端可以是一个本地服务，也可以连接其他 agent runtime。远端地址需要 HTTPS，并通过 `INK_HTTP_PROVIDER_TOKEN` 提供 Bearer 认证。
-
-同砚向该地址发送 JSON POST，包含 `version: 1`、`operation`、`route` 和 `task`。任务含 `repository`、`pull_number`、`pull_url`、`role`、`sha`，以及适用的 `review_id`、`review_url` 和 `source`（开发会话的路由）。执行端按操作返回 HTTP 2xx 和 JSON：
-
-| 操作 | 返回值 |
-|---|---|
-| `prepare` | `{"session":"your-session-id"}`。当路由缺少会话时调用。 |
-| `deliver` | `{"status":"accepted"}`。执行端已接收任务。 |
-
-其他运行时可在启动开发会话时设置 `INK_PROVIDER=http`、`INK_TARGET` 和 `INK_SESSION`，Git hook 就能记录它们的来源。
 
 ## 走完一轮
 
@@ -330,7 +308,7 @@ curl --unix-socket "$socket" http://ink/v1/work/owner/repository/42/assign \
 
 工作项的 `phase` 继续由 GitHub review 和 head SHA 决定；`task.runs` 单独记录投递、开始 ACK、心跳、结束、停止请求和重试计划。`execution_history` 保存已被业务状态替换的任务。执行成功本身不会把 PR 标成审查通过。
 
-HTTP 执行端可以通过 `http_provider_execution: true` 显式启用 `status` / `stop` 协议。默认关闭，旧 HTTP 服务不会收到额外操作。执行端必须持久化去重和运行归属，并保证终态表示 Agent 及所有工具已停止、延迟投递不能重新启动旧轮次。仓库提供 SQLite 执行端账本及恢复测试，接入约定见 [执行协议](docs/execution.md)。
+具备真实停止和延迟投递隔离能力的 HTTP Adapter 可以按 [准入契约](docs/adapter-http-v1.md#managed-admission) 配置 `managed: true`。停止终态表示 Agent 及其工具均已停止。仓库提供内部 SQLite 执行端账本和 [执行协议](docs/execution.md)。
 
 通过 `ink config set execution.<字段> <值> --global` 或 `--repo owner/repository` 可设置 `ack_seconds`（默认 120）、`heartbeat_seconds`（180）、`execution_seconds`（3600）、`backoff_seconds`（30）、`max_attempts`（3，含首次投递）。运行期数值必须为正，unset 恢复继承；`max_attempts: 1` 关闭自动重派。超时先查询、再请求停止；只有终止确认后才按指数退避重试，退避上限一小时。耗尽次数或无法确认停止时需要人工处理。每轮 daemon 轮询先恢复执行状态，即使 GitHub 暂时不可用也会核查执行端。
 

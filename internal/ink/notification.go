@@ -128,7 +128,7 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 			capability, ok := provider.(execution.NotificationACKProvider)
 			n.RequireACK = ok && capability.NotificationACKRequired()
 		}
-		if notifier == nil {
+		if !execution.Supports(provider, "notify", notifier != nil) {
 			n.State, n.Error = "unsupported", "execution provider does not support notifications"
 		} else if err := execution.ValidateDestination(s.providers, *n.Route, false); err != nil {
 			n.State, n.Error = "failed", "invalid notification destination: "+err.Error()
@@ -163,7 +163,7 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 	if err != nil || n.State != "unknown" {
 		return err
 	}
-	err = notifier.Notify(ctx, *n.Route, n.Notification)
+	err = notifier.Notify(ctx, *n.Route, n.Notification, n.RequireACK)
 	n.State, n.FinishedAt = "accepted", s.now()
 	if n.RequireACK {
 		n.State, n.FinishedAt = "awaiting_ack", time.Time{}

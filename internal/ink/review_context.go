@@ -3,6 +3,7 @@
 package ink
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 // ReviewFeatures is opt-in. An explicit empty object overrides registration
@@ -29,9 +29,6 @@ func (r Repository) ValidateReviewFeatures() error {
 	if r.TaskMode != "" && r.TaskMode != "legacy" && r.TaskMode != "cooperative" {
 		return fmt.Errorf("task_mode must be legacy or cooperative")
 	}
-	if r.Review != nil && (r.Review.RequireSameChannel || r.Review.ReuseDevelopmentThread || r.Review.Context.ThreadHistory) && r.ReviewerRoute != nil && r.ReviewerRoute.Provider != ccconnect.Name {
-		return fmt.Errorf("review thread features require a cc-connect reviewer route")
-	}
 	return nil
 }
 
@@ -42,37 +39,38 @@ func (s *Service) validateReviewPreparation(w *Work) error {
 	if w.Task.Role != "reviewer" || w.Review == nil || (!w.Review.RequireSameChannel && !w.Review.ReuseDevelopmentThread && !w.Review.Context.ThreadHistory) {
 		return nil
 	}
-	if w.Reviewer.Route == nil || w.Reviewer.Route.Provider != ccconnect.Name {
-		return fmt.Errorf("review thread features require a cc-connect reviewer route")
+	if w.Reviewer.Route == nil {
+		return fmt.Errorf("review thread features require an execution route")
 	}
 	if w.Review.Context.ThreadHistory {
-		source := reviewSource(w)
-		if source == nil || source.Provider != ccconnect.Name {
-			return fmt.Errorf("history requires a Discord development source")
-		}
-		if err := execution.ValidateDestination(s.providers, *source, false); err != nil {
+		if err := s.validateHistorySource(deliveryFor(w, w.Task, "", 0).Source); err != nil {
 			return err
 		}
 	}
 	route := *w.Reviewer.Route
-	if w.Task.ConfigSnapshot != nil {
-		route = allocationRoute(w.Task.ConfigSnapshot.Repository, route)
-	} else if repo, ok := s.repo(w.Repo); ok {
-		route = allocationRoute(repo, route)
-	}
 	if err := execution.ValidateDestination(s.providers, route, route.Session == ""); err != nil {
 		return err
 	}
 	return execution.ValidatePreparation(s.providers, route, deliveryFor(w, w.Task, "", 0))
 }
 
+func (s *Service) validateHistorySource(source *execution.Route) error {
+	if source == nil || !source.Valid(false) {
+		return fmt.Errorf("history requires a resolved development route")
+	}
+	provider := s.providers[source.Provider]
+	_, reads := provider.(execution.ConversationReader)
+	if !execution.Supports(provider, "conversation_context", reads) {
+		return fmt.Errorf("development provider does not support conversation_context")
+	}
+	return execution.ValidateDestination(s.providers, *source, false)
+}
+
 func reviewHistoryBefore(t time.Time) string {
-	// Discord snowflakes at or after the start of this millisecond are excluded.
-	const discordEpoch = int64(1420070400000)
-	if t.IsZero() || t.UnixMilli() <= discordEpoch {
+	if t.IsZero() {
 		return ""
 	}
-	return strconv.FormatUint(uint64(t.UnixMilli()-discordEpoch)<<22, 10)
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // reviewContextBinding is the immutable read authorization for one task. Both
@@ -103,15 +101,19 @@ func bindReviewContext(work *Work, repo Repository) (reviewContextBinding, error
 		return binding, apiError{403, "history was not enabled for this task"}
 	}
 	anchor := reviewHistoryBefore(task.CreatedAt)
-	if anchor == "" || source == nil || source.Provider != ccconnect.Name || reviewer == nil || reviewer.Provider != ccconnect.Name {
-		return binding, apiError{409, "context requires a Discord development thread and cc-connect reviewer"}
+	if anchor == "" || source == nil || !source.Valid(false) || reviewer == nil {
+		return binding, apiError{409, "context requires a resolved development route and reviewer"}
 	}
 	if len(task.Runs) > 0 {
 		request := task.Runs[len(task.Runs)-1].Request
 		if request.ContextBefore == "" || request.Source == nil || *request.Source != *source || request.SHA != task.SHA {
 			return binding, apiError{409, "history was not enabled for this attempt or its development source changed"}
 		}
-		anchor = request.ContextBefore
+		// Older persisted requests used provider-specific cursors. Task.CreatedAt
+		// still supplies the original cutoff for an upgraded adapter.
+		if _, err := time.Parse(time.RFC3339Nano, request.ContextBefore); err == nil && request.ContextBefore != anchor {
+			return binding, apiError{409, "history cutoff changed"}
+		}
 	}
 	return reviewContextBinding{TaskID: task.ID, SHA: task.SHA, Before: anchor, Source: *source}, nil
 }
@@ -155,26 +157,30 @@ func (s *Service) reviewContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	route, anchor := binding.Source, binding.Before
-	reader, ok := s.providers[route.Provider].(execution.ConversationReader)
-	taskID, sha := binding.TaskID, binding.SHA
+	reader, _ := s.providers[route.Provider].(execution.ConversationReader)
+	sourceErr := s.validateHistorySource(&route)
+	task := deliveryFor(work, work.Task, "", 0)
+	task.Source, task.ContextBefore = &route, anchor
 	s.mu.Unlock()
-	if !ok {
-		fail(w, apiError{409, "execution provider cannot read conversation history"})
+	if sourceErr != nil {
+		fail(w, apiError{409, sourceErr.Error()})
 		return
 	}
 	before := r.URL.Query().Get("before")
-	if before == "" {
-		before = anchor
+	// Accept the cutoff literal used by the CLI as a request for the first page.
+	if before == anchor {
+		before = ""
 	}
-	cursor, cursorErr := strconv.ParseUint(before, 10, 64)
-	boundary, _ := strconv.ParseUint(anchor, 10, 64)
-	if cursorErr != nil || cursor == 0 || cursor > boundary {
-		fail(w, apiError{400, "before must be a positive message ID at or before the review boundary"})
+	if len(before) > 512 {
+		fail(w, apiError{400, "invalid history cursor"})
 		return
 	}
-	page, err := reader.ReadConversation(r.Context(), route, before)
+	page, err := reader.ReadConversation(r.Context(), route, task, before)
+	if err == nil {
+		err = validateContextPage(page, binding, before)
+	}
 	if err != nil {
-		fail(w, apiError{502, "cannot read development thread history: " + err.Error()})
+		fail(w, apiError{502, "cannot read development conversation history: " + err.Error()})
 		return
 	}
 	// A slow history request must not return context for a superseded task or
@@ -197,8 +203,34 @@ func (s *Service) reviewContext(w http.ResponseWriter, r *http.Request) {
 		fail(w, apiError{409, "review context changed while reading; request the current task"})
 		return
 	}
-	page.TaskID = taskID
-	page.SHA = sha
-	page.ReviewBefore = anchor
 	reply(w, 200, page)
+}
+
+func validateContextPage(page execution.ConversationPage, binding reviewContextBinding, before string) error {
+	if page.TaskID != binding.TaskID || page.SHA != binding.SHA || page.Session != binding.Source.Session ||
+		page.ReviewBefore != binding.Before || page.Before != before || page.Messages == nil || len(page.Messages) > 50 ||
+		len(page.NextBefore) > 512 || (page.NextBefore != "" && (page.NextBefore == before || len(page.Messages) == 0 || !page.Truncated)) {
+		return fmt.Errorf("invalid adapter history page binding or pagination")
+	}
+	cutoff, _ := time.Parse(time.RFC3339Nano, binding.Before)
+	var previous time.Time
+	ids := make(map[string]bool, len(page.Messages))
+	pageBytes := 0
+	for _, message := range page.Messages {
+		stamp, err := time.Parse(time.RFC3339Nano, message.Timestamp)
+		if err != nil || !stamp.Before(cutoff) || stamp.Before(previous) || message.ID == "" || ids[message.ID] {
+			return fmt.Errorf("adapter history exceeds the cutoff or has invalid message ordering")
+		}
+		previous = stamp
+		ids[message.ID] = true
+		data, err := json.Marshal(message)
+		if err != nil {
+			return fmt.Errorf("invalid adapter history message")
+		}
+		pageBytes += len(data)
+	}
+	if pageBytes > 64*1024 {
+		return fmt.Errorf("adapter history exceeds the page size limit")
+	}
+	return nil
 }

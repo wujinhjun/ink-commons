@@ -39,12 +39,29 @@ func (s *Service) validateEffective(repo Repository) error {
 	if repo.ReviewerRoute == nil {
 		return nil
 	}
-	if provider, ok := s.providers[repo.ReviewerRoute.Provider].(interface{ ValidateDelivery() error }); ok {
-		if err := provider.ValidateDelivery(); err != nil {
-			return err
+	if err := execution.ValidateDestination(s.providers, *repo.ReviewerRoute, true); err != nil {
+		return err
+	}
+	provider := s.providers[repo.ReviewerRoute.Provider]
+	if normalTaskMode(repo.TaskMode) == "cooperative" {
+		_, wakes := provider.(execution.TaskWaker)
+		if !execution.Supports(provider, "wake", wakes) {
+			return fmt.Errorf("execution provider does not support wake")
+		}
+	} else if !execution.Supports(provider, "deliver", true) {
+		return fmt.Errorf("execution provider does not support deliver")
+	}
+	var requireSame, reuse bool
+	if review := repo.Review; review != nil {
+		requireSame, reuse = review.RequireSameChannel, review.ReuseDevelopmentThread
+	}
+	if policyNeedsPlacement(*repo.ReviewerRoute, requireSame, reuse) {
+		_, resolves := provider.(execution.PlacementResolver)
+		if !execution.Supports(provider, "placement", resolves) {
+			return fmt.Errorf("execution provider does not support placement")
 		}
 	}
-	return execution.ValidateDestination(s.providers, *repo.ReviewerRoute, true)
+	return nil
 }
 
 func (s *Service) validateAutoMergeIdentity(repo Repository) error {

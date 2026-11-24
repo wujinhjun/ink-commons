@@ -19,7 +19,7 @@
 ## 重建启动环境
 
 - 为目标服务用户安装 GitHub 客户端或包装器，更新 `github_command` 和需要的 `github_merger_command` 绝对路径。配置了 reader 摘要时，用目标可执行文件的已批准摘要更新 `github_command_sha256`。专用 merger 必须设置其已批准的 `github_merger_command_sha256`。使用 GitHub App 时，在目标安装中核对 reader、reviewer 和适用的 merger 身份及对受管仓库的权限。使用自动升级时也验证 reader 能读取发布仓库。参数与身份模式见 [GitHub CLI 适配](configuration.md#github-cli-适配) 和 [自动合入身份](../README.md#自动合入身份)。
-- 在私有启动配置中填入目标 `cc_connect_url` 或 `http_provider_url`。为目标服务用户单独配置所需的环境凭据，验证实际服务可达并能访问配置中的项目、会话或频道。macOS 版通过 `--credentials` 读取仅服务用户可读的凭据文件，其他部署从 daemon 环境注入。
+- 将旧 `cc_connect_url`、`http_provider_url` 和 `http_provider_execution` 转为 [具名 `providers`](adapters.md)。为保留已有路由，可沿用原 provider 名称。旧 cc-connect webhook 配置和 Discord 凭据放入独立 Adapter 环境，daemon 只持有对应的 Adapter Bearer 凭据。旧托管 HTTP 服务需要实现 [只读准入声明](adapter-http-v1.md#managed-admission) 后才能启用 `managed`。
 - 按目标平台准备服务。macOS 部署可指定发布仓库和 LaunchDaemon 的工具搜索路径。接续既有 PR 时，先暂存发布包，按下节核查后再激活。参见 [macOS 部署与恢复](../deploy/macos/README.md)。
 
 ## 核对运行期配置和在途任务
@@ -42,7 +42,7 @@ ink config list --repo example/project --effective
 ink config list --repo example/project --pr 42 --effective
 ```
 
-核对 `reviewer_login`、`reviewer_command`、`human_developer` 和 `reviewer_route`，用 [`ink config set` 或 `unset`](configuration.md#cli) 修正相应作用域。PR 的显式指派可覆盖仓库设置。将 `postApproval.command` 指向目标主机上可执行的绝对路径，并在恢复批准处理前部署该文件。另行检查 `task_blocked.discord_channel_id` 或它回退使用的开发会话。
+核对 `reviewer_login`、`reviewer_command`、`human_developer` 和 `reviewer_route`，用 [`ink config set` 或 `unset`](configuration.md#cli) 修正相应作用域。PR 的显式指派可覆盖仓库设置。将 `postApproval.command` 指向目标主机上可执行的绝对路径，并在恢复批准处理前部署该文件。将显式 `task_blocked.discord_channel_id` 改为包含 provider、target、session 的 `task_blocked.route`。沿用 v6 数据库时，由旧版 daemon 先 unset 所有含旧字段的阻塞通知配置，切换后通过新版恢复。纯会话 ID 的历史通知仅在能匹配原任务的冻结来源时恢复。若要保留按开发会话自动放置，移除旧 cc-connect 审查路由中此前被忽略的默认 `parent`，因为具名路由现在会采用它。
 
 已冻结的任务配置、投递回执、PR 负责人、会话绑定和已准备的批准事件会随备份恢复。用 [工作项 API](../README.md#本地-api) 逐项核对 `config_snapshot`、显式指派和运行状态。改全局或仓库默认值只会影响后续配置解析。已保留的批准事件继续沿用其已记录的命令和去重记录。参见 [任务生效边界](configuration.md#任务生效边界)。
 
@@ -55,7 +55,7 @@ ink config list --repo example/project --pr 42 --effective
 例如，把 reviewer 改派到已验证的新 cc-connect 项目。替换示例值，并按需用 `--github-command` 指定 reviewer 的客户端。
 
 ```sh
-ink review --github-login 'reviewer[bot]' --target new-review-project \
+ink review --github-login 'reviewer[bot]' --provider cc-connect --target new-review-project \
   https://github.com/example/project/pull/42
 ```
 

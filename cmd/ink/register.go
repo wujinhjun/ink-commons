@@ -25,9 +25,9 @@ func register(args []string) error {
 	remote := flags.String("remote", "origin", "Git remote to detect when OWNER/REPO is omitted")
 	login := flags.String("github-login", "", "reviewer login (default: central global configuration)")
 	command := flags.String("github-command", "", "reviewer GitHub CLI/App command")
-	provider := flags.String("provider", "cc-connect", "review execution provider")
+	provider := flags.String("provider", "", "review execution provider")
 	target := flags.String("target", "", "review execution target")
-	parent := flags.String("parent", "", "legacy parent (ignored for new cc-connect review threads; use ink review --parent per PR)")
+	parent := flags.String("parent", "", "parent for new reviewer sessions")
 	session := flags.String("session", "", "existing reviewer session")
 	developer := flags.String("developer", "", "human developer login")
 	autoMerge := flags.Bool("auto-merge-after-approval", false, "automatically merge the approved head after checks pass")
@@ -35,7 +35,7 @@ func register(args []string) error {
 	reuseReader := flags.Bool("reuse-reader-identity", false, "use the configured reader App for automatic merge")
 	hook := flags.String("post-approval", "", "absolute path of postApproval executable; receives event JSON on stdin")
 	reuseThread := flags.Bool("reuse-development-thread", false, "reuse the development thread with an independent reviewer project")
-	sameChannel := flags.Bool("require-same-channel", false, "require Discord reviews to stay in the development channel")
+	sameChannel := flags.Bool("require-same-channel", false, "require reviews to stay in the development channel")
 	threadHistory := flags.Bool("thread-history", false, "allow reviewer access to original development thread messages")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -73,9 +73,9 @@ func register(args []string) error {
 	if err := repo.AutoMerge.Validate(); err != nil {
 		return err
 	}
-	if *target != "" || *parent != "" || *session != "" {
-		if *target == "" {
-			return errors.New("--target is required for an execution route")
+	if *provider != "" || *target != "" || *parent != "" || *session != "" {
+		if strings.TrimSpace(*provider) == "" || strings.TrimSpace(*target) == "" {
+			return errors.New("--provider and --target are required for an execution route")
 		}
 		repo.ReviewerRoute = &execution.Route{Provider: *provider, Target: *target, Parent: *parent, Session: *session}
 	}

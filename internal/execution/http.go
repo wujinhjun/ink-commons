@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -70,3 +71,63 @@ func requestJSON(ctx context.Context, client *http.Client, method, endpoint, aut
 	}
 	return nil
 }
+
+// PostJSONBounded uses a strict envelope and keeps untrusted response text and
+// transport details out of persisted diagnostics.
+func PostJSONBounded(ctx context.Context, client *http.Client, endpoint, auth string, payload, result any) error {
+	const limit = 1 << 20
+	data, err := json.Marshal(payload)
+	if err != nil || len(data) > limit {
+		return fmt.Errorf("invalid or oversized adapter request")
+	}
+	return adapterJSON(ctx, client, http.MethodPost, endpoint, auth, bytes.NewReader(data), result)
+}
+
+func GetAdapterJSON(ctx context.Context, client *http.Client, endpoint, auth string, result any) error {
+	return adapterJSON(ctx, client, http.MethodGet, endpoint, auth, nil, result)
+}
+
+func adapterJSON(ctx context.Context, client *http.Client, method, endpoint, auth string, body io.Reader, result any) error {
+	const limit = 1 << 20
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		return fmt.Errorf("invalid adapter request")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return AdapterTransportError{timeout: os.IsTimeout(err)}
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return HTTPStatusError(res.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	if err != nil || len(data) > limit {
+		return fmt.Errorf("unreadable or oversized adapter response")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(result); err != nil {
+		return fmt.Errorf("invalid adapter response")
+	}
+	if decoder.Decode(new(json.RawMessage)) != io.EOF {
+		return fmt.Errorf("expected one adapter response object")
+	}
+	return nil
+}
+
+type AdapterTransportError struct{ timeout bool }
+
+func (e AdapterTransportError) Error() string {
+	if e.timeout {
+		return "adapter request timed out"
+	}
+	return "adapter transport failed"
+}
+func (e AdapterTransportError) Timeout() bool   { return e.timeout }
+func (e AdapterTransportError) Temporary() bool { return false }

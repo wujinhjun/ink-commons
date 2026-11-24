@@ -24,8 +24,9 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 	defer os.RemoveAll(dir)
 	t.Setenv("INK_DATA_DIR", dir)
 	t.Setenv("INK_PROVIDER", "")
-	t.Setenv("CC_PROJECT", "developer")
-	t.Setenv("CC_SESSION_KEY", "discord:123")
+	t.Setenv("INK_PROVIDER", "chat")
+	t.Setenv("INK_TARGET", "developer")
+	t.Setenv("INK_SESSION", "discord:123")
 	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +82,7 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 	if status := <-requests; status["token"] != nil {
 		t.Fatal("status leaked credential")
 	}
-	t.Setenv("CC_PROJECT", "other")
+	t.Setenv("INK_TARGET", "other")
 	if err := taskCommand([]string{"claim", "--task", id}); err == nil {
 		t.Fatal("credential reused from another route")
 	}
@@ -139,8 +140,8 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 	defer os.RemoveAll(dir)
 	t.Setenv("INK_DATA_DIR", dir)
 	t.Setenv("INK_PROVIDER", "")
-	t.Setenv("CC_PROJECT", "")
-	t.Setenv("CC_SESSION_KEY", "")
+	t.Setenv("INK_TARGET", "")
+	t.Setenv("INK_SESSION", "")
 	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
 	if err != nil {
 		t.Fatal(err)
@@ -163,13 +164,13 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 	id := uuid.NewString()
 	if err := taskCommand([]string{
 		"claim", "--task", id,
-		"--provider", "cc-connect", "--target", "yu-bingtao-codex-acp", "--session", "discord:123",
+		"--provider", "chat", "--target", "yu-bingtao-codex-acp", "--session", "discord:123",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	claim := <-requests
 	route, ok := claim["route"].(map[string]any)
-	if !ok || route["provider"] != "cc-connect" || route["target"] != "yu-bingtao-codex-acp" || route["session"] != "discord:123" {
+	if !ok || route["provider"] != "chat" || route["target"] != "yu-bingtao-codex-acp" || route["session"] != "discord:123" {
 		t.Fatalf("explicit claim route not sent: %#v", claim["route"])
 	}
 
@@ -197,9 +198,9 @@ func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	t.Setenv("INK_DATA_DIR", dir)
-	t.Setenv("INK_PROVIDER", "")
-	t.Setenv("CC_PROJECT", "wrong-project")
-	t.Setenv("CC_SESSION_KEY", "discord:999")
+	t.Setenv("INK_PROVIDER", "chat")
+	t.Setenv("INK_TARGET", "wrong-project")
+	t.Setenv("INK_SESSION", "discord:999")
 	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +240,7 @@ func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
 
 	if err := taskCommand([]string{
 		"claim", "--task", id,
-		"--provider", "cc-connect", "--target", "correct-project", "--session", "discord:123",
+		"--provider", "chat", "--target", "correct-project", "--session", "discord:123",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -255,11 +256,11 @@ func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
 }
 
 func TestExplicitTaskRoutePreservesExactValues(t *testing.T) {
-	route, err := explicitTaskRoute(" cc-connect ", " target ", " discord:123 ")
+	route, err := explicitTaskRoute(" chat ", " target ", " discord:123 ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if route.Provider != " cc-connect " || route.Target != " target " || route.Session != " discord:123 " {
+	if route.Provider != " chat " || route.Target != " target " || route.Session != " discord:123 " {
 		t.Fatalf("explicit route was normalized: %#v", route)
 	}
 }
@@ -272,8 +273,8 @@ func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
 	defer os.RemoveAll(dir)
 	t.Setenv("INK_DATA_DIR", dir)
 	t.Setenv("INK_PROVIDER", "")
-	t.Setenv("CC_PROJECT", "")
-	t.Setenv("CC_SESSION_KEY", "")
+	t.Setenv("INK_TARGET", "")
+	t.Setenv("INK_SESSION", "")
 	claims := filepath.Join(dir, "claims")
 	if err := os.Mkdir(claims, 0700); err != nil {
 		t.Fatal(err)
@@ -299,7 +300,7 @@ func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
 	credential := taskCredential{
 		TaskID: id,
 		Token:  token,
-		Route:  &execution.Route{Provider: "cc-connect", Target: "old-target", Session: "discord:999"},
+		Route:  &execution.Route{Provider: "chat", Target: "old-target", Session: "discord:999"},
 	}
 	data, _ := json.Marshal(credential)
 	path := filepath.Join(claims, id+".json")
@@ -308,7 +309,7 @@ func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
 	}
 	if err := taskCommand([]string{
 		"claim", "--task", id, "--replace-route",
-		"--provider", "cc-connect", "--target", "new-target", "--session", "discord:123",
+		"--provider", "chat", "--target", "new-target", "--session", "discord:123",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +335,7 @@ func TestTaskRejectionIsBoundToTheAttempt(t *testing.T) {
 	credential := taskCredential{
 		TaskID:    id,
 		Token:     token,
-		Route:     &execution.Route{Provider: "cc-connect", Target: "target", Session: "discord:123"},
+		Route:     &execution.Route{Provider: "chat", Target: "target", Session: "discord:123"},
 		AttemptID: "current",
 	}
 	data, _ := json.Marshal(credential)

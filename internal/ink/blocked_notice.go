@@ -5,31 +5,30 @@ package ink
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 // A nil hook disables delivery. An empty object uses the development conversation.
 type TaskBlockedHook struct {
-	DiscordChannelID string `json:"discord_channel_id,omitempty"`
+	Route *execution.Route `json:"route,omitempty"`
 }
 
 func (h *TaskBlockedHook) Validate() error {
-	if h != nil && strings.Trim(h.DiscordChannelID, "0123456789") != "" {
-		return fmt.Errorf("task_blocked.discord_channel_id must be a Discord channel ID")
+	if h != nil && h.Route != nil && !h.Route.Valid(false) {
+		return fmt.Errorf("task_blocked.route must have provider, target and session")
 	}
 	return nil
 }
 
 type BlockedNotice struct {
-	Session  string    `json:"session,omitempty"`
-	Attempts int       `json:"attempts"`
-	RetryAt  time.Time `json:"retry_at,omitempty"`
-	SentAt   time.Time `json:"sent_at,omitempty"`
-	Error    string    `json:"error,omitempty"`
+	Route    *execution.Route `json:"route,omitempty"`
+	Session  string           `json:"session,omitempty"`
+	Attempts int              `json:"attempts"`
+	RetryAt  time.Time        `json:"retry_at,omitempty"`
+	SentAt   time.Time        `json:"sent_at,omitempty"`
+	Error    string           `json:"error,omitempty"`
 }
 
 // The notice shares the transaction with the blocked handoff. Historical
@@ -44,13 +43,13 @@ func (s *Service) reserveBlockedNotice(w *Work, task *Task) {
 		source = task.ConfigSnapshot.Source
 	}
 	n := &BlockedNotice{}
-	switch {
-	case repo.TaskBlocked.DiscordChannelID != "":
-		n.Session = "discord:" + repo.TaskBlocked.DiscordChannelID
-	case source != nil && source.Provider == ccconnect.Name && source.Session != "":
-		n.Session = source.Session
-	default:
-		n.Error = "no linked Discord development conversation; configure task_blocked.discord_channel_id"
+	n.Route = cloneRoute(repo.TaskBlocked.Route)
+	if n.Route == nil {
+		n.Route = cloneRoute(source)
+	}
+	if n.Route == nil || !n.Route.Valid(false) {
+		n.Route = nil
+		n.Error = "no resolved destination; configure task_blocked.route"
 	}
 	task.Handoff.BlockedNotice = n
 }
@@ -85,7 +84,7 @@ func hasBlockedNotice(t *Task) bool {
 		return false
 	}
 	n := t.Handoff.BlockedNotice
-	return n != nil && n.Session != "" && n.SentAt.IsZero()
+	return n != nil && (n.Route != nil || n.Session != "") && n.SentAt.IsZero()
 }
 
 func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error {
@@ -105,7 +104,19 @@ func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error
 	// Persist the retry lease before I/O. Concurrent polls and daemon
 	// restarts must not immediately repeat an uncertain send.
 	n.RetryAt = now.Add(min(2*time.Minute<<min(n.Attempts-1, 5), time.Hour))
-	attempt, session := n.Attempts, n.Session
+	if n.Route == nil {
+		// Upgrade an older implicit destination only when the frozen source
+		// identifies it. A bare session cannot select a named provider.
+		if source := t.ConfigSnapshot; source != nil && source.Source != nil && source.Source.Session == n.Session {
+			n.Route = cloneRoute(source.Source)
+		} else {
+			n.Error, n.Session = "older blocked notice has no frozen provider route", ""
+			err := s.store.saveWork(w)
+			s.mu.Unlock()
+			return err
+		}
+	}
+	attempt, route := n.Attempts, *n.Route
 	delivery := deliveryFor(w, t, "", 0)
 	reason := t.Handoff.Submission.Reason
 	err = s.store.saveWork(w)
@@ -114,10 +125,11 @@ func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error
 		return err
 	}
 
-	notifier, ok := s.providers[ccconnect.Name].(execution.TaskBlockedNotifier)
-	sendErr := fmt.Errorf("cc-connect provider does not support direct blocked notifications")
-	if ok {
-		sendErr = notifier.NotifyTaskBlocked(ctx, session, delivery, reason)
+	provider := s.providers[route.Provider]
+	notifier, ok := provider.(execution.TaskBlockedNotifier)
+	sendErr := fmt.Errorf("execution provider does not support blocked_notice")
+	if execution.Supports(provider, "blocked_notice", ok) {
+		sendErr = notifier.NotifyTaskBlocked(ctx, route, delivery, reason)
 	}
 
 	s.mu.Lock()

@@ -226,7 +226,7 @@ func taskCommand(args []string) error {
 	return err
 }
 
-// explicitTaskRoute lets runtimes that do not inject CC_PROJECT/CC_SESSION_KEY
+// explicitTaskRoute lets runtimes that do not inject INK_PROVIDER/INK_TARGET/INK_SESSION
 // bind a claim to the route carried by the wake prompt.
 func explicitTaskRoute(provider, target, session string) (*execution.Route, error) {
 	if strings.TrimSpace(provider) == "" && strings.TrimSpace(target) == "" && strings.TrimSpace(session) == "" {

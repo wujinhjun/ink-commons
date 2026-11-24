@@ -7,7 +7,7 @@
 用 `ink config set task_mode cooperative --repo owner/repository` 设置中心仓库策略，或注册时使用：
 
 ```sh
-ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PROJECT owner/repository
+ink register --task-mode cooperative --github-login REVIEWER --provider PROVIDER --target REVIEW_PROJECT owner/repository
 ```
 
 也可用 `ink config set task_mode cooperative --global` 设置动态继承的全局默认值。显式 `legacy` 覆盖全局值，unset 恢复继承。运行期改配无需重启；旧 JSON 仅用于首次迁移，详见 [中心化配置](configuration.md)。
@@ -50,7 +50,7 @@ ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PRO
 ink task claim --task TASK_UUID
 ```
 
-wake 会给出带路由的完整命令，例如 `--provider cc-connect --target PROJECT --session discord:THREAD`。ACP 等未注入 `CC_PROJECT` / `CC_SESSION_KEY` 的运行时直接使用这些参数；显式路由必须三项齐全，claim 成功后保存到私有 credential，后续 submit 无需重复。旧格式 wake 或兼容环境仍可使用进程环境中的 `CC_PROJECT` / `CC_SESSION_KEY`，通用路由可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
+wake 会给出带路由的完整命令，例如 `--provider cc-connect --target PROJECT --session discord:THREAD`。ACP 等未注入 `CC_PROJECT` / `CC_SESSION_KEY` 的运行时直接使用这些参数；显式路由必须三项齐全，claim 成功后保存到私有 credential，后续 submit 无需重复。也可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供当前会话路由。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
 
 如果旧版 CLI 在一次已确认的 HTTP 403 后留下了 credential（旧文件没有 `rejected` 或 `attempt_id`），不要删除文件。用同一个 `--task` 和同一个 `--claim-file` 重新 claim，并加 `--replace-route --provider ... --target ... --session ...`；CLI 保留原 token、替换路由，后续 submit 继续使用这个文件。只在确认收到 403 后使用；网络结果不明时保留原 credential 并原样重试，不能删除或重建。
 
@@ -139,14 +139,14 @@ ink task retry --task TASK_UUID
 
 ## 阻塞通知
 
-可为仓库启用同砚的阻塞通知。空对象将通知发到任务领取时记录的 Discord 开发会话。之后改派开发者不会改变这个默认目标。也可以指定 Discord 频道或线程 ID。
+可为仓库启用同砚的阻塞通知。空对象将通知发到任务记录的开发会话。之后改派开发者不会改变这个默认目标。也可以显式指定具名 Provider 的目标路由。
 
 ~~~sh
 ink config set task_blocked '{}' --repo owner/repository
-ink config set task_blocked '{"discord_channel_id":"123456789012345678"}' --repo owner/repository
+ink config set task_blocked '{"route":{"provider":"chat","target":"alerts","session":"discord:123456789012345678"}}' --repo owner/repository
 ink config set task_blocked null --repo owner/repository
 ~~~
 
-守护进程通过已有的 INK_DISCORD_TOKEN 直接发消息，Bot 需要在目标会话拥有发送权限。消息包含 PR、提交 SHA、任务 ID、阻塞原因和手动重试命令。通知不唤醒 Agent，也不重派任务。
+目标 Provider 需具备 `blocked_notice` 能力。cc-connect Adapter 使用其 Discord Bot 身份在目标会话发消息。消息包含 PR、提交 SHA、任务 ID、阻塞原因和手动重试命令。通知不唤醒 Agent，也不重派任务。
 
 同砚在首次接受 blocked 交接时持久化通知和目标。重复提交不会创建新通知，启用配置也不会回填历史阻塞。投递失败由 daemon 在后续轮询退避重试，任务状态中的 blocked_notice 显示尝试次数、下次重试时间或发送结果。Discord 通过任务级固定 nonce 在其去重窗口内合并请求结果不明时的重复发送。如果响应丢失且重试超出 Discord 的去重窗口，仍可能收到重复消息。

@@ -276,7 +276,7 @@ func TestObservationDuringPreparationCannotOverwriteNewTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := loadReliability(t, s)
-	if w.Task.SHA != pull.Head.SHA || w.Task.Delivery != "pending" || len(w.History) != 1 || w.History[0].Runs[0].Route.Session != "old-session" || len(e.deliveries) != 0 {
+	if w.Task.SHA != pull.Head.SHA || w.Task.Delivery != "pending" || len(w.History) != 1 || len(w.History[0].Runs) != 0 || w.History[0].Preparation == nil || w.History[0].Preparation.Route.Session != "old-session" || len(e.deliveries) != 0 {
 		t.Fatal("stale preparation overwrote new task", w)
 	}
 }
