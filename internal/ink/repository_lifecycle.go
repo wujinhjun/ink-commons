@@ -63,9 +63,12 @@ func (s *Service) patchRepository(name string, values ConfigValues) (Repository,
 	if err != nil {
 		return Repository{}, err
 	}
-	if _, changed := values["auto_merge"]; changed {
-		if err := validateAutoMergeIdentity(s.up, effective.Repository); err != nil {
-			return Repository{}, apiError{400, err.Error()}
+	for key := range values {
+		if mergeIdentityInput(key) {
+			if err := s.validateRuntimeMergeIdentity(effective.Repository); err != nil {
+				return Repository{}, err
+			}
+			break
 		}
 	}
 	global.Revision++

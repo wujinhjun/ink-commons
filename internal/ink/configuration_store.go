@@ -164,9 +164,10 @@ func (s *Service) changeConfig(scope, key string, value json.RawMessage, unset b
 		if err != nil {
 			return record, err
 		}
-		if name != "" && name == scope && key == "auto_merge" {
-			if err := validateAutoMergeIdentity(s.up, effective.Repository); err != nil {
-				return record, apiError{400, err.Error()}
+		inheritsCommand := scope == "" && key == "reviewer_command" && effective.Sources[key] != "repository"
+		if name != "" && (name == scope || inheritsCommand) && mergeIdentityInput(key) {
+			if err := s.validateRuntimeMergeIdentity(effective.Repository); err != nil {
+				return record, err
 			}
 		}
 	}
@@ -241,8 +242,8 @@ func (s *Service) registerConfig(name string, values ConfigValues) (Repository, 
 		}
 		return effective.Repository, false, tx.Commit()
 	}
-	if err := validateAutoMergeIdentity(s.up, effective.Repository); err != nil {
-		return Repository{}, false, apiError{400, err.Error()}
+	if err := s.validateRuntimeMergeIdentity(effective.Repository); err != nil {
+		return Repository{}, false, err
 	}
 	global.Revision++
 	if err := putConfigRecord(tx, global); err != nil {

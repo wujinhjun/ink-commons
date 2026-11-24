@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -29,17 +31,50 @@ func (options *cliOptions) directory() (string, error) {
 }
 
 func main() {
-	options, command := cli()
-	command.SetArgs(legacyFlags(os.Args[1:]))
-	if err := command.Execute(); err != nil {
-		message := cliDiagnostic(err)
-		if options.json {
-			_ = json.NewEncoder(os.Stderr).Encode(map[string]string{"error": message})
-		} else {
-			fmt.Fprintln(os.Stderr, "ink:", message)
-		}
-		os.Exit(1)
+	os.Exit(executeCLI(os.Args[1:], os.Stderr))
+}
+
+func executeCLI(args []string, stderr io.Writer) int {
+	_, command := cli()
+	args = legacyFlags(args)
+	command.SetArgs(args)
+	cmd, err := command.ExecuteC()
+	if err == nil {
+		return 0
 	}
+	message := cliDiagnostic(err)
+	if jsonErrorRequested(cmd, args) {
+		_ = json.NewEncoder(stderr).Encode(map[string]string{"error": message})
+	} else {
+		fmt.Fprintln(stderr, "ink:", message)
+	}
+	return 1
+}
+
+// Cobra may stop before parsing the persistent flag. Recover its value for
+// diagnostics while respecting the delimiter and recognized flag arguments.
+func jsonErrorRequested(cmd *cobra.Command, args []string) bool {
+	requested := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		name, value, assigned := strings.Cut(arg[2:], "=")
+		if name == "json" {
+			if !assigned {
+				requested = true
+			} else if enabled, err := strconv.ParseBool(value); err == nil {
+				requested = enabled
+			}
+		} else if flag := cmd.Flag(name); !assigned && flag != nil && flag.NoOptDefVal == "" {
+			i++
+		}
+	}
+	return requested
 }
 
 func run(args []string) error {

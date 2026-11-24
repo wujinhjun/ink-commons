@@ -174,3 +174,35 @@ func TestRepositoryPatchIsAtomic(t *testing.T) {
 		t.Fatalf("wrong config generation or policy: %+v %v", cfg, err)
 	}
 }
+
+func TestRepositoryMutationChecksMergeIdentityWhenReviewerCommandChanges(t *testing.T) {
+	merger := filepath.Join(t.TempDir(), "merger")
+	if err := os.WriteFile(merger, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := centralConfigService(t, Config{
+		RepositoryDefaults: Repository{ReviewerLogin: "reviewer"},
+		GitHubMerger:       &GitHubCredential{Helper: &GitHubHelperCredential{Command: merger, Identity: "merger"}},
+	}, nil)
+	registerConfigAPI(t, s, `{"repo":"acme/project","auto_merge":{"enabled":true}}`, 201)
+	registerConfigAPI(t, s, `{"repo":"acme/override","reviewer_command":"independent","auto_merge":{"enabled":true}}`, 201)
+	cfg, err := s.store.effectiveConfig("acme/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := string(jsonValue(merger))
+	path := "/v1/repositories/acme/project"
+	lifecycleRequest(t, s, http.MethodPatch, path, `{"reviewer_command":`+command+`,"human_developer":"should-not-persist"}`, 400)
+	configAPI(t, s, http.MethodPost, "acme/project", "reviewer_command", command, 400)
+	configAPI(t, s, http.MethodPost, "", "reviewer_command", command, 400)
+
+	after, err := s.store.effectiveConfig("acme/project")
+	if err != nil || after.Revision != cfg.Revision || after.Repository.ReviewerCommand != "" || after.Repository.HumanDeveloper != "" {
+		t.Fatalf("failed mutation changed repository policy: %+v, %v", after.Repository, err)
+	}
+
+	// PATCH validates the final policy, including simultaneous changes.
+	lifecycleRequest(t, s, http.MethodPatch, path, `{"reviewer_command":`+command+`,"auto_merge":{"enabled":false}}`, 200)
+	configAPI(t, s, http.MethodPost, "", "reviewer_command", command, 200)
+	configAPI(t, s, http.MethodDelete, "acme/override", "reviewer_command", "", 400)
+}

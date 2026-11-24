@@ -77,6 +77,17 @@ func validateAutoMergeIdentity(up upstream, repo Repository) error {
 	return nil
 }
 
+func mergeIdentityInput(key string) bool {
+	return key == "auto_merge" || key == "reviewer_command"
+}
+
+func (s *Service) validateRuntimeMergeIdentity(repo Repository) error {
+	if err := validateAutoMergeIdentity(s.up, repo); err != nil {
+		return apiError{400, StartupDiagnostic(err)}
+	}
+	return nil
+}
+
 // Configuration is a central daemon API. It never opens a business checkout.
 func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 	scope := strings.ToLower(r.URL.Query().Get("repo"))
