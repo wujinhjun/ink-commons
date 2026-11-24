@@ -238,8 +238,15 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 	if status == http.StatusUnauthorized && token != "" {
 		u.tokens.invalidate(u.apiHost(), repo, role, token)
 	}
+	mergeWrite := role == githubMerger && method == http.MethodPut
 	if err := u.throttle.response(res, started, time.Now(), role); err != nil {
+		if mergeWrite {
+			err = mergeRequestRefused{err}
+		}
 		return nil, status, err
+	}
+	if mergeWrite && status == http.StatusUnauthorized {
+		return nil, status, mergeRequestRefused{diagnosticError("upstream HTTP 401")}
 	}
 	if cacheKey.url != "" {
 		header, handled, err := u.observations.read(res, cacheKey, cached, conditional, started, result)

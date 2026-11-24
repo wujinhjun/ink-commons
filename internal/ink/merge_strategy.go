@@ -63,15 +63,17 @@ func strategyFor(name string) MergeStrategy {
 	}
 }
 
-type mergeNotSubmitted struct{ error }
+// A refusal proves that GitHub could not accept the merge. It covers
+// requests stopped locally and definitive authentication or rate-limit responses.
+type mergeRequestRefused struct{ error }
 
-func (e mergeNotSubmitted) Unwrap() error { return e.error }
+func (e mergeRequestRefused) Unwrap() error { return e.error }
 
-func notSubmitted(err error) error { return mergeNotSubmitted{err} }
+func notSubmitted(err error) error { return mergeRequestRefused{err} }
 
-func wasNotSubmitted(err error) bool {
-	var skipped mergeNotSubmitted
-	return errors.As(err, &skipped) || errors.Is(err, errAppCommandNotStarted)
+func canRetryMerge(err error) bool {
+	var refused mergeRequestRefused
+	return errors.As(err, &refused) || errors.Is(err, errAppCommandNotStarted)
 }
 
 type directMergeStrategy struct{}
@@ -80,7 +82,7 @@ func (directMergeStrategy) Submit(ctx context.Context, merger Merger, target mer
 	if target.Stack == nil {
 		sha, err := merger.Merge(ctx, target)
 		switch {
-		case wasNotSubmitted(err):
+		case canRetryMerge(err):
 			return mergeResult{outcome: mergeRejected, retryable: true, reason: err.Error(), err: err}
 		case err != nil:
 			return mergeResult{outcome: mergeUncertain, reason: "merge request failed or response was lost: " + err.Error() + "; verify GitHub before taking action", err: err}
@@ -91,7 +93,7 @@ func (directMergeStrategy) Submit(ctx context.Context, merger Merger, target mer
 
 	result, status, err := merger.SubmitStack(ctx, target)
 	switch {
-	case wasNotSubmitted(err):
+	case canRetryMerge(err):
 		return mergeResult{outcome: mergeRejected, retryable: true, reason: err.Error(), err: err}
 	case status == http.StatusBadRequest:
 		return mergeResult{outcome: mergeRejected, retryable: true, reason: "GitHub rejected the stack merge before accepting it (HTTP 400); waiting for preflight", err: err}

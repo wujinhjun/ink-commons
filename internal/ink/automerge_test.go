@@ -149,6 +149,75 @@ func TestAutoMergePollDedupAndRestart(t *testing.T) {
 	}
 }
 
+func TestAutoMergeRetriesRefusedWritesWithFreshPreflight(t *testing.T) {
+	for _, stack := range []bool{false, true} {
+		for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+			t.Run(fmt.Sprintf("stack=%t/status=%d", stack, status), func(t *testing.T) {
+				f := newAutoMergeFixture(t)
+				if stack {
+					f.setStack(1, "main")
+				}
+				ctx := context.Background()
+				base := f.s.up.http.Transport
+				submits, checks := 0, 0
+				f.s.up.http.Transport = testTransport(func(r *http.Request) (*http.Response, error) {
+					if strings.HasSuffix(r.URL.Path, "/check-runs") {
+						checks++
+					}
+					if r.Method != http.MethodPut {
+						return base.RoundTrip(r)
+					}
+					submits++
+					w := httptest.NewRecorder()
+					if submits == 1 {
+						if status == http.StatusTooManyRequests {
+							w.Header().Set("Retry-After", "300")
+						}
+						w.WriteHeader(status)
+						return w.Result(), nil
+					}
+					if status == http.StatusUnauthorized && r.Header.Get("Authorization") != "Bearer refreshed-fixture-merger" {
+						t.Error("retry did not use the refreshed credential")
+					}
+					if !stack {
+						return base.RoundTrip(r)
+					}
+					reply(w, http.StatusAccepted, map[string]any{"status": "pending", "details": map[string]string{"uuid": testStackRequestID}})
+					return w.Result(), nil
+				})
+				f.s.Poll(ctx)
+				run := notificationWork(t, f.s, f.repo, f.pull).AutoMerges[0]
+				if submits != 1 || run.State != "waiting" || run.RequestID != "" ||
+					!strings.Contains(run.Reason, fmt.Sprintf("HTTP %d", status)) {
+					t.Fatalf("refused merge did not release the reservation: %+v (submits=%d)", run, submits)
+				}
+				checksAfterRefusal := checks
+				if status == http.StatusTooManyRequests {
+					f.s.Poll(ctx)
+					if submits != 1 || checks != checksAfterRefusal {
+						t.Fatal("poll sent GitHub requests during secondary cooldown")
+					}
+					throttle := f.s.up.throttle
+					throttle.mu.Lock()
+					throttle.secondary.until = time.Now().Add(-time.Second)
+					throttle.mu.Unlock()
+				} else {
+					t.Setenv("INK_TEST_MERGER_PAT", "refreshed-fixture-merger")
+				}
+				f.s.Poll(ctx)
+				run = notificationWork(t, f.s, f.repo, f.pull).AutoMerges[0]
+				wantState, wantID := "merged", ""
+				if stack {
+					wantState, wantID = "pending", testStackRequestID
+				}
+				if submits != 2 || checks <= checksAfterRefusal || run.State != wantState || run.RequestID != wantID {
+					t.Fatalf("recovered merge did not rerun preflight and submit: %+v (submits=%d, checks=%d)", run, submits, checks)
+				}
+			})
+		}
+	}
+}
+
 func TestAutoMergeWaitsForChecksAndMergeability(t *testing.T) {
 	for _, scenario := range []string{"queued", "failure", "unknown conclusion", "checks denied", "later page failure", "conflict", "unknown mergeability", "unstable", "head changed", "approval revoked"} {
 		t.Run(scenario, func(t *testing.T) {
