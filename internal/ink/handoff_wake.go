@@ -92,7 +92,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 			if err != nil {
 				message := "review preparation: " + err.Error()
 				if h.Wake.Error != message {
-					s.log.Warn("review placement check failed")
+					s.warnError("review placement check failed", err, "repo", w.Repo, "number", w.Pull.Number)
 				}
 				h.Wake.Error = message
 				if retryablePlacementRead(err) {
@@ -182,7 +182,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 		lh := lt.Handoff
 		if prepareErr != nil {
 			lh.Wake.recordPreparationError(prepareErr, recovering)
-			s.log.Warn("task wake preparation failed")
+			s.warnError("task wake preparation failed", prepareErr, "repo", lw.Repo, "number", lw.Pull.Number)
 		} else {
 			lh.Wake.Preparation = "prepared"
 			lh.Assignee.Route = &prepared

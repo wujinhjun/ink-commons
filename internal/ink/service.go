@@ -105,7 +105,7 @@ func (s *Service) repositories() []Repository {
 	defer s.mu.Unlock()
 	repos, err := s.runtimeRepositories()
 	if err != nil {
-		s.log.Warn("load repository configuration")
+		s.warnError("load repository configuration", err)
 	}
 	return repos
 }

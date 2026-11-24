@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -106,6 +107,12 @@ func TestPollBoundsAndIsolatesSlowRepositoryAndPR(t *testing.T) {
 
 func TestPollSlowHookRunsAfterMergeAndLeavesOtherPRsFree(t *testing.T) {
 	f := newAutoMergeFixture(t)
+	var logOutput bytes.Buffer
+	logger, err := newLogger(&logOutput, "warn", "json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.s.log = logger
 	dir := t.TempDir()
 	script, marker := filepath.Join(dir, "hook"), filepath.Join(dir, "ran")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\n: > \"$1\"\nexec sleep 60\n"), 0700); err != nil {
@@ -161,6 +168,11 @@ func TestPollSlowHookRunsAfterMergeAndLeavesOtherPRsFree(t *testing.T) {
 		t.Fatalf("other PR=%v err=%v version=%d want=%d", other != nil, err, next.Version, first.Version)
 	}
 	f.s.hooks.wg.Wait()
+	if output := logOutput.String(); !strings.Contains(output, "execute approval hook") ||
+		!strings.Contains(output, f.repo.Repo) || !strings.Contains(output, "operation timed out") || strings.Contains(output, dir) {
+		t.Fatalf("unexpected hook diagnostics: %s", output)
+	}
+
 	if run := notificationWork(t, f.s, f.repo, f.pull).Approvals[0]; run.State != "failed" || !strings.Contains(run.Error, "timed out") {
 		t.Fatalf("hook timeout not recorded: %+v", run)
 	}
@@ -192,7 +204,17 @@ func TestWorkflowClockAndRedactedStructuredLogs(t *testing.T) {
 	}
 	const secret = "Bearer token /home/private/config private-channel"
 	s.log.Info("disabled")
-	s.up.http.Transport = testTransport(func(*http.Request) (*http.Response, error) { return nil, errors.New(secret) })
+	s.up.http.Transport = testTransport(func(*http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		w.Header().Set("Retry-After", secret)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.WriteString(secret)
+		return w.Result(), nil
+	})
+	s.warnError("provider request", &os.PathError{Op: secret, Path: secret, Err: errors.New(secret)})
+	s.warnError("approval hook", fmt.Errorf("provider details %s: %w", secret, context.DeadlineExceeded))
+	_, dbErr := s.store.db.Exec("SELECT * FROM missing_private_table")
+	s.warnError("SQLite operation", dbErr)
 	s.Poll(context.Background())
 	if s.lastPoll.Load() != clock.Unix() {
 		t.Fatal("poll did not use injected clock")
@@ -216,10 +238,12 @@ func TestWorkflowClockAndRedactedStructuredLogs(t *testing.T) {
 			t.Fatalf("invalid structured warning: %s", line)
 		}
 	}
-	if !strings.Contains(out.String(), "auto_merge_unknown") {
-		t.Fatal("workflow alert was not logged")
+	for _, want := range []string{"auto_merge_unknown", repo.Repo, "upstream HTTP 403 (rate limit)", "operation timed out", "SQLite code 1", "filesystem operation"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("missing diagnostic %q: %s", want, out.String())
+		}
 	}
-	for _, forbidden := range []string{"disabled", "Bearer", "/home/private", "private-channel", repo.Repo} {
+	for _, forbidden := range []string{"disabled", "Bearer", "/home/private", "private-channel", "missing_private_table"} {
 		if strings.Contains(out.String(), forbidden) {
 			t.Errorf("log leaked %q: %s", forbidden, out.String())
 		}

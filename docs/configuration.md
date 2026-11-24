@@ -3,7 +3,7 @@
 Ink Commons 集中管理所有仓库的配置和状态。业务仓库不需要 `.ink` 文件、专用分支、GitHub 配置或 Git hook，也不需要知道同砚的存在。操作者可以在任意目录执行 `ink register owner/repository` 和 `ink config ... --repo owner/repository`。可选 pre-push hook 只是开发会话来源的一种上报方式；也可由中心 API 的 `link` 登记，不是配置分发机制。
 
 
-daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`，也可设为 `debug`、`warn` 或 `error`。`log_format` 支持 `text`（默认）和 `json`。日志记录操作、PR 编号和告警代码等字段。告警明细可通过私有 Unix socket 查询。
+daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`，也可设为 `debug`、`warn` 或 `error`。`log_format` 支持 `text`（默认）和 `json`。日志记录操作、仓库、PR 编号、告警代码，以及 HTTP 状态、超时和 SQLite 错误码等诊断信息。告警明细可通过私有 Unix socket 查询。
 
 ## 存储与作用域
 

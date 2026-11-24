@@ -135,7 +135,7 @@ func validateValues(values ConfigValues) error {
 	for key, value := range values {
 		field, ok := configFields[key]
 		if !ok {
-			return fmt.Errorf("unknown runtime configuration key %q", key)
+			return diagnosticError("unknown runtime configuration key")
 		}
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			if !field.Nullable {

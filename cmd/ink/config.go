@@ -55,8 +55,12 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		return cfg, nil, err
 	}
 	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err != io.EOF {
+	switch err := decoder.Decode(&extra); err {
+	case io.EOF:
+	case nil:
 		return cfg, nil, fmt.Errorf("expected one configuration object")
+	default:
+		return cfg, nil, err
 	}
 	cfg.Reliability = file.Reliability
 	if err := cfg.Reliability.Validate(); err != nil {

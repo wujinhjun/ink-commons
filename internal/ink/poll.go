@@ -76,7 +76,7 @@ func (s *Service) recoveries(ctx context.Context) map[string]map[int]recovery {
 	} {
 		ids, err := scan.list(ctx)
 		if err != nil {
-			s.log.Warn("scan pending PR recovery", "kind", scan.kind)
+			s.warnError("scan pending PR recovery", err, "kind", scan.kind)
 			continue
 		}
 		for _, id := range ids {
@@ -101,7 +101,7 @@ func (s *Service) Poll(ctx context.Context) {
 	defer s.pollMu.Unlock()
 	defer func() { s.lastPoll.Store(s.now().Unix()) }()
 	if err := statedb.New(s.store.db).PrunePushes(ctx, pushCutoff(s.now())); err != nil {
-		s.log.Warn("prune expired push observations")
+		s.warnError("prune expired push observations", err)
 	}
 
 	recoveries := s.recoveries(ctx)
@@ -119,7 +119,7 @@ func (s *Service) Poll(ctx context.Context) {
 			defer workers.Done()
 			for job := range jobs {
 				if err := s.pollPull(ctx, job); err != nil {
-					s.log.Warn("sync pull request", "number", job.number)
+					s.warnError("sync pull request", err, "repo", job.repo.Repo, "number", job.number)
 				}
 			}
 		}()
@@ -137,7 +137,7 @@ func (s *Service) Poll(ctx context.Context) {
 			defer discovery.Done()
 			for job := range repos {
 				if err := s.pollRepo(ctx, job.repo, job.pending, send); err != nil {
-					s.log.Warn("discover pull requests")
+					s.warnError("discover pull requests", err, "repo", job.repo.Repo)
 				}
 			}
 		}()

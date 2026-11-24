@@ -203,6 +203,13 @@ func (s *Service) runApproval(ctx context.Context, candidate approvalCandidate) 
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = time.Second
 	runErr := cmd.Run()
+	if runErr != nil {
+		cause := runErr
+		if hookCtx.Err() != nil {
+			cause = hookCtx.Err()
+		}
+		s.warnError("execute approval hook", cause, "repo", event.Repository, "number", event.PullNumber)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	work, err := s.store.loadWork(key(event.Repository, event.PullNumber))
@@ -302,7 +309,7 @@ func (s *Service) approvalWorker() {
 			stop := context.AfterFunc(q.ctx, cancel)
 			defer stop()
 			if err := s.checkAndRunApproval(ctx, job.candidate); err != nil && ctx.Err() == nil {
-				s.log.Warn("process approval hook", "number", job.candidate.event.PullNumber)
+				s.warnError("process approval hook", err, "repo", job.candidate.event.Repository, "number", job.candidate.event.PullNumber)
 			}
 		}()
 	}

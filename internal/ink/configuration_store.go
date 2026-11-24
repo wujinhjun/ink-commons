@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"sort"
 
 	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
@@ -25,10 +24,10 @@ func readConfigRecords(tx *sql.Tx) ([]ConfigRecord, error) {
 			return nil, err
 		}
 		if record.Values == nil || record.Revision < 1 {
-			return nil, fmt.Errorf("invalid configuration record %q", row.Scope)
+			return nil, diagnosticError("invalid runtime configuration record")
 		}
 		if row.Scope != "" && !ValidRepository(row.Scope) {
-			return nil, fmt.Errorf("invalid configuration scope %q", row.Scope)
+			return nil, diagnosticError("invalid runtime configuration scope")
 		}
 		if err := validateValues(record.Values); err != nil {
 			return nil, err
@@ -38,11 +37,11 @@ func readConfigRecords(tx *sql.Tx) ([]ConfigRecord, error) {
 	if len(records) > 0 {
 		global, ok := recordMap(records)[""]
 		if !ok {
-			return nil, fmt.Errorf("runtime configuration is missing global settings")
+			return nil, diagnosticError("runtime configuration is missing global settings")
 		}
 		for _, record := range records {
 			if record.Revision > global.Revision {
-				return nil, fmt.Errorf("configuration generation is inconsistent")
+				return nil, diagnosticError("runtime configuration generation is inconsistent")
 			}
 		}
 	}

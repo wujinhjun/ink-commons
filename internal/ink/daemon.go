@@ -5,6 +5,7 @@ package ink
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,7 +45,7 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 	}
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
-		return err
+		return fmt.Errorf("listen on daemon socket: %w", err)
 	}
 	defer ln.Close()
 	if err := os.Chmod(socket, 0600); err != nil {

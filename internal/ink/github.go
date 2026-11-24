@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -156,7 +157,7 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 		var req *http.Request
 		req, err = http.NewRequestWithContext(ctx, method, u.github+path, bytes.NewReader(input))
 		if err != nil {
-			return nil, 0, fmt.Errorf("invalid upstream request")
+			return nil, 0, diagnosticError("invalid upstream request")
 		}
 		if u.token != "" {
 			req.Header.Set("Authorization", "Bearer "+u.token)
@@ -170,7 +171,15 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 		}
 		res, err = u.http.Do(req)
 		if err != nil {
-			err = fmt.Errorf("upstream transport failure")
+			var timeout net.Error
+			switch {
+			case errors.Is(err, context.Canceled):
+				err = diagnosticError("upstream request cancelled")
+			case errors.Is(err, context.DeadlineExceeded), errors.As(err, &timeout) && timeout.Timeout():
+				err = diagnosticError("upstream request timed out")
+			default:
+				err = diagnosticError("upstream transport failure")
+			}
 		}
 	}
 	if err != nil {
@@ -179,10 +188,15 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 	defer res.Body.Close()
 	status := res.StatusCode
 	if (status < 200 || status >= 300) && !slices.Contains(acceptedErrors, status) {
-		return nil, status, fmt.Errorf("upstream HTTP %d", status)
+		message := fmt.Sprintf("upstream HTTP %d", status)
+		if status == http.StatusTooManyRequests || (status == http.StatusForbidden &&
+			(res.Header.Get("X-RateLimit-Remaining") == "0" || res.Header.Get("Retry-After") != "")) {
+			message += " (rate limit)"
+		}
+		return nil, status, diagnosticError(message)
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 32<<20)).Decode(result); err != nil {
-		return nil, status, fmt.Errorf("invalid upstream response (HTTP %d)", status)
+		return nil, status, diagnosticError(fmt.Sprintf("invalid upstream response (HTTP %d)", status))
 	}
 	u.lastOK.Store(time.Now().Unix())
 	return res.Header, status, nil
@@ -263,7 +277,7 @@ func (u upstream) commandResponse(ctx context.Context, repo, method, path, profi
 	}
 	runErr := cmd.Wait()
 	if ctx.Err() != nil {
-		return nil, fmt.Errorf("GitHub App command timed out or cancelled")
+		return nil, ctx.Err()
 	}
 	res, parseErr := http.ReadResponse(bufio.NewReader(bytes.NewReader(output.Bytes())), nil)
 	if runErr != nil {
@@ -275,12 +289,12 @@ func (u upstream) commandResponse(ctx context.Context, repo, method, path, profi
 		}
 		var exit *exec.ExitError
 		if errors.As(runErr, &exit) {
-			return nil, fmt.Errorf("GitHub App command exited (status %d)", exit.ExitCode())
+			return nil, diagnosticError(fmt.Sprintf("GitHub App command exited (status %d)", exit.ExitCode()))
 		}
-		return nil, fmt.Errorf("GitHub App command could not run")
+		return nil, diagnosticError("GitHub App command could not run")
 	}
 	if parseErr != nil {
-		return nil, fmt.Errorf("invalid GitHub command response")
+		return nil, diagnosticError("invalid GitHub command response")
 	}
 	return res, nil
 }
@@ -292,7 +306,7 @@ type boundedOutput struct {
 
 func (b *boundedOutput) Write(p []byte) (int, error) {
 	if len(p) > b.remaining {
-		return 0, fmt.Errorf("GitHub output exceeds limit")
+		return 0, diagnosticError("GitHub output exceeds limit")
 	}
 	b.remaining -= len(p)
 	return b.Buffer.Write(p)
