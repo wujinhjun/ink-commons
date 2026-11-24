@@ -43,8 +43,12 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 			switch n.State {
 			case "acknowledged", "superseded":
 			case "unknown", "awaiting_ack":
+				sameRoute := work.Developer.Route != nil && n.Route != nil && *work.Developer.Route == *n.Route
+				if sameRoute && work.approvalReceiptPaused(n) {
+					break
+				}
 				n.State = "superseded"
-				if (work.Phase == "approved" || work.Phase == "merged") && work.Pull.Head.SHA == n.SHA && work.Developer.Route != nil && n.Route != nil && *work.Developer.Route == *n.Route {
+				if sameRoute && work.Pull.Head.SHA == n.SHA && (work.Phase == "approved" || work.Phase == "merged") {
 					n.State, first = "acknowledged", true
 				}
 				// 完成通知已被消费后，不再补发同 SHA 的旧批准提示。

@@ -188,12 +188,17 @@ func (n NotificationRun) pendingDelivery() bool {
 		(n.RequireACK || (n.Event == "pr_merged" && n.Attempts == 0))
 }
 
-// A closed unmerged PR and a changed head invalidate the old receipt lease.
+// A same-head reopen can make the original approval receipt eligible again.
+func (w *Work) approvalReceiptPaused(n *NotificationRun) bool {
+	return w.Pull.State == "closed" && !w.Pull.Merged && n.Event == "review_approved" && n.SHA == w.Pull.Head.SHA
+}
+
+// A changed head invalidates the old receipt lease.
 func (w *Work) supersedeStaleNotifications(now time.Time) bool {
 	changed := false
 	for i := range w.Notifications {
 		n := &w.Notifications[i]
-		if n.pendingDelivery() && (n.SHA != w.Pull.Head.SHA || (w.Pull.State == "closed" && w.Phase != "merged")) {
+		if n.pendingDelivery() && n.SHA != w.Pull.Head.SHA {
 			n.State, n.FinishedAt, n.RetryAt = "superseded", now, time.Time{}
 			changed = true
 		}

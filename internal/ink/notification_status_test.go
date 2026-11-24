@@ -446,7 +446,7 @@ func TestPollReconcilesOnlyPendingClosedPullsAfterRestart(t *testing.T) {
 	if err := s.pollRepo(context.Background(), repo); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(readNumbers, []int{10, 11, 12}) {
+	if !slices.Equal(readNumbers, []int{10, 12}) {
 		t.Fatalf("unexpected closed PR lookups: %v", readNumbers)
 	}
 	if len(e.notices) != 1 || e.notices[0].EventID != "event-10" {
@@ -455,8 +455,8 @@ func TestPollReconcilesOnlyPendingClosedPullsAfterRestart(t *testing.T) {
 	receiptFirst(t, s, "event-10", true)
 	receiptFirst(t, s, "event-10", false)
 	closed, err := s.store.loadNotification("event-11")
-	if err != nil || closed == nil || closed.Notifications[0].State != "superseded" {
-		t.Fatalf("closed unmerged receipt not settled: %+v, %v", closed, err)
+	if err != nil || closed == nil || closed.Notifications[0].State != "awaiting_ack" {
+		t.Fatalf("closed unmerged receipt was not preserved: %+v, %v", closed, err)
 	}
 	merged, err := s.store.loadWork(key(repo.Repo, 12))
 	if err != nil || merged == nil || merged.AutoMerges[0].State != "failed" {

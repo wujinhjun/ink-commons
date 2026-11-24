@@ -125,8 +125,12 @@ func workIndex(w *Work) statedb.SaveWorkParams {
 		ID: keyForWork(w), Repo: w.Repo, Number: int64(w.Pull.Number), Revision: w.storedRevision + 1,
 		PollPending: w.Pull.State == "open" || hasInFlightAutoMerge(w),
 	}
-	for _, n := range w.Notifications {
-		row.PollPending = row.PollPending || n.pendingDelivery()
+	// Approval receipts for an unmerged closed PR resume on reopen, which
+	// GitHub's open listing will discover even without a local poll entry.
+	if w.Pull.Merged && !row.PollPending {
+		for _, n := range w.Notifications {
+			row.PollPending = row.PollPending || n.pendingDelivery()
+		}
 	}
 	// The current task may need a retry or a time-based workflow alert even
 	// after the attempt ends. Retired tasks need recovery only while unresolved.
