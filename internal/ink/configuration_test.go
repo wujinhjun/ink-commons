@@ -61,7 +61,7 @@ func TestConfigInheritanceNullFalseAndValidation(t *testing.T) {
 	if inherited.Repository.ReviewerRoute.Session != "old" {
 		t.Fatal("missing key did not inherit")
 	}
-	for key, raw := range map[string]string{"execution.max_attempts": "0", "execution.ack_seconds": "null", "reviewer_login": "false", "reviewer_route": `{"provider":"test","unknown":true}`, "auto_merge": `{"enabled":null}`, "postApproval": `{"command":[null]}`, "task_mode": `""`, "unknown": "true"} {
+	for key, raw := range map[string]string{"execution.max_attempts": "0", "execution.ack_seconds": "null", "reviewer_login": "false", "reviewer_route": `{"provider":"test","unknown":true}`, "auto_merge": `{"enabled":null}`, "post_approval": `{"command":[null]}`, "task_mode": `""`, "unknown": "true"} {
 		if _, err := resolveConfig("", nil, RepositoryOverride{key: json.RawMessage(raw)}, 1); err == nil {
 			t.Errorf("accepted %s=%s", key, raw)
 		}
@@ -142,8 +142,8 @@ func TestCentralConfigUpdatesInheritanceRestartAndSnapshotIsolation(t *testing.T
 	if effective.Repository.ReviewerLogin != "third" {
 		t.Fatal("unset did not inherit")
 	}
-	configAPI(t, s, "POST", "", "postApproval", `{"command":["/bin/true"]}`, 200)
-	configAPI(t, s, "POST", "acme/project", "postApproval", `null`, 200)
+	configAPI(t, s, "POST", "", "post_approval", `{"command":["/bin/true"]}`, 200)
+	configAPI(t, s, "POST", "acme/project", "post_approval", `null`, 200)
 	configAPI(t, s, "POST", "", "auto_merge", `{"enabled":true}`, 200)
 	configAPI(t, s, "POST", "acme/project", "auto_merge", `{"enabled":false}`, 200)
 	effective, _ = s.store.effectiveConfig("acme/project")
@@ -154,7 +154,7 @@ func TestCentralConfigUpdatesInheritanceRestartAndSnapshotIsolation(t *testing.T
 	configAPI(t, s, "POST", "", "poll_seconds", "10", 400)
 	configAPI(t, s, "DELETE", "", "reviewer_login", "", 400) // would invalidate registered repository
 	configAPI(t, s, "POST", "acme/missing", "reviewer_login", `"other"`, 404)
-	raw := configAPI(t, s, "GET", "acme/project", "postApproval", "", 200)
+	raw := configAPI(t, s, "GET", "acme/project", "post_approval", "", 200)
 	if !strings.Contains(raw.Body.String(), `"present":true`) || !strings.Contains(raw.Body.String(), `"value":null`) {
 		t.Fatal(raw.Body)
 	}

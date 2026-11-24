@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,16 +14,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/wujinhjun/ink-commons/internal/execution"
 	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
-func register(args []string) error {
-	flags := flag.NewFlagSet("register", flag.ContinueOnError)
+func register(options *cliOptions) *cobra.Command {
+	command := &cobra.Command{Use: "register [OWNER/REPO]", Short: "Register a repository"}
+	flags := command.Flags()
 	taskMode := flags.String("task-mode", "", "legacy or cooperative task handoff")
 	remote := flags.String("remote", "origin", "Git remote to detect when OWNER/REPO is omitted")
 	login := flags.String("github-login", "", "reviewer login (default: central global configuration)")
-	command := flags.String("github-command", "", "reviewer GitHub CLI/App command")
+	githubCommand := flags.String("github-command", "", "reviewer GitHub CLI/App command")
 	provider := flags.String("provider", "", "review execution provider")
 	target := flags.String("target", "", "review execution target")
 	parent := flags.String("parent", "", "parent for new reviewer sessions")
@@ -33,84 +35,92 @@ func register(args []string) error {
 	autoMerge := flags.Bool("auto-merge-after-approval", false, "automatically merge the approved head after checks pass")
 	mergeMethod := flags.String("merge-method", "merge", "merge, squash or rebase (for automatic merge)")
 	reuseReader := flags.Bool("reuse-reader-identity", false, "use the configured reader App for automatic merge")
-	hook := flags.String("post-approval", "", "absolute path of postApproval executable; receives event JSON on stdin")
+	hook := flags.String("post-approval", "", "absolute path of post_approval executable; receives event JSON on stdin")
 	reuseThread := flags.Bool("reuse-development-thread", false, "reuse the development thread with an independent reviewer project")
 	sameChannel := flags.Bool("require-same-channel", false, "require reviews to stay in the development channel")
 	threadHistory := flags.Bool("thread-history", false, "allow reviewer access to original development thread messages")
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
+
+	command.RunE = func(_ *cobra.Command, args []string) error {
+		if len(args) > 1 {
+			return errors.New("usage: ink register [flags] [OWNER/REPO]")
 		}
-		return err
-	}
-	if flags.NArg() > 1 {
-		return errors.New("usage: ink register [flags] [OWNER/REPO]")
-	}
-	name := flags.Arg(0)
-	if name == "" {
-		output, err := exec.Command("git", "remote", "get-url", "--", *remote).Output()
-		if err != nil {
-			return errors.New("cannot read Git remote; run in a checkout or specify OWNER/REPO")
+		name := ""
+		if len(args) == 1 {
+			name = args[0]
 		}
-		name = ink.GitHubRepository(string(output))
-	}
-	name = strings.ToLower(name)
-	if !ink.ValidRepository(name) {
-		return errors.New("expected a GitHub remote or OWNER/REPO")
-	}
-	repo := ink.Repository{TaskMode: *taskMode, Repo: name, ReviewerLogin: *login, ReviewerCommand: *command, HumanDeveloper: *developer}
-	flags.Visit(func(f *flag.Flag) {
-		if f.Name == "reuse-development-thread" || f.Name == "thread-history" || f.Name == "require-same-channel" {
-			repo.Review = &ink.ReviewFeatures{RequireSameChannel: *sameChannel, ReuseDevelopmentThread: *reuseThread, Context: ink.ReviewContextFeatures{ThreadHistory: *threadHistory}}
+		if name == "" {
+			output, err := exec.Command("git", "remote", "get-url", "--", *remote).Output()
+			if err != nil {
+				return errors.New("cannot read Git remote; run in a checkout or specify OWNER/REPO")
+			}
+			name = ink.GitHubRepository(string(output))
 		}
-		if f.Name == "auto-merge-after-approval" || f.Name == "merge-method" || f.Name == "reuse-reader-identity" {
-			repo.AutoMerge = &ink.AutoMergeConfig{Enabled: *autoMerge, Method: *mergeMethod, ReuseReaderIdentity: *reuseReader}
+		name = strings.ToLower(name)
+		if !ink.ValidRepository(name) {
+			return errors.New("expected a GitHub remote or OWNER/REPO")
 		}
-	})
-	if *taskMode != "" && *taskMode != "legacy" && *taskMode != "cooperative" {
-		return errors.New("--task-mode must be legacy or cooperative")
-	}
-	if err := repo.AutoMerge.Validate(); err != nil {
-		return err
-	}
-	if *provider != "" || *target != "" || *parent != "" || *session != "" {
-		if strings.TrimSpace(*provider) == "" || strings.TrimSpace(*target) == "" {
-			return errors.New("--provider and --target are required for an execution route")
+		repo := ink.Repository{TaskMode: *taskMode, Repo: name, ReviewerLogin: *login, ReviewerCommand: *githubCommand, HumanDeveloper: *developer}
+		flags.Visit(func(f *pflag.Flag) {
+			if f.Name == "reuse-development-thread" || f.Name == "thread-history" || f.Name == "require-same-channel" {
+				repo.Review = &ink.ReviewFeatures{RequireSameChannel: *sameChannel, ReuseDevelopmentThread: *reuseThread, Context: ink.ReviewContextFeatures{ThreadHistory: *threadHistory}}
+			}
+			if f.Name == "auto-merge-after-approval" || f.Name == "merge-method" || f.Name == "reuse-reader-identity" {
+				repo.AutoMerge = &ink.AutoMergeConfig{Enabled: *autoMerge, Method: *mergeMethod, ReuseReaderIdentity: *reuseReader}
+			}
+		})
+		if *taskMode != "" && *taskMode != "legacy" && *taskMode != "cooperative" {
+			return errors.New("--task-mode must be legacy or cooperative")
 		}
-		repo.ReviewerRoute = &execution.Route{Provider: *provider, Target: *target, Parent: *parent, Session: *session}
-	}
-	if *hook != "" {
-		repo.PostApproval = &ink.ApprovalHook{Command: []string{*hook}}
-		if err := repo.PostApproval.Validate(); err != nil {
+		if err := repo.AutoMerge.Validate(); err != nil {
 			return err
 		}
-	}
-	var explicit map[string]json.RawMessage
-	encoded, _ := json.Marshal(repo)
-	_ = json.Unmarshal(encoded, &explicit)
-	if *login == "" {
-		delete(explicit, "reviewer_login")
-	}
-	payload, err := json.Marshal(explicit)
-	if err != nil {
-		return err
-	}
-	dir, err := directory()
-	if err != nil {
-		return err
-	}
-	res, err := localClient(dir, 25*time.Second).Post("http://ink/v1/repositories", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		return errors.New("daemon unavailable")
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusCreated {
-		var problem struct {
-			Error string `json:"error"`
+		if *provider != "" || *target != "" || *parent != "" || *session != "" {
+			if strings.TrimSpace(*provider) == "" || strings.TrimSpace(*target) == "" {
+				return errors.New("--provider and --target are required for an execution route")
+			}
+			repo.ReviewerRoute = &execution.Route{Provider: *provider, Target: *target, Parent: *parent, Session: *session}
 		}
-		_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&problem)
-		return fmt.Errorf("daemon HTTP %d: %s", res.StatusCode, problem.Error)
+		if *hook != "" {
+			repo.PostApproval = &ink.ApprovalHook{Command: []string{*hook}}
+			if err := repo.PostApproval.Validate(); err != nil {
+				return err
+			}
+		}
+		var explicit map[string]json.RawMessage
+		encoded, _ := json.Marshal(repo)
+		_ = json.Unmarshal(encoded, &explicit)
+		if *login == "" {
+			delete(explicit, "reviewer_login")
+		}
+		payload, err := json.Marshal(explicit)
+		if err != nil {
+			return err
+		}
+		dir, err := options.directory()
+		if err != nil {
+			return err
+		}
+		res, err := localClient(dir, 25*time.Second).Post("http://ink/v1/repositories", "application/json", bytes.NewReader(payload))
+		if err != nil {
+			return errors.New("daemon unavailable")
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusCreated {
+			var problem struct {
+				Error string `json:"error"`
+			}
+			_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&problem)
+			return daemonProblem(res.StatusCode, problem.Error)
+		}
+		if options.json {
+			var repo ink.Repository
+			if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&repo); err != nil {
+				return errors.New("invalid repository response")
+			}
+			return printJSON(repo)
+		}
+		fmt.Fprintf(os.Stdout, "Registered %s; polling starts on the next daemon cycle.\n", name)
+		return nil
 	}
-	fmt.Fprintf(os.Stdout, "Registered %s; polling starts on the next daemon cycle.\n", name)
-	return nil
+	return command
 }

@@ -4,49 +4,50 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 
+	"github.com/spf13/cobra"
 	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
-func stateCommand(args []string) error {
-	if len(args) == 0 || (args[0] != "init" && args[0] != "backup" && args[0] != "export") {
-		return errors.New("usage: ink state init [-data DIR] | ink state backup|export -output FILE [-data DIR] (stop daemon first)")
-	}
-	dir, err := directory()
-	if err != nil {
-		return err
-	}
-	flags := flag.NewFlagSet("state "+args[0], flag.ContinueOnError)
-	data := flags.String("data", dir, "daemon state directory")
+func stateCommand(options *cliOptions, action string) *cobra.Command {
+	command := &cobra.Command{Use: action}
+	flags := command.Flags()
 	var output *string
-	if args[0] != "init" {
+	if action != "init" {
 		output = flags.String("output", "", "new destination file (must not exist)")
 	}
-	if err := flags.Parse(args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	}
-	if args[0] == "init" {
-		if flags.NArg() != 0 {
-			return errors.New("unexpected state init arguments")
-		}
-		if err := ink.InitializeState(*data); err != nil {
+
+	command.RunE = func(_ *cobra.Command, args []string) error {
+		dir, err := options.directory()
+		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "State initialized in %s.\n", *data)
+		if action == "init" {
+			if len(args) != 0 {
+				return errors.New("unexpected state init arguments")
+			}
+			if err := ink.InitializeState(dir); err != nil {
+				return err
+			}
+			if options.json {
+				return printJSON(map[string]string{"status": "initialized"})
+			}
+			fmt.Fprintf(os.Stdout, "State initialized in %s.\n", dir)
+			return nil
+		}
+		if len(args) != 0 || *output == "" {
+			return errors.New("specify --output FILE with no positional arguments")
+		}
+		if err := ink.StateSnapshot(dir, *output, action == "export"); err != nil {
+			return err
+		}
+		if options.json {
+			return printJSON(map[string]string{"status": "written", "action": action})
+		}
+		fmt.Fprintf(os.Stdout, "State %s written to %s.\n", action, *output)
 		return nil
 	}
-	if flags.NArg() != 0 || *output == "" {
-		return errors.New("specify -output FILE with no positional arguments")
-	}
-	if err := ink.StateSnapshot(*data, *output, args[0] == "export"); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stdout, "State %s written to %s.\n", args[0], *output)
-	return nil
+	return command
 }

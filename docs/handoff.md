@@ -92,7 +92,7 @@ reviewer 交接会核验 review ID、作者、精确 SHA 和结论；developer �
 
 PR 关闭或进入 Draft 后，不再发放新任务，旧领取也不会被静默释放。领取者仍可交回旧任务，结果记为 `superseded`，不声称完成新一轮。旧 SHA 已被其他 head 替代时，也仅记录旧任务的交接；迟到回执不能完成新任务。
 
-cooperative 审查的自动合入和 `postApproval` 脚本还需等待对应批准 review 的已验证交接。人类直接在 GitHub 批准、而没有对应 cooperative reviewer 交接时，不自动合入。审批通知仍独立报告 GitHub 批准事实，不代表已经合并。
+cooperative 审查的自动合入和 `post_approval` 脚本还需等待对应批准 review 的已验证交接。人类直接在 GitHub 批准、而没有对应 cooperative reviewer 交接时，不自动合入。审批通知仍独立报告 GitHub 批准事实，不代表已经合并。
 
 ## 阻塞和重试
 

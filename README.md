@@ -95,13 +95,13 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 
 注册管理的是 GitHub 仓库，不安装 Git hook。自动关联开发会话仍需安装前述 pre-push hook，或通过 `link` 登记。只注册仓库不会把未认领 PR 自动指派给某个开发会话。
 
-## 审查通过后的 postApproval
+## 审查通过后的 post_approval
 
-用 `ink config set postApproval '{"command":["/absolute/path/to/after-approval"],"timeout_seconds":60}' --repo owner/repository` 设置中心 hook，也可用 `ink register --post-approval /absolute/path/to/script` 为新仓库指定脚本：
+用 `ink config set post_approval '{"command":["/absolute/path/to/after-approval"],"timeout_seconds":60}' --repo owner/repository` 设置中心 hook，也可用 `ink register --post-approval /absolute/path/to/script` 为新仓库指定脚本：
 
 ```json
 {
-  "postApproval": {
+  "post_approval": {
     "command": ["/absolute/path/to/after-approval", "--notify"],
     "timeout_seconds": 60
   }
@@ -113,10 +113,10 @@ ink register --github-login 'your-reviewer[bot]' --github-command your-reviewer-
 仅当已关联、非 Draft、未关闭 PR 被指定 reviewer 对当前 head SHA 正式 Approve，工作项进入 `approved` 时触发。其他人或旧 SHA 的 review 不触发。脚本从 stdin 接收一行 JSON：
 
 ```json
-{"event_id":"owner/repo#42:HEAD_SHA","event":"postApproval","repository":"owner/repo","pull_number":42,"pull_url":"https://github.com/owner/repo/pull/42","sha":"HEAD_SHA","review_id":123,"review_url":"https://github.com/owner/repo/pull/42#pullrequestreview-123","reviewer":"your-reviewer[bot]"}
+{"event_id":"owner/repo#42:HEAD_SHA","event":"post_approval","repository":"owner/repo","pull_number":42,"pull_url":"https://github.com/owner/repo/pull/42","sha":"HEAD_SHA","review_id":123,"review_url":"https://github.com/owner/repo/pull/42#pullrequestreview-123","reviewer":"your-reviewer[bot]"}
 ```
 
-以仓库、PR、SHA 去重，同一 SHA 的再次 Approve、重复轮询和重启不会重复触发。新 SHA 审查通过后会产生新事件。首次启用 hook 时，已观察到的有效批准也会触发。`GET /v1/work` 和单条工作项的 `postApproval` 数组记录 `unknown`、`succeeded` 或 `failed`、时间及错误。
+以仓库、PR、SHA 去重，同一 SHA 的再次 Approve、重复轮询和重启不会重复触发。新 SHA 审查通过后会产生新事件。首次启用 hook 时，已观察到的有效批准也会触发。`GET /v1/work` 和单条工作项的 `post_approval` 数组记录 `unknown`、`succeeded` 或 `failed`、时间及错误。
 
 触发记录在启动脚本前持久化；失败、超时或 daemon 中断后不自动重放，也没有自动重试接口。这样避免脚本已经产生外部副作用后再次运行，但中断可能导致事件未执行完成，需要人工核查。脚本应使用 `event_id` 去重；如果它要执行 merge 等对当前版本敏感的操作，还需核对 GitHub 最新 head 和批准状态。hook 本身不自动 merge PR。
 
@@ -147,7 +147,7 @@ ink notification status --event '通知中的事件 ID'
 
 升级前已记录的通知保留原有语义，不自动重放，以免重复通知已处理的历史审批。此前被 cc-connect 丢弃的旧通知仍需人工补充上下文；新建的 cc-connect 通知自动使用确认协议。
 
-通知与 `postApproval` 脚本相互独立；通知尝试发生在脚本之前，脚本无需配置，也不会因通知已发送而跳过。
+通知与 `post_approval` 脚本相互独立；通知尝试发生在脚本之前，脚本无需配置，也不会因通知已发送而跳过。
 
 通知记录随 SQLite 备份保留。跨 schema 版本切换参见[单实例检查清单](docs/migration.md)。
 
@@ -178,7 +178,7 @@ GitHub 原生 Stack PR 使用异步合入。只有当前目标分支已经是 st
 
 GitHub 观察到 PR 关闭后会一次对账所有 unknown，即使开关已关闭也可完成只读对账：未合并关闭时记为 failed；已合并且最终 head 匹配该记录时记为 merged；已合并但 head 不同时记为 superseded 并保留原因，不声称旧 SHA 已合入，也不把其他 head 的 merge SHA 归给旧请求。
 
-开启会处理已有的有效批准，不只处理开启后新产生的 review。它与批准通知、`postApproval` 脚本独立：通知和脚本先运行，随后检查自动合入；脚本本身不构成合入前置检查。如脚本已合并或改变 PR，自动流程会重新读取后停止当前合入尝试。关闭开关后不再发起新 merge，已经发出的请求无法撤回。合入不等于部署，此配置不会部署服务。
+开启会处理已有的有效批准，不只处理开启后新产生的 review。它与批准通知、`post_approval` 脚本独立：通知和脚本先运行，随后检查自动合入；脚本本身不构成合入前置检查。如脚本已合并或改变 PR，自动流程会重新读取后停止当前合入尝试。关闭开关后不再发起新 merge，已经发出的请求无法撤回。合入不等于部署，此配置不会部署服务。
 
 升级前备份 SQLite。`auto_merges` 保存在工作项 JSON 中，旧版可能丢弃这些记录；回滚前保留含最新合入记录的完整备份。
 

@@ -46,11 +46,11 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 	go server.Serve(ln)
 	defer server.Close()
 	id := uuid.NewString()
-	if err := taskCommand([]string{"claim", "--task", id}); err != nil {
+	if err := run([]string{"task", "claim", "--task", id}); err != nil {
 		t.Fatal(err)
 	}
 	first := <-requests
-	if err := taskCommand([]string{"claim", "--task", id}); err != nil {
+	if err := run([]string{"task", "claim", "--task", id}); err != nil {
 		t.Fatal(err)
 	}
 	repeated := <-requests
@@ -63,11 +63,11 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 		t.Fatal("credential was not private", err)
 	}
 	args := []string{"submit", "--task", id, "--handoff", "--request-id", "fixed", "--new-sha", strings.Repeat("b", 40)}
-	if err := taskCommand(args); err != nil {
+	if err := run(append([]string{"task"}, args...)); err != nil {
 		t.Fatal(err)
 	}
 	submitted := <-requests
-	if err := taskCommand(args); err != nil {
+	if err := run(append([]string{"task"}, args...)); err != nil {
 		t.Fatal(err)
 	}
 	replayed := <-requests
@@ -76,14 +76,14 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 	if string(a) != string(b) {
 		t.Fatal("submission retry changed identity/evidence")
 	}
-	if err := taskCommand([]string{"status", "--task", id}); err != nil {
+	if err := run([]string{"task", "status", "--task", id}); err != nil {
 		t.Fatal(err)
 	}
 	if status := <-requests; status["token"] != nil {
 		t.Fatal("status leaked credential")
 	}
 	t.Setenv("INK_TARGET", "other")
-	if err := taskCommand([]string{"claim", "--task", id}); err == nil {
+	if err := run([]string{"task", "claim", "--task", id}); err == nil {
 		t.Fatal("credential reused from another route")
 	}
 }
@@ -162,7 +162,7 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 	defer server.Close()
 
 	id := uuid.NewString()
-	if err := taskCommand([]string{
+	if err := run([]string{"task",
 		"claim", "--task", id,
 		"--provider", "chat", "--target", "yu-bingtao-codex-acp", "--session", "discord:123",
 	}); err != nil {
@@ -177,7 +177,7 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 	// The private credential keeps the route, so submit does not need the
 	// original environment or repeated route flags.
 	args := []string{"submit", "--task", id, "--handoff", "--request-id", "fixed", "--new-sha", strings.Repeat("b", 40)}
-	if err := taskCommand(args); err != nil {
+	if err := run(append([]string{"task"}, args...)); err != nil {
 		t.Fatal(err)
 	}
 	submitted := <-requests
@@ -186,7 +186,7 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 		t.Fatalf("submit lost the explicit claim route: %#v", submitted["route"])
 	}
 
-	if err := taskCommand([]string{"claim", "--task", uuid.NewString(), "--target", "yu-bingtao-codex-acp"}); err == nil {
+	if err := run([]string{"task", "claim", "--task", uuid.NewString(), "--target", "yu-bingtao-codex-acp"}); err == nil {
 		t.Fatal("partial explicit route accepted")
 	}
 }
@@ -225,7 +225,7 @@ func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
 	defer server.Close()
 
 	id := uuid.NewString()
-	if err := taskCommand([]string{"claim", "--task", id}); err == nil {
+	if err := run([]string{"task", "claim", "--task", id}); err == nil {
 		t.Fatal("rejected environment claim was accepted")
 	}
 	first := <-requests
@@ -238,7 +238,7 @@ func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
 		t.Fatalf("rejected claim was not recorded: %#v %v", credential, err)
 	}
 
-	if err := taskCommand([]string{
+	if err := run([]string{"task",
 		"claim", "--task", id,
 		"--provider", "chat", "--target", "correct-project", "--session", "discord:123",
 	}); err != nil {
@@ -307,7 +307,7 @@ func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
 	if err := writeTaskCredential(path, append(data, '\n')); err != nil {
 		t.Fatal(err)
 	}
-	if err := taskCommand([]string{
+	if err := run([]string{"task",
 		"claim", "--task", id, "--replace-route",
 		"--provider", "chat", "--target", "new-target", "--session", "discord:123",
 	}); err != nil {
@@ -323,7 +323,7 @@ func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
 		t.Fatalf("replacement not persisted: %#v %v", credential, err)
 	}
 
-	if err := taskCommand([]string{"claim", "--task", id, "--replace-route"}); err == nil || !strings.Contains(err.Error(), "--replace-route requires") {
+	if err := run([]string{"task", "claim", "--task", id, "--replace-route"}); err == nil || !strings.Contains(err.Error(), "--replace-route requires") {
 		t.Fatalf("missing explicit route was not rejected: %v", err)
 	}
 }

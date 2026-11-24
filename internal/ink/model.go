@@ -127,7 +127,7 @@ type Work struct {
 	Review            *ReviewFeatures     `json:"review,omitempty"`
 	AutoMerges        []AutoMergeRun      `json:"auto_merges,omitempty"`
 	Notifications     []NotificationRun   `json:"notifications,omitempty"`
-	Approvals         []ApprovalRun       `json:"postApproval,omitempty"`
+	Approvals         []ApprovalRun       `json:"post_approval,omitempty"`
 	Workflow          Workflow            `json:"workflow"`
 	Alerts            []Alert             `json:"alerts,omitempty"`
 	Repo              string              `json:"repo"`

@@ -47,7 +47,7 @@ func TestRegistrationPersistsAndPollsWithoutRestart(t *testing.T) {
 	request(`{"repo":"acme/project","reviewer_login":"another"}`, 409)
 	request(`{"repo":"acme/denied"}`, 422)
 	request(`{"repo":"invalid"}`, 400)
-	request(`{"repo":"acme/other","postApproval":{"command":["relative"]}}`, 400)
+	request(`{"repo":"acme/other","post_approval":{"command":["relative"]}}`, 400)
 	before := calls
 	s.Poll(context.Background())
 	if calls != before+1 {
@@ -146,7 +146,7 @@ func TestApprovalHookFilteringDedupRestartAndNewSHA(t *testing.T) {
 	if err := json.Unmarshal(lines[1], &event); err != nil {
 		t.Fatal(err)
 	}
-	if event.SHA != pull.Head.SHA || event.ReviewID != 3 || event.Event != "postApproval" || event.Repository != repo.Repo {
+	if event.SHA != pull.Head.SHA || event.ReviewID != 3 || event.Event != "post_approval" || event.Repository != repo.Repo {
 		t.Fatalf("bad payload: %+v", event)
 	}
 	st, _ = loadFixture(s.store)

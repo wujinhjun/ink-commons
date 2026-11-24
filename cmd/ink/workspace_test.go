@@ -39,10 +39,10 @@ func TestWorkspaceListFallsBackWhenDaemonDisablesAPI(t *testing.T) {
 	if _, err := workspace.Git(context.Background(), source, "init", "-b", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspaceCommand([]string{"list", "--repo", source, "--json"}); err != nil {
+	if err := run([]string{"workspace", "list", "--repo", source, "--json"}); err != nil {
 		t.Fatalf("local inventory should remain available: %v", err)
 	}
-	if err := workspaceCommand([]string{"acquire", "--repo", source, "--request-id", "disabled"}); err == nil || !strings.Contains(err.Error(), "403") {
+	if err := run([]string{"workspace", "acquire", "--repo", source, "--request-id", "disabled"}); err == nil || !strings.Contains(err.Error(), "403") {
 		t.Fatalf("mutation must retain daemon refusal: %v", err)
 	}
 	if len(calls) != 2 || <-calls != http.MethodGet || <-calls != http.MethodPost {

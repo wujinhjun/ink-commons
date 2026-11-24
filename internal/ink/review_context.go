@@ -180,7 +180,7 @@ func (s *Service) reviewContext(w http.ResponseWriter, r *http.Request) {
 		err = validateContextPage(page, binding, before)
 	}
 	if err != nil {
-		fail(w, apiError{502, "cannot read development conversation history: " + err.Error()})
+		fail(w, apiError{502, "cannot read development conversation history: " + redactedError(err)})
 		return
 	}
 	// A slow history request must not return context for a superseded task or

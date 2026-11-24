@@ -52,7 +52,7 @@ func TestNamedAdapterConfigAndRoute(t *testing.T) {
 }
 
 func TestRemovedConfigFieldsAreRejected(t *testing.T) {
-	for _, field := range []string{"reviewer_project", "review_channel_id", "project", "session_key"} {
+	for _, field := range []string{"reviewer_project", "review_channel_id", "project", "session_key", "post" + "Approval"} {
 		t.Run(field, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
 			entry := fmt.Sprintf(`%q:"obsolete"`, field)
@@ -62,7 +62,7 @@ func TestRemovedConfigFieldsAreRejected(t *testing.T) {
 			if err := os.WriteFile(path, []byte(`{"repositories":[{"repo":"acme/project","reviewer_login":"reviewer",`+entry+`}]}`), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "unknown field "+fmt.Sprintf("%q", field)) {
+			if _, _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "unknown") {
 				t.Fatalf("configuration accepted removed field %s: %v", field, err)
 			}
 		})

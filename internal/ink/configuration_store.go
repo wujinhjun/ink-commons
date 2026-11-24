@@ -108,13 +108,7 @@ func (s *stateStore) initializeConfig(config Config) error {
 		return err
 	}
 	if len(records) == 0 {
-		global := sparseRepositoryValues(config.RepositoryDefaults)
-		var reliability map[string]json.RawMessage
-		_ = json.Unmarshal(jsonValue(config.Reliability), &reliability)
-		for key, value := range reliability {
-			global["execution."+key] = value
-		}
-		if err := putConfigRecord(tx, ConfigRecord{Scope: "", Values: global, Revision: 1}); err != nil {
+		if err := putConfigRecord(tx, ConfigRecord{Scope: "", Values: ConfigValues(staticGlobal(config)), Revision: 1}); err != nil {
 			return err
 		}
 		for _, repo := range config.Repositories {
@@ -162,19 +156,18 @@ func (s *Service) changeConfig(scope, key string, value json.RawMessage, unset b
 	indexed[scope] = record
 	global := indexed[""]
 	for name := range indexed {
-		effective, err := resolveConfig(name, GlobalConfig(global.Values), RepositoryOverride(indexed[name].Values), global.Revision)
-		if name == "" {
-			effective, err = resolveConfig("", GlobalConfig(global.Values), nil, global.Revision)
+		var overrides ConfigValues
+		if name != "" {
+			overrides = indexed[name].Values
 		}
+		effective, err := s.resolveRepositoryPolicy(name, global, overrides)
 		if err != nil {
-			return record, apiError{400, err.Error()}
+			return record, err
 		}
-		if err := s.validateEffective(effective.Repository); err != nil {
-			return record, apiError{400, err.Error()}
-		}
-		if name != "" && name == scope && key == "auto_merge" {
-			if err := s.validateAutoMergeIdentity(effective.Repository); err != nil {
-				return record, apiError{400, err.Error()}
+		inheritsCommand := scope == "" && key == "reviewer_command" && effective.Sources[key] != "repository"
+		if name != "" && (name == scope || inheritsCommand) && mergeIdentityInput(key) {
+			if err := s.validateRuntimeMergeIdentity(effective.Repository); err != nil {
+				return record, err
 			}
 		}
 	}
@@ -239,12 +232,9 @@ func (s *Service) registerConfig(name string, values ConfigValues) (Repository, 
 		}
 		return current.Repository, false, tx.Commit()
 	}
-	effective, err := resolveConfig(name, GlobalConfig(global.Values), RepositoryOverride(values), global.Revision)
+	effective, err := s.resolveRepositoryPolicy(name, global, values)
 	if err != nil {
-		return Repository{}, false, apiError{400, err.Error()}
-	}
-	if err := s.validateEffective(effective.Repository); err != nil {
-		return Repository{}, false, apiError{400, err.Error()}
+		return Repository{}, false, err
 	}
 	if old, ok := indexed[name]; ok {
 		if !bytes.Equal(canonicalValues(old.Values), canonicalValues(values)) {
@@ -252,8 +242,8 @@ func (s *Service) registerConfig(name string, values ConfigValues) (Repository, 
 		}
 		return effective.Repository, false, tx.Commit()
 	}
-	if err := s.validateAutoMergeIdentity(effective.Repository); err != nil {
-		return Repository{}, false, apiError{400, err.Error()}
+	if err := s.validateRuntimeMergeIdentity(effective.Repository); err != nil {
+		return Repository{}, false, err
 	}
 	global.Revision++
 	if err := putConfigRecord(tx, global); err != nil {

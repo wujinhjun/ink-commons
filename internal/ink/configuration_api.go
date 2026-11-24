@@ -34,14 +34,14 @@ func (s *Service) exportConfiguration(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusOK, map[string]any{"schema": 1, "global": global, "repositories": repositories})
 }
 
-func (s *Service) validateEffective(repo Repository) error {
+func ValidateRepositoryProvider(repo Repository, providers map[string]execution.Executor) error {
 	if repo.ReviewerRoute == nil {
 		return nil
 	}
-	if err := execution.ValidateDestination(s.providers, *repo.ReviewerRoute, true); err != nil {
+	if err := execution.ValidateDestination(providers, *repo.ReviewerRoute, true); err != nil {
 		return err
 	}
-	provider := s.providers[repo.ReviewerRoute.Provider]
+	provider := providers[repo.ReviewerRoute.Provider]
 	if normalTaskMode(repo.TaskMode) == "cooperative" {
 		_, wakes := provider.(execution.TaskWaker)
 		if !execution.Supports(provider, "wake", wakes) {
@@ -63,12 +63,27 @@ func (s *Service) validateEffective(repo Repository) error {
 	return nil
 }
 
-func (s *Service) validateAutoMergeIdentity(repo Repository) error {
+func (s *Service) validateEffective(repo Repository) error {
+	return ValidateRepositoryProvider(repo, s.providers)
+}
+
+func validateAutoMergeIdentity(up upstream, repo Repository) error {
 	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled {
 		return nil
 	}
-	if _, err := s.up.resolveMerger(repo.Repo, repo.AutoMerge.ReuseReaderIdentity, repo.ReviewerCommand); err != nil {
+	if _, err := up.resolveMerger(repo.Repo, repo.AutoMerge.ReuseReaderIdentity, repo.ReviewerCommand); err != nil {
 		return fmt.Errorf("automatic merge credentials: %w", err)
+	}
+	return nil
+}
+
+func mergeIdentityInput(key string) bool {
+	return key == "auto_merge" || key == "reviewer_command"
+}
+
+func (s *Service) validateRuntimeMergeIdentity(repo Repository) error {
+	if err := validateAutoMergeIdentity(s.up, repo); err != nil {
+		return apiError{400, StartupDiagnostic(err)}
 	}
 	return nil
 }

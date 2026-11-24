@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -55,6 +54,9 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/config", s.configuration)
 	mux.HandleFunc("GET /v1/repositories", s.listRepositories)
 	mux.HandleFunc("POST /v1/repositories", s.registerRepository)
+	const repositoryPath = "/v1/repositories/{owner}/{repo}"
+	mux.HandleFunc("PATCH "+repositoryPath, s.updateRepository)
+	mux.HandleFunc("DELETE "+repositoryPath, s.removeRepository)
 	mux.HandleFunc("GET /v1/work", s.listWork)
 	mux.HandleFunc("GET /v1/workspaces", s.workspaces)
 	mux.HandleFunc("POST /v1/workspaces", s.workspaces)
@@ -68,7 +70,10 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/notifications/ack", s.ackNotification)
 	mux.HandleFunc("GET /v1/notifications/status", s.notificationStatus)
 
-	pausedWrites := map[string]bool{"POST /v1/config": true, "DELETE /v1/config": true}
+	pausedWrites := map[string]bool{
+		"POST /v1/config": true, "DELETE /v1/config": true,
+		"PATCH " + repositoryPath: true, "DELETE " + repositoryPath: true,
+	}
 	allowWhilePaused := func(path, action string, handle http.HandlerFunc) {
 		pattern := "POST " + path + "/" + action
 		pausedWrites[pattern] = true
@@ -116,10 +121,15 @@ func timestamp(unix int64) string {
 func (s *Service) selfCheck(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	for _, repo := range s.repositories() {
+	repos, err := s.runtimeRepositories()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	for _, repo := range repos {
 		var pulls []Pull
 		if _, err := s.up.gitHubGet(ctx, "/repos/"+repo.Repo+"/pulls?state=open&per_page=1", &pulls); err != nil {
-			reply(w, 503, map[string]string{"repository": repo.Repo, "error": err.Error()})
+			reply(w, 503, map[string]string{"repository": repo.Repo, "error": redactedError(err)})
 			return
 		}
 	}
@@ -226,6 +236,10 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		reply(w, 200, work)
+		return
+	}
+	if _, err := s.store.effectiveConfig(repo); err != nil {
+		fail(w, err)
 		return
 	}
 	// Return an existing reviewer assignment even during delivery so a
@@ -393,7 +407,7 @@ func applyChange(work *Work, action string, change workChange, now time.Time) er
 		work.Task.Delivery, work.Task.Error, work.Task.RetryAt = "pending", "", time.Time{}
 		work.Task.AttemptsExhausted = false
 	default:
-		return apiError{404, fmt.Sprintf("unknown action %q", action)}
+		return apiError{404, "unknown work action"}
 	}
 	work.Version++
 	work.derive(now)

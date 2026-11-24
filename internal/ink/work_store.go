@@ -63,61 +63,69 @@ func (s *stateStore) listWork() ([]*Work, error) {
 // The revision fences stale aggregates while Service.mu still protects the
 // existing read-modify-write and external side effect boundaries.
 func (s *stateStore) saveWork(work *Work) error {
-	if !ValidRepository(work.Repo) || work.Pull.Number <= 0 {
-		return fmt.Errorf("invalid PR identity %q", keyForWork(work))
-	}
-	payload, err := json.Marshal(work)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	revision, err := writeWork(tx, work)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	work.storedRevision = revision
+	return nil
+}
+
+func writeWork(tx *sql.Tx, work *Work) (int64, error) {
+	if !ValidRepository(work.Repo) || work.Pull.Number <= 0 {
+		return 0, fmt.Errorf("invalid PR identity %q", keyForWork(work))
+	}
+	payload, err := json.Marshal(work)
+	if err != nil {
+		return 0, err
+	}
 	ctx := context.Background()
 	q := statedb.New(tx)
 	params := workIndex(work)
 	params.Payload = string(payload)
 	updated, err := q.SaveWork(ctx, params)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if updated == 0 {
 		row, err := q.LoadWork(ctx, params.ID)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if row.Revision == work.storedRevision && row.Payload == params.Payload {
-			return nil
+			return row.Revision, nil
 		}
-		return fmt.Errorf("work %s changed since it was read", params.ID)
+		return 0, fmt.Errorf("work %s changed since it was read", params.ID)
 	}
 	if err := q.DeleteWorkTasks(ctx, params.ID); err != nil {
-		return err
+		return 0, err
 	}
 	for _, t := range work.executionTasks() {
 		if t.ID != "" {
 			if err := q.PutWorkTask(ctx, statedb.PutWorkTaskParams{TaskID: t.ID, WorkID: params.ID}); err != nil {
-				return err
+				return 0, err
 			}
 		}
 	}
 	if err := q.DeleteWorkNotifications(ctx, params.ID); err != nil {
-		return err
+		return 0, err
 	}
 	for _, n := range work.Notifications {
 		if n.EventID != "" {
 			if err := q.PutWorkNotification(ctx, statedb.PutWorkNotificationParams{EventID: n.EventID, WorkID: params.ID}); err != nil {
-				return err
+				return 0, err
 			}
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	work.storedRevision = params.Revision
-	return nil
+	return params.Revision, nil
 }
 
 func workIndex(w *Work) statedb.SaveWorkParams {

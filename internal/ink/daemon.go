@@ -26,6 +26,9 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 		return err
 	}
 	defer lock.Close()
+	if err := migrateStateV6(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("migrate state database: %w", err)
+	}
 	service, err := NewService(cfg, statePath, providers)
 	if err != nil {
 		return err

@@ -9,7 +9,26 @@ package statedb
 
 import (
 	"context"
+	"database/sql"
 )
+
+const deleteRepositoryPushes = `-- name: DeleteRepositoryPushes :exec
+DELETE FROM pushes WHERE repo = ?
+`
+
+func (q *Queries) DeleteRepositoryPushes(ctx context.Context, repo string) error {
+	_, err := q.db.ExecContext(ctx, deleteRepositoryPushes, repo)
+	return err
+}
+
+const deleteRuntimeConfig = `-- name: DeleteRuntimeConfig :exec
+DELETE FROM runtime_config WHERE scope = ?
+`
+
+func (q *Queries) DeleteRuntimeConfig(ctx context.Context, scope string) error {
+	_, err := q.db.ExecContext(ctx, deleteRuntimeConfig, scope)
+	return err
+}
 
 const deleteWorkNotifications = `-- name: DeleteWorkNotifications :exec
 DELETE FROM work_notifications WHERE work_id = ?
@@ -27,6 +46,17 @@ DELETE FROM work_tasks WHERE work_id = ?
 func (q *Queries) DeleteWorkTasks(ctx context.Context, workID string) error {
 	_, err := q.db.ExecContext(ctx, deleteWorkTasks, workID)
 	return err
+}
+
+const hasRuntimeConfig = `-- name: HasRuntimeConfig :one
+SELECT EXISTS (SELECT 1 FROM runtime_config WHERE scope = ?)
+`
+
+func (q *Queries) HasRuntimeConfig(ctx context.Context, scope string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, hasRuntimeConfig, scope)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const listBlockedNoticePending = `-- name: ListBlockedNoticePending :many
@@ -110,6 +140,39 @@ func (q *Queries) ListHandoffPending(ctx context.Context) ([]string, error) {
 	return items, nil
 }
 
+const listLiveWorkspaceClaims = `-- name: ListLiveWorkspaceClaims :many
+SELECT repository, task_id FROM workspace_allocations
+WHERE state IN ('preparing', 'active')
+`
+
+type ListLiveWorkspaceClaimsRow struct {
+	Repository sql.NullString
+	TaskID     string
+}
+
+func (q *Queries) ListLiveWorkspaceClaims(ctx context.Context) ([]ListLiveWorkspaceClaimsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveWorkspaceClaims)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLiveWorkspaceClaimsRow
+	for rows.Next() {
+		var i ListLiveWorkspaceClaimsRow
+		if err := rows.Scan(&i.Repository, &i.TaskID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPollPending = `-- name: ListPollPending :many
 SELECT number FROM work_items WHERE repo = ? AND poll_pending ORDER BY number
 `
@@ -157,6 +220,38 @@ func (q *Queries) ListPushes(ctx context.Context) ([]Push, error) {
 			&i.Route,
 			&i.ObservedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRepositoryWork = `-- name: ListRepositoryWork :many
+SELECT revision, payload FROM work_items WHERE repo = ?
+`
+
+type ListRepositoryWorkRow struct {
+	Revision int64
+	Payload  string
+}
+
+func (q *Queries) ListRepositoryWork(ctx context.Context, repo string) ([]ListRepositoryWorkRow, error) {
+	rows, err := q.db.QueryContext(ctx, listRepositoryWork, repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRepositoryWorkRow
+	for rows.Next() {
+		var i ListRepositoryWorkRow
+		if err := rows.Scan(&i.Revision, &i.Payload); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

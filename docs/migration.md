@@ -1,10 +1,14 @@
 # Ink Commons 单实例切换检查清单
 
-## 从旧版切换到 SQLite v6
+## 从 SQLite v6 升级到 v7
+
+先停止旧 daemon，并用旧二进制保存 SQLite 快照。将启动配置、配置管理调用和 hook 事件消费者的审批字段改成 `post_approval`。新版 `ink serve` 在持有状态目录锁时自动将 v6 数据库迁到 v7，保留配置 revision、审批去重收据、任务快照、通知和工作区状态。回滚 v6 时使用升级前的备份，按 GitHub 与执行端实际状态核对升级后产生的副作用。
+
+## 从旧版切换到新 SQLite 实例
 
 1. 选在途 PR 较少的窗口。让现有领取者完成交接，或记录每条在途 PR 的 head SHA、审查/合入状态、会话及本地 worktree。确认遗留执行和延迟请求已停止，再停止旧 daemon。
 2. 用旧版 `ink state backup` 保存 SQLite 快照（更早的 JSON 实例保存原始状态目录），另存启动配置、领取凭据和本地 worktree。保留原数据目录及旧二进制用于回滚。
-3. 选择新的空目录，使用新版执行 `ink state init -data /private/ink/state-v6`。用 `ink serve -config /private/ink/config.json -data /private/ink/state-v6 -config-only` 核对部署和运行期配置。将旧路由字段改为 `reviewer_route` 内的 `provider`、`target`、`session`，再注册所需仓库，先保持自动派发路由、自动合入和批准 hook 关闭。
+3. 选择新的空目录，使用新版执行 `ink state init --data /private/ink/state-v7`。用 `ink serve --config /private/ink/config.json --data /private/ink/state-v7 --config-only` 核对部署和运行期配置。将旧路由字段改为 `reviewer_route` 内的 `provider`、`target`、`session`，再注册所需仓库，先保持自动派发路由、自动合入和批准 hook 关闭。
 4. 对照 GitHub 核对仍开放的 PR，特别是已经批准或仍有合入请求的 PR。把 daemon 和本地 CLI 的路径切到新目录，启动轮询以观察开放 PR。核对工作项后按需重新关联开发会话、指派 reviewer、保留原 worktree，再逐项启用自动处理。旧任务凭据与未决回执留在旧实例。
 5. 需回滚时，先停止新版，核对新版运行期间已经发生的 GitHub 与执行端副作用。用旧二进制和保留的原状态目录恢复。始终让同一批 PR 由一个 daemon 处理。
 
@@ -27,7 +31,7 @@
 恢复后先以目标服务用户启动配置核查模式。该模式暂停轮询和派发。本地 socket 支持修改运行期配置、改派工作项、记录旧执行停止确认，以及使用原凭据交接或重试 cooperative 任务。领取新任务仍然关闭。以下命令中的路径应替换为目标环境的实际路径。
 
 ```sh
-ink serve -config /private/ink/config.json -data /private/ink/state -config-only
+ink serve --config /private/ink/config.json --data /private/ink/state --config-only
 ```
 
 macOS 可以用 `manage.py stage` 暂存发布包，确保 LaunchDaemon 已停止，再以服务用户用暂存时的 Python 在前台运行该版本目录中的 `runtime.py --config-only`。这个入口会加载部署凭据。下方的 `INK_DATA_DIR` 应设为暂存版本 `deployment.json` 中的 `data`。
@@ -42,7 +46,7 @@ ink config list --repo example/project --effective
 ink config list --repo example/project --pr 42 --effective
 ```
 
-核对 `reviewer_login`、`reviewer_command`、`human_developer` 和 `reviewer_route`，用 [`ink config set` 或 `unset`](configuration.md#cli) 修正相应作用域。PR 的显式指派可覆盖仓库设置。将 `postApproval.command` 指向目标主机上可执行的绝对路径，并在恢复批准处理前部署该文件。将显式 `task_blocked.discord_channel_id` 改为包含 provider、target、session 的 `task_blocked.route`。沿用 v6 数据库时，由旧版 daemon 先 unset 所有含旧字段的阻塞通知配置，切换后通过新版恢复。纯会话 ID 的历史通知仅在能匹配原任务的冻结来源时恢复。若要保留按开发会话自动放置，移除旧 cc-connect 审查路由中此前被忽略的默认 `parent`，因为具名路由现在会采用它。
+核对 `reviewer_login`、`reviewer_command`、`human_developer` 和 `reviewer_route`，用 [`ink config set` 或 `unset`](configuration.md#cli) 修正相应作用域。PR 的显式指派可覆盖仓库设置。将 `post_approval.command` 指向目标主机上可执行的绝对路径，并在恢复批准处理前部署该文件。将显式 `task_blocked.discord_channel_id` 改为包含 provider、target、session 的 `task_blocked.route`。沿用 v6 数据库时，由旧版 daemon 先 unset 所有含旧字段的阻塞通知配置，切换后通过新版恢复。纯会话 ID 的历史通知仅在能匹配原任务的冻结来源时恢复。若要保留按开发会话自动放置，移除旧 cc-connect 审查路由中此前被忽略的默认 `parent`，因为具名路由现在会采用它。
 
 已冻结的任务配置、投递回执、PR 负责人、会话绑定和已准备的批准事件会随备份恢复。用 [工作项 API](../README.md#本地-api) 逐项核对 `config_snapshot`、显式指派和运行状态。改全局或仓库默认值只会影响后续配置解析。已保留的批准事件继续沿用其已记录的命令和去重记录。参见 [任务生效边界](configuration.md#任务生效边界)。
 
