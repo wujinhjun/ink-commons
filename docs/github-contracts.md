@@ -90,3 +90,17 @@ submitted it. A replacement PAT or wrapper cannot query that request. Restore
 the submitting credential to resume lookup. App signing-key rotation preserves
 the installation identity. For records predating identity references, Ink
 retains the request and reconciles it against the observed PR outcome.
+
+## Conditional observations
+
+Polling uses conditional GETs for authenticated open PR lists, PR details, and
+review pages. Each cache entry keeps the complete URL, the ETag, the response
+body, and its pagination links in memory. The key also includes the reader's
+credential scope. A 304 is reconciled locally with the stored page and links.
+Anonymous reads and the legacy HTTP wrapper use full responses because those
+paths do not expose a token scope to the cache. Checks, conflict diagnosis,
+handoff verification, and merge preflight use fresh requests.
+
+Secondary rate limits pause both GitHub roles for the server's `Retry-After`
+interval or for exponential backoff when the header is absent. A primary
+rate limit cools down the affected role until GitHub's reset time.

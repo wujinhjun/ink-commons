@@ -117,6 +117,8 @@ func checkCommandDigest(command, digest string) error {
 }
 
 type upstream struct {
+	observations                 *observationCache
+	observeETags                 bool
 	credential, mergerCredential *GitHubCredential
 	expectedIdentity             string
 	tokens                       *tokenCache
@@ -136,11 +138,12 @@ type upstream struct {
 
 func newUpstream(token string) upstream {
 	return upstream{
-		lastOK:   new(atomic.Int64),
-		tokens:   &tokenCache{entries: make(map[tokenSlot]tokenCacheEntry), running: make(map[tokenSlot]chan struct{})},
-		throttle: &githubThrottle{primary: make(map[githubRole]cooldown)},
-		token:    token,
-		github:   "https://api.github.com",
+		observations: newObservationCache(),
+		lastOK:       new(atomic.Int64),
+		tokens:       &tokenCache{entries: make(map[tokenSlot]tokenCacheEntry), running: make(map[tokenSlot]chan struct{})},
+		throttle:     &githubThrottle{primary: make(map[githubRole]cooldown)},
+		token:        token,
+		github:       "https://api.github.com",
 		http: &http.Client{
 			Timeout:       10 * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
@@ -174,6 +177,9 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 	}
 	var res *http.Response
 	var token string
+	var cacheKey observationCacheKey
+	var cached cachedObservation
+	var conditional bool
 	if u.command != "" {
 		if u.expectedIdentity != "" {
 			if err := u.checkMergeIdentity(repo); err != nil {
@@ -193,6 +199,21 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 		}
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		if method == http.MethodGet {
+			if u.observeETags && role == githubReader && token != "" {
+				cacheKey = observationCacheKey{
+					scope: tokenScope{u.apiHost(), strings.ToLower(repo), fingerprint(token), role},
+					url:   req.URL.String(),
+					api:   version,
+				}
+				cached, conditional = u.observations.get(cacheKey)
+				if conditional {
+					req.Header.Set("If-None-Match", cached.tag)
+				}
+			} else {
+				req.Header.Set("Cache-Control", "no-cache")
+			}
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
 		if version != "" {
@@ -219,6 +240,16 @@ func (u upstream) gitHubScopedJSON(ctx context.Context, repo, method, path, prof
 	}
 	if err := u.throttle.response(res, started, time.Now(), role); err != nil {
 		return nil, status, err
+	}
+	if cacheKey.url != "" {
+		header, handled, err := u.observations.read(res, cacheKey, cached, conditional, started, result)
+		if err != nil {
+			return nil, status, err
+		}
+		if handled {
+			u.lastOK.Store(time.Now().Unix())
+			return header, http.StatusOK, nil
+		}
 	}
 	if (status < 200 || status >= 300) && !slices.Contains(acceptedErrors, status) {
 		return nil, status, diagnosticError(fmt.Sprintf("upstream HTTP %d", status))
@@ -256,7 +287,7 @@ func listPages[T any](ctx context.Context, u upstream, path string) ([]T, error)
 			return nil, err
 		}
 		all = append(all, items...)
-		if !strings.Contains(header.Get("Link"), `rel="next"`) {
+		if !strings.Contains(strings.Join(header.Values("Link"), ","), `rel="next"`) {
 			return all, nil
 		}
 	}
