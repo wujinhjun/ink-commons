@@ -44,7 +44,7 @@ daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`�
 
 `github_command` 和 `github_merger_command` 指向服务用户可运行的绝对路径。可以在启动 JSON 中设置 `github_read_args` 和 `github_merge_args`，分别替换读取和合入命令的参数前缀。参数按数组逐项传入，不经过 shell。`{repo}` 会替换为当前请求的 `owner/repo`。合入参数也用于显式复用 reader App 时的合入调用。
 
-字段缺省或为 `null` 时沿用原有参数 `--profile inspect|code -R owner/repo`。`[]` 表示直接调用 `api` 子命令，适用于采用标准 GitHub CLI 参数的客户端或包装器。它们需支持 `api --include --method METHOD ENDPOINT`，按需接受 `--header` 和 `--input -`，并在标准输出返回含状态行和响应头的 HTTP 响应。macOS 自动升级也使用读取前缀，并要求客户端支持 `api … --jq` 和 `release download`。
+字段缺省或为 `null` 时沿用原有参数 `--profile inspect|code -R owner/repo`。`[]` 表示直接调用 `api` 子命令，适用于采用标准 GitHub CLI 参数的客户端或包装器。它们需支持 `api --include --method METHOD ENDPOINT`，按需接受 `--header` 和 `--input -`，并在标准输出返回含状态行和响应头的 HTTP 响应。
 
 参数数组只放命令选项。凭据由服务用户运行的客户端或包装器提供。直接使用 `gh` 时，它会采用该进程可用的 GitHub 身份。需要仓库范围的短期 App 凭据时，使用可按 `{repo}` 申请凭据的包装器。自动合入沿用现有身份策略和摘要校验。
 

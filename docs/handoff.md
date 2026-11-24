@@ -14,7 +14,7 @@ ink register --task-mode cooperative --github-login REVIEWER --provider PROVIDER
 
 开关影响尚未首次派发的新任务；已派发任务的模式及负责人快照不被改写。旧任务和历史 `unknown` 仍按原执行确认规则处理，不能通过打开开关或普通 `retry` 绕过。首次启用应在工作空闲、旧任务已完成核验/恢复后进行。关闭开关也不会撤销已经领取的 cooperative 任务，仍需交接。旧交接完成后，新一轮 legacy 审批恢复 legacy 行为，不会被已完成的 cooperative 历史永久阻塞。
 
-当前只有 cc-connect 实现 `execution.TaskWaker`。其他 provider 不会退回直接执行，会在 API 中显示不支持唤醒；也可通过本机 CLI 人工领取。Agent 必须能访问同一个私有 Unix socket。
+所有在静态 `providers` 中声明了 `wake` 能力的 HTTP Adapter（包括独立入口 `ink-adapter-ccconnect`）均可发送唤醒通知。未声明 `wake` 能力的 provider 不会退回直接执行，会在 API 中显示不支持唤醒；也可通过本机 CLI 人工领取。Agent 必须能访问同一个私有 Unix socket。
 
 ## 三种信息分别保存
 
@@ -38,7 +38,7 @@ ink register --task-mode cooperative --github-login REVIEWER --provider PROVIDER
 
 ## Agent 初始化与回合边界
 
-在 Agent 所属用户下执行 `ink init` 和 `ink init --check`，安装完整协作 skill；具体位置、自定义目录及冲突处理见 [初始化说明](../README.md#初始化-agent-协作指令)。升级 CLI 后重新初始化。安装和链接不会刷新活跃会话，首次送审应明确要求 Agent 读取 `ink-commons-workflow`。
+在 Agent 所属用户下执行 `ink init` 和 `ink init --check`，安装完整协作 skill；具体位置、自定义目录及冲突处理见 [部署指南 · Agent 协作技能](deployment.md#agent-workflow-skills) 与 [CLI 参考](cli.md#health-state-and-setup)。升级 CLI 后重新初始化。安装和链接不会刷新活跃会话，首次送审应明确要求 Agent 读取 `ink-commons-workflow`。
 
 首次送审尚未领取 task：确认 PR 已关联、reviewer 已配置并标记 Ready 后，报告送审状态并结束回合，不伪造 task handoff。收到后续 wake 再领取；不能在原回合通过循环查询自行返工。任务交接后也应报告并结束回合；结果核验和下一轮唤醒由同砚负责，不用 sleep、后台轮询或马上领取后继任务来维持长回合。单次状态查询用于诊断，不作为等待循环。
 
@@ -124,9 +124,9 @@ ink task retry --task TASK_UUID
 
 ## 升级与回滚
 
-备份 SQLite v6 可保留任务领取与交接记录。任务、交接与通知索引和 PR payload 在同一事务更新。旧库切换按[单实例检查清单](migration.md)执行。
+备份 SQLite schema v7 可保留任务领取与交接记录。任务、交接与通知索引和 PR payload 在同一事务更新。从 v6 自动升级或跨版本切换按 [单实例检查清单](migration.md) 执行。
 
-不要把数据库 user_version 手工改回 2。若需降级，先交回/核查所有未决 cooperative 和旧执行任务，并保留最新完整备份；显式转换和核对状态之后才可使用旧版。恢复升级前快照会丢失之后发生的任务交接。
+不要手工调低数据库的 `PRAGMA user_version`。若需回滚旧版本，先交回/核查所有未决 cooperative 和旧执行任务，并保留最新完整备份；恢复升级前快照会丢失之后发生的任务交接。
 
 ## 本地 API
 

@@ -164,13 +164,13 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 	id := uuid.NewString()
 	if err := run([]string{"task",
 		"claim", "--task", id,
-		"--provider", "chat", "--target", "yu-bingtao-codex-acp", "--session", "discord:123",
+		"--provider", "chat", "--target", "review-project", "--session", "discord:123",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	claim := <-requests
 	route, ok := claim["route"].(map[string]any)
-	if !ok || route["provider"] != "chat" || route["target"] != "yu-bingtao-codex-acp" || route["session"] != "discord:123" {
+	if !ok || route["provider"] != "chat" || route["target"] != "review-project" || route["session"] != "discord:123" {
 		t.Fatalf("explicit claim route not sent: %#v", claim["route"])
 	}
 
@@ -182,11 +182,11 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 	}
 	submitted := <-requests
 	route, ok = submitted["route"].(map[string]any)
-	if !ok || route["target"] != "yu-bingtao-codex-acp" || route["session"] != "discord:123" {
+	if !ok || route["target"] != "review-project" || route["session"] != "discord:123" {
 		t.Fatalf("submit lost the explicit claim route: %#v", submitted["route"])
 	}
 
-	if err := run([]string{"task", "claim", "--task", uuid.NewString(), "--target", "yu-bingtao-codex-acp"}); err == nil {
+	if err := run([]string{"task", "claim", "--task", uuid.NewString(), "--target", "review-project"}); err == nil {
 		t.Fatal("partial explicit route accepted")
 	}
 }

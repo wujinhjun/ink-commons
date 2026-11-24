@@ -49,8 +49,7 @@ and poll the stored request until reconciled. A successor waits for retargeting
 and approval of its rebased head where applicable. Neither path bypasses rules.
 A v0.2+ `github_auto_merge` strategy can substitute native GitHub submission and
 reconciliation while preserving role isolation, the SHA-bound policy boundary
-and GitHub as the authority for business completion. Task 4 implements the
-interfaces against the existing behavior.
+and GitHub as the authority for business completion.
 
 ## Daemon credential configuration
 

@@ -136,7 +136,7 @@ executions. Successful runs do not advance GitHub state or automatically rerun.
 
 cc-connect's webhook receives task and attempt IDs for diagnostics. Ambiguous
 delivery through a provider without status and stop support requires explicit
-operator confirmation before retry. The v6 database records new attempts before
+operator confirmation before retry. The v7 database records new attempts before
 delivery. Follow the [single-instance checklist](migration.md) to switch from
 an earlier schema.
 
