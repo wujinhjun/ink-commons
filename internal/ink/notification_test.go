@@ -82,8 +82,10 @@ func TestPollNotifiesDeveloperOfApprovalOnceAcrossRestart(t *testing.T) {
 			w := httptest.NewRecorder()
 			if strings.HasSuffix(req.URL.Path, "/reviews") {
 				reply(w, 200, []Review{r})
-			} else {
+			} else if strings.HasSuffix(req.URL.Path, "/pulls") {
 				reply(w, 200, []Pull{p})
+			} else {
+				reply(w, 200, p)
 			}
 			return w.Result(), nil
 		})
@@ -266,7 +268,7 @@ func TestNotificationPreservesConcurrentWorkChangesAndExecutionHistory(t *testin
 		live := st.Work[key(repo.Repo, p.Number)]
 		live.Developer = Assignee{GitHubLogin: "human-takeover"}
 		live.Pull.Head.SHA = strings.Repeat("c", 40)
-		live.derive()
+		live.derive(time.Now())
 		if err := saveFixture(s.store, st); err != nil {
 			t.Fatal(err)
 		}

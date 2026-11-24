@@ -94,7 +94,7 @@ func directory() (string, error) {
 func serve(args []string) error {
 	dir, err := directory()
 	if err != nil {
-		return err
+		return errors.New("cannot resolve daemon state directory")
 	}
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	configPath := flags.String("config", "config.json", "configuration file")
@@ -109,13 +109,16 @@ func serve(args []string) error {
 	}
 	config, providers, err := loadConfig(*configPath)
 	if err != nil {
-		return err
+		return errors.New("cannot load daemon configuration")
 	}
 	config.PollGate = *gate
 	config.ConfigOnly = *configOnly
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return ink.Serve(ctx, config, *data, providers)
+	if err := ink.Serve(ctx, config, *data, providers); err != nil {
+		return errors.New("daemon could not start or continue serving")
+	}
+	return nil
 }
 
 func push(remote string) error {

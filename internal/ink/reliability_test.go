@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -55,7 +56,7 @@ func reliabilityService(t *testing.T, c Reliability) (*Service, *reliableExecuto
 	t.Cleanup(func() { s.Close() })
 	w := &Work{Repo: repo.Repo, Linked: true, Reviewer: Assignee{GitHubLogin: "reviewer", Route: repo.ReviewerRoute}}
 	w.Pull.Number, w.Pull.State, w.Pull.Head.SHA = 42, "open", strings.Repeat("a", 40)
-	w.derive()
+	w.derive(time.Now())
 	if err = s.store.saveWork(w); err != nil {
 		t.Fatal(err)
 	}
@@ -304,4 +305,22 @@ func TestExecutionDeadlines(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (s *Service) reconcileExecutions(ctx context.Context) error {
+	s.mu.Lock()
+	ids, err := statedb.New(s.store.db).ListExecutionPending(ctx)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := s.reconcileWork(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

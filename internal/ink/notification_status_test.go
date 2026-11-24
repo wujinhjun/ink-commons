@@ -400,7 +400,7 @@ func TestPollReconcilesOnlyPendingClosedPullsAfterRestart(t *testing.T) {
 		pull.Head.SHA = sha
 		pulls[fmt.Sprintf("/repos/acme/project/pulls/%d", n)] = pull
 		work := &Work{Repo: repo.Repo, Pull: pull, Linked: true, Developer: owner, DeveloperOverride: &owner}
-		work.derive()
+		work.derive(time.Now())
 		switch n {
 		case 10, 11:
 			event := "review_approved"
@@ -443,7 +443,7 @@ func TestPollReconcilesOnlyPendingClosedPullsAfterRestart(t *testing.T) {
 		}
 		return out.Result(), nil
 	})
-	if err := s.pollRepo(context.Background(), repo); err != nil {
+	if err := pollRepoForTest(context.Background(), s, repo); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(readNumbers, []int{10, 12}) {
@@ -463,7 +463,7 @@ func TestPollReconcilesOnlyPendingClosedPullsAfterRestart(t *testing.T) {
 		t.Fatalf("pending stack request not reconciled from closed PR: %+v, %v", merged, err)
 	}
 	readNumbers = nil
-	if err := s.pollRepo(context.Background(), repo); err != nil || len(readNumbers) != 0 {
+	if err := pollRepoForTest(context.Background(), s, repo); err != nil || len(readNumbers) != 0 {
 		t.Fatalf("settled PRs kept polling: %v, %v", readNumbers, err)
 	}
 }

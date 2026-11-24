@@ -44,12 +44,18 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 		s.mu.Unlock()
 		return err
 	}
-	if w == nil {
+	if w == nil || !matchesObservation(ctx, w) {
 		s.mu.Unlock()
 		return nil
 	}
-	if w.supersedeStaleNotifications(time.Now()) {
-		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	if effective, ok := s.repo(repo.Repo); ok {
+		repo = effective
+	} else {
+		s.mu.Unlock()
+		return nil
+	}
+	if w.supersedeStaleNotifications(s.now()) {
+		s.refreshWorkflow(w, s.now())
 		if err := s.store.saveWork(w); err != nil {
 			s.mu.Unlock()
 			return err
@@ -63,7 +69,7 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 	index := -1
 	for i, n := range w.Notifications {
 		if n.SHA == sha && n.Event == event {
-			if !n.pendingDelivery() || time.Now().Before(n.RetryAt) {
+			if !n.pendingDelivery() || s.now().Before(n.RetryAt) {
 				s.mu.Unlock()
 				return nil
 			}
@@ -94,14 +100,14 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 		EventID: fmt.Sprintf("%s:%s:%s", id, sha, event), Event: event,
 		Repository: repo.Repo, Number: number, URL: w.Pull.URL, SHA: sha,
 		Reviewer: review.User.Login, ReviewID: review.ID, ReviewURL: review.URL,
-	}, State: "unknown", StartedAt: time.Now()}
+	}, State: "unknown", StartedAt: s.now()}
 	if index >= 0 {
 		n = w.Notifications[index]
 		if w.Developer.Route == nil || n.Route == nil || *w.Developer.Route != *n.Route {
 			w.Notifications[index].State = "superseded"
-			w.Notifications[index].FinishedAt = time.Now()
+			w.Notifications[index].FinishedAt = s.now()
 			w.Notifications[index].RetryAt = time.Time{}
-			w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+			s.refreshWorkflow(w, s.now())
 			err = s.store.saveWork(w)
 			s.mu.Unlock()
 			return err
@@ -141,24 +147,24 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 			if delay > time.Hour {
 				delay = time.Hour
 			}
-			n.RetryAt = time.Now().Add(delay)
+			n.RetryAt = s.now().Add(delay)
 		}
 	} else {
-		n.FinishedAt = time.Now()
+		n.FinishedAt = s.now()
 	}
 	if index < 0 {
 		w.Notifications = append(w.Notifications, n)
 	} else {
 		w.Notifications[index] = n
 	}
-	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(w, s.now())
 	err = s.store.saveWork(w)
 	s.mu.Unlock()
 	if err != nil || n.State != "unknown" {
 		return err
 	}
 	err = notifier.Notify(ctx, *n.Route, n.Notification)
-	n.State, n.FinishedAt = "accepted", time.Now()
+	n.State, n.FinishedAt = "accepted", s.now()
 	if n.RequireACK {
 		n.State, n.FinishedAt = "awaiting_ack", time.Time{}
 	}
@@ -177,7 +183,7 @@ func (s *Service) notifyEvent(ctx context.Context, repo Repository, number int, 
 				live.Notifications[i] = n
 			}
 		}
-		live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		s.refreshWorkflow(live, s.now())
 		return s.store.saveWork(live)
 	}
 	return nil
@@ -220,7 +226,7 @@ func (s *Service) reserveMergedNotification(w *Work, repo Repository, run AutoMe
 	n := NotificationRun{Notification: execution.Notification{
 		EventID: id, Event: "pr_merged", Repository: w.Repo, Number: w.Pull.Number, URL: w.Pull.URL,
 		SHA: run.SHA, Reviewer: run.Reviewer, ReviewID: run.ReviewID, Merge: mergeStatus(w, repo, run.SHA),
-	}, State: "unknown", StartedAt: time.Now()}
+	}, State: "unknown", StartedAt: s.now()}
 	for _, r := range w.Reviews {
 		if r.ID == run.ReviewID {
 			n.ReviewURL = r.URL
@@ -229,7 +235,7 @@ func (s *Service) reserveMergedNotification(w *Work, repo Repository, run AutoMe
 	}
 	if w.Developer.Route == nil {
 		n.State = "manual"
-		n.FinishedAt = time.Now()
+		n.FinishedAt = s.now()
 	} else {
 		route := *w.Developer.Route
 		n.Route = &route

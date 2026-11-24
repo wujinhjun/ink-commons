@@ -2,6 +2,9 @@
 
 Ink Commons 集中管理所有仓库的配置和状态。业务仓库不需要 `.ink` 文件、专用分支、GitHub 配置或 Git hook，也不需要知道同砚的存在。操作者可以在任意目录执行 `ink register owner/repository` 和 `ink config ... --repo owner/repository`。可选 pre-push hook 只是开发会话来源的一种上报方式；也可由中心 API 的 `link` 登记，不是配置分发机制。
 
+
+daemon 静态配置中的 `log_level` 设置最低日志级别，默认 `info`，也可设为 `debug`、`warn` 或 `error`。`log_format` 支持 `text`（默认）和 `json`。日志记录操作、PR 编号和告警代码等字段。告警明细可通过私有 Unix socket 查询。
+
 ## 存储与作用域
 
 - JSON 的 `DaemonConfig` 管理静态启动参数：`poll_seconds`、`github_command`、`cc_connect_url`、`http_provider_url`、`http_provider_execution`。状态目录和部署 gate 沿用启动参数；凭据来自 daemon 环境。修改这些参数需要重启。
@@ -97,7 +100,7 @@ CLI 经仅本地 daemon 用户可访问的 Unix socket 调用：
 
 历史读取在发起请求和返回结果前均核对当前任务的快照权限、来源及读取边界。当前仓库关闭历史开关可撤销访问；之后重新开启不能扩大已派发任务的快照权限，改派开发者也不会切换该 reviewer 任务的来源 thread。
 
-postApproval 在事件准备执行时重新读取配置，把 hook 和 generation 写入批准事件记录后执行。继续按仓库、PR、SHA 去重，不自动重放失败或结果不明的事件。自动合入仍按现有流程在保留副作用前重新核对中心配置和 GitHub 状态。
+轮询最多同时发现 4 个仓库、处理 8 个 PR。同一 PR 的后台工作串行执行。批准后先持久化待执行事件，合入判断完成后由独立的 2 个 worker 执行 postApproval。执行前重验 PR head、批准和配置。hook 默认超时 60 秒，可通过 `timeout_seconds` 覆盖。按仓库、PR、SHA 去重，失败或结果不明的事件不会自动重放。
 
 ## 初始化与备份
 

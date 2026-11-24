@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 // Reliability values are seconds; zero selects a default, including MaxAttempts.
@@ -167,24 +166,6 @@ func (c Reliability) expired(a Attempt, now time.Time) bool {
 }
 
 // Reconcile independently of GitHub availability, including retired task versions.
-func (s *Service) reconcileExecutions(ctx context.Context) error {
-	s.mu.Lock()
-	ids, err := statedb.New(s.store.db).ListExecutionPending(ctx)
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err := s.reconcileWork(ctx, id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Service) reconcileWork(ctx context.Context, id string) error {
 	s.mu.Lock()
 	if s.delivering[id] {
@@ -210,7 +191,7 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 			if execution.Terminal(a.State) {
 				continue
 			}
-			now := time.Now()
+			now := s.now()
 			expired := c.expired(*a, now)
 			retired := w.Task == nil || w.Task.ID != t.ID
 			provider := s.providers[a.Route.Provider]
@@ -226,7 +207,7 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 			}
 			r, queryErr := monitor.Status(ctx, a.Route, a.Request)
 			if queryErr == nil {
-				queryErr = validateReceipt(*a, r, time.Now())
+				queryErr = validateReceipt(*a, r, s.now())
 			}
 			if queryErr == nil {
 				a.Receipt, a.State, a.Error = r, r.State, ""
@@ -236,10 +217,10 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 			} else {
 				a.Error = "query execution: " + queryErr.Error()
 			}
-			expired = c.expired(*a, time.Now())
+			expired = c.expired(*a, s.now())
 			if !execution.Terminal(a.State) && (retired || expired) {
 				if a.StopRequestedAt.IsZero() {
-					a.StopRequestedAt = time.Now()
+					a.StopRequestedAt = s.now()
 					a.RecoveryReason = "execution timeout"
 					if retired {
 						a.RecoveryReason = "task superseded"
@@ -254,7 +235,7 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 				// arrived, so a delayed request cannot resurrect the old attempt.
 				r, stopErr := monitor.Stop(ctx, a.Route, a.Request)
 				if stopErr == nil {
-					stopErr = validateReceipt(*a, r, time.Now())
+					stopErr = validateReceipt(*a, r, s.now())
 				}
 				if stopErr == nil && execution.Terminal(r.State) {
 					a.Receipt, a.State, a.EndedAt, a.Error = r, r.State, r.FinishedAt, ""
@@ -277,10 +258,11 @@ func (s *Service) reconcileWork(ctx context.Context, id string) error {
 					t.RetryAt = a.EndedAt.Add(delay)
 					a.RetryAt = t.RetryAt
 				} else {
+					t.AttemptsExhausted = true
 					t.Error = "execution attempts exhausted; manual intervention required"
 				}
 			}
-			if !t.RetryAt.IsZero() && !time.Now().Before(t.RetryAt) && !w.executionBlocked() {
+			if !t.RetryAt.IsZero() && !s.now().Before(t.RetryAt) && !w.executionBlocked() {
 				t.Delivery, t.Error = "pending", ""
 			}
 		}
@@ -306,10 +288,21 @@ func (s *Service) saveExecution(id string, w *Work) error {
 				dest.Runs = t.Runs
 				if live.Task == dest && w.Task == t {
 					dest.Delivery, dest.Error, dest.RetryAt = t.Delivery, t.Error, t.RetryAt
+					dest.AttemptsExhausted = t.AttemptsExhausted
 				}
 			}
 		}
 	}
-	live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(live, s.now())
 	return s.store.saveWork(live)
+}
+
+// Older rows already record enough information to identify a terminal failure
+// that has no retry left. New rows also persist the explicit decision.
+func legacyAttemptsExhausted(t *Task, c Reliability) bool {
+	if t.Attempts < c.MaxAttempts || len(t.Runs) == 0 || t.Delivery == "pending" || !t.RetryAt.IsZero() {
+		return false
+	}
+	last := t.Runs[len(t.Runs)-1].State
+	return execution.Terminal(last) && last != "succeeded"
 }

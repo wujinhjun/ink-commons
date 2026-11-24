@@ -36,9 +36,6 @@ type apiError struct {
 
 func (e apiError) Error() string { return e.message }
 
-// BuildRevision 在部署构建时由 ldflags 注入，用于核对正在运行的提交。
-var BuildRevision = "development"
-
 func (s *Service) Handler() http.Handler {
 	const workPath = "/v1/work/{owner}/{repo}/{number}"
 	const taskPath = "/v1/tasks/{task}"
@@ -187,7 +184,7 @@ func (s *Service) pushes(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.recordPushes(input, time.Now()); err != nil {
+	if err := s.recordPushes(input, s.now()); err != nil {
 		fail(w, err)
 		return
 	}
@@ -284,11 +281,11 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := applyChange(work, action, change); err != nil {
+	if err := applyChange(work, action, change, s.now()); err != nil {
 		fail(w, err)
 		return
 	}
-	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(work, s.now())
 	if err := s.store.saveWork(work); err != nil {
 		fail(w, err)
 		return
@@ -296,7 +293,7 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	reply(w, 200, work)
 }
 
-func applyChange(work *Work, action string, change workChange) error {
+func applyChange(work *Work, action string, change workChange, now time.Time) error {
 	assignee := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
 	switch action {
 	case "link":
@@ -345,7 +342,7 @@ func applyChange(work *Work, action string, change workChange) error {
 				if execution.Terminal(a.State) {
 					return apiError{409, "attempt already ended"}
 				}
-				a.State, a.EndedAt, a.ManualReason, a.Error = "stopped", time.Now(), change.Reason, ""
+				a.State, a.EndedAt, a.ManualReason, a.Error = "stopped", now, change.Reason, ""
 				found = true
 			}
 		}
@@ -363,11 +360,12 @@ func applyChange(work *Work, action string, change workChange) error {
 			return apiError{409, "no retryable task"}
 		}
 		work.Task.Delivery, work.Task.Error, work.Task.RetryAt = "pending", "", time.Time{}
+		work.Task.AttemptsExhausted = false
 	default:
 		return apiError{404, fmt.Sprintf("unknown action %q", action)}
 	}
 	work.Version++
-	work.derive()
+	work.derive(now)
 	return nil
 }
 

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+
 	"net"
 	"net/http"
 	"time"
@@ -39,6 +39,10 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 		s.mu.Unlock()
 		return false, err
 	}
+	if !matchesObservation(ctx, w) {
+		s.mu.Unlock()
+		return true, nil
+	}
 	if w != nil {
 		if err := s.preparePendingConfig(w); err != nil {
 			s.mu.Unlock()
@@ -52,7 +56,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 	t := w.Task
 	h := t.Handoff
 	recovering := h.Wake.Preparation == "preparing"
-	if h.State != "pending" || w.executionBlocked() || s.delivering[id] || time.Now().Before(h.Wake.RetryAt) ||
+	if h.State != "pending" || w.executionBlocked() || s.delivering[id] || s.now().Before(h.Wake.RetryAt) ||
 		(recovering && !h.Wake.canRecover()) {
 		s.mu.Unlock()
 		return true, nil
@@ -66,14 +70,14 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 	waker, ok := executor.(execution.TaskWaker)
 	if !ok {
 		h.Wake.Error = "provider does not support cooperative task wakes"
-		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		s.refreshWorkflow(w, s.now())
 		err = s.store.saveWork(w)
 		s.mu.Unlock()
 		return true, err
 	}
 	if err := s.validateReviewPreparation(w); err != nil {
 		h.Wake.Error = "review preparation: " + err.Error()
-		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		s.refreshWorkflow(w, s.now())
 		saveErr := s.store.saveWork(w)
 		s.mu.Unlock()
 		return true, saveErr
@@ -88,14 +92,14 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 			if err != nil {
 				message := "review preparation: " + err.Error()
 				if h.Wake.Error != message {
-					log.Printf("workflow %s task %s: %s", id, t.ID, message)
+					s.log.Warn("review placement check failed")
 				}
 				h.Wake.Error = message
 				if retryablePlacementRead(err) {
 					h.Wake.PreparationAttempts++
-					h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.PreparationAttempts))
+					h.Wake.RetryAt = s.now().Add(taskWakeRetryDelay(h.Wake.PreparationAttempts))
 				}
-				w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+				s.refreshWorkflow(w, s.now())
 				err = s.store.saveWork(w)
 			}
 			s.mu.Unlock()
@@ -126,7 +130,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 		// Persist the exact destination before sending a creation request.
 		if allocates && !recovering && channelCheck.placement != nil && channelCheck.placement.Session == "" {
 			allocation := allocator.PlanConversation(*channelCheck.placement, d)
-			reservedAt := time.Now().UTC()
+			reservedAt := s.now().UTC()
 			allocation.ReservedAt = &reservedAt
 			h.Wake.Allocation = &allocation
 		}
@@ -136,11 +140,11 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 	}
 	if recovering {
 		h.Wake.RecoveryAttempts++
-		h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.RecoveryAttempts))
+		h.Wake.RetryAt = s.now().Add(taskWakeRetryDelay(h.Wake.RecoveryAttempts))
 	} else {
 		// Reserve the wake before sending so interrupted dispatches retain their delay.
 		h.Wake.Attempts++
-		h.Wake.RetryAt = time.Now().Add(taskWakeRetryDelay(h.Wake.Attempts))
+		h.Wake.RetryAt = s.now().Add(taskWakeRetryDelay(h.Wake.Attempts))
 	}
 	if err = s.store.saveWork(w); err != nil {
 		s.mu.Unlock()
@@ -178,7 +182,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 		lh := lt.Handoff
 		if prepareErr != nil {
 			lh.Wake.recordPreparationError(prepareErr, recovering)
-			log.Printf("workflow %s task %s: %s", id, t.ID, lh.Wake.Error)
+			s.log.Warn("task wake preparation failed")
 		} else {
 			lh.Wake.Preparation = "prepared"
 			lh.Assignee.Route = &prepared
@@ -191,10 +195,13 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 				}
 			}
 		}
-		lw.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		s.refreshWorkflow(lw, s.now())
 		err = s.store.saveWork(lw)
 		s.mu.Unlock()
 		if err != nil || prepareErr != nil {
+			return true, err
+		}
+		if current, err := s.observedHeadCurrent(ctx); err != nil || !current {
 			return true, err
 		}
 	}
@@ -203,7 +210,7 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 	s.mu.Lock()
 	current, err := s.store.loadWork(id)
 	latest := current.findTask(t.ID)
-	eligible := err == nil && latest != nil && current.Task == latest && latest.Handoff != nil && latest.Handoff.State == "pending" && !current.executionBlocked()
+	eligible := err == nil && matchesObservation(ctx, current) && latest != nil && current.Task == latest && latest.Handoff != nil && latest.Handoff.State == "pending" && !current.executionBlocked()
 	s.mu.Unlock()
 	if err != nil || !eligible {
 		return true, err
@@ -221,10 +228,10 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 		if sendErr != nil {
 			latest.Handoff.Wake.Error = fmt.Sprintf("wake not confirmed; will retry: %v", sendErr)
 		} else {
-			now := time.Now()
+			now := s.now()
 			latest.Handoff.Wake.AcceptedAt = &now
 		}
-		current.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		s.refreshWorkflow(current, s.now())
 		return true, s.store.saveWork(current)
 	}
 	return true, nil

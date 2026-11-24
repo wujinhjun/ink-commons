@@ -204,7 +204,7 @@ func TestApprovalNotificationStaleReceiptDoesNotAnnounceApproval(t *testing.T) {
 			case "route changed":
 				w.Developer.Route.Session = "new-session"
 			}
-			w.derive()
+			w.derive(time.Now())
 			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
@@ -281,8 +281,10 @@ func TestPollCCConnectApprovalBusyDropRecoveredWithoutRuntimeChanges(t *testing.
 		res := httptest.NewRecorder()
 		if strings.HasSuffix(req.URL.Path, "/reviews") {
 			reply(res, 200, []Review{r})
-		} else {
+		} else if strings.HasSuffix(req.URL.Path, "/pulls") {
 			reply(res, 200, []Pull{p})
+		} else {
+			reply(res, 200, p)
 		}
 		return res.Result(), nil
 	})
@@ -403,6 +405,8 @@ func TestApprovalReceiptResumesAfterSameHeadReopen(t *testing.T) {
 		switch r.URL.Path {
 		case "/repos/acme/project/pulls":
 			reply(out, 200, []Pull{pull})
+		case "/repos/acme/project/pulls/42":
+			reply(out, 200, pull)
 		case "/repos/acme/project/pulls/42/reviews":
 			reply(out, 200, []Review{review})
 		default:
@@ -410,7 +414,7 @@ func TestApprovalReceiptResumesAfterSameHeadReopen(t *testing.T) {
 		}
 		return out.Result(), nil
 	})
-	if err := reopened.pollRepo(ctx, repo); err != nil {
+	if err := pollRepoForTest(ctx, reopened, repo); err != nil {
 		t.Fatal(err)
 	}
 	if len(e.notices) != 2 || e.notices[1].EventID != original.EventID {

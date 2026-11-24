@@ -10,7 +10,6 @@ import (
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
 	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
-	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
 
 // A nil hook disables delivery. An empty object uses the development conversation.
@@ -56,29 +55,21 @@ func (s *Service) reserveBlockedNotice(w *Work, task *Task) {
 	task.Handoff.BlockedNotice = n
 }
 
-func (s *Service) reconcileBlockedNotices(ctx context.Context) error {
-	s.mu.Lock()
-	ids, err := statedb.New(s.store.db).ListBlockedNoticePending(ctx)
-	s.mu.Unlock()
+func (s *Service) reconcileBlockedWork(ctx context.Context, id string) error {
+	w, err := s.store.loadWork(id)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
-		w, err := s.store.loadWork(id)
-		if err != nil {
-			return err
+	if w == nil {
+		return nil
+	}
+	for _, t := range w.executionTasks() {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		if w == nil {
-			continue
-		}
-		for _, t := range w.executionTasks() {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if blockedNoticeDue(t, time.Now()) {
-				if err := s.deliverBlockedNotice(ctx, t.ID); err != nil {
-					return err
-				}
+		if blockedNoticeDue(t, s.now()) {
+			if err := s.deliverBlockedNotice(ctx, t.ID); err != nil {
+				return err
 			}
 		}
 	}
@@ -104,7 +95,7 @@ func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error
 		s.mu.Unlock()
 		return err
 	}
-	now := time.Now()
+	now := s.now()
 	if !blockedNoticeDue(t, now) {
 		s.mu.Unlock()
 		return nil
@@ -143,7 +134,7 @@ func (s *Service) deliverBlockedNotice(ctx context.Context, taskID string) error
 	if sendErr != nil {
 		n.Error = sendErr.Error()
 	} else {
-		n.SentAt, n.RetryAt = time.Now(), time.Time{}
+		n.SentAt, n.RetryAt = s.now(), time.Time{}
 	}
 	return s.store.saveWork(w)
 }

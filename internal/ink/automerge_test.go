@@ -188,7 +188,9 @@ func TestAutoMergeDisabledAndNonQualifyingReviews(t *testing.T) {
 			f := newAutoMergeFixture(t)
 			switch scenario {
 			case "disabled":
-				f.repo.AutoMerge = &AutoMergeConfig{}
+				if _, err := f.s.changeConfig(f.repo.Repo, "auto_merge", jsonValue(AutoMergeConfig{}), false); err != nil {
+					t.Fatal(err)
+				}
 			case "draft":
 				f.pull.Draft = true
 			case "closed":

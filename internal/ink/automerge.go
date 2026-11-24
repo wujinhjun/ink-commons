@@ -36,6 +36,7 @@ func (c *AutoMergeConfig) Validate() error {
 }
 
 type AutoMergeRun struct {
+	preflight           *mergePreflight
 	RequestID           string    `json:"request_id,omitempty"`
 	ReuseReaderIdentity bool      `json:"reuse_reader_identity,omitempty"`
 	SHA                 string    `json:"sha"`
@@ -163,6 +164,11 @@ func (u upstream) merge(ctx context.Context, repo string, number int, sha, metho
 
 // 合入账本与完成通知一起持久化；预留或终态记录会阻止重复 merge，
 // 结果不明的外部写入不重放。
+type mergePreflight struct {
+	version        uint64
+	policyRevision int64
+}
+
 func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun, reserve bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,6 +178,15 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 	}
 	if w == nil {
 		return false, nil
+	}
+	if run.preflight != nil && (reserve || run.UpdatedAt.IsZero()) {
+		current, err := s.store.effectiveConfig(repo.Repo)
+		if err != nil {
+			return false, err
+		}
+		if w.Version != run.preflight.version || w.Pull.Head.SHA != run.SHA || current.Revision != run.preflight.policyRevision {
+			return false, nil
+		}
 	}
 	// Preflight may not overwrite an in-flight write. A response tied to the
 	// exact reservation can release it after a definitive rejection.
@@ -205,7 +220,7 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 		}
 	}
 	if !reserve || run.UpdatedAt.IsZero() {
-		run.UpdatedAt = time.Now()
+		run.UpdatedAt = s.now()
 	}
 	found := false
 	for i := range w.AutoMerges {
@@ -221,7 +236,7 @@ func (s *Service) updateAutoMerge(repo Repository, number int, run AutoMergeRun,
 	if run.State == "merged" {
 		s.reserveMergedNotification(w, repo, run)
 	}
-	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+	s.refreshWorkflow(w, s.now())
 	return true, s.store.saveWork(w)
 }
 
@@ -235,23 +250,29 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 		s.mu.Unlock()
 		return err
 	}
-	if w == nil {
+	if w == nil || !matchesObservation(ctx, w) {
 		s.mu.Unlock()
 		return nil
 	}
+	effective, err := s.store.effectiveConfig(repo.Repo)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	repo = effective.Repository
 	// Reconcile ambiguous responses using GitHub observations even if the switch
 	// has subsequently been disabled. Never infer failure from a lost response.
 	mergedBefore := make(map[string]bool)
 	for _, run := range w.AutoMerges {
 		mergedBefore[run.SHA] = run.State == "merged"
 	}
-	if reconcileClosedAutoMerges(w, time.Now()) {
+	if reconcileClosedAutoMerges(w, s.now()) {
 		for _, run := range w.AutoMerges {
 			if run.State == "merged" && !mergedBefore[run.SHA] {
 				s.reserveMergedNotification(w, repo, run)
 			}
 		}
-		w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
+		s.refreshWorkflow(w, s.now())
 		err := s.store.saveWork(w)
 		s.mu.Unlock()
 		return err
@@ -278,7 +299,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 			return nil
 		}
 	}
-	run := AutoMergeRun{SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting", ReuseReaderIdentity: repo.AutoMerge.ReuseReaderIdentity}
+	run := AutoMergeRun{preflight: &mergePreflight{version: w.Version, policyRevision: effective.Revision}, SHA: w.Pull.Head.SHA, Reviewer: w.Reviewer.GitHubLogin, Method: repo.AutoMerge.method(), State: "waiting", ReuseReaderIdentity: repo.AutoMerge.ReuseReaderIdentity}
 	version, observedPull, reviewerCommand := w.Version, w.Pull, w.Reviewer.GitHubCommand
 	confirmingConflict := w.MergeConflict != nil
 	trackingConflict := confirmingConflict || (w.Task != nil && w.Task.ConflictBase != nil)
@@ -372,7 +393,7 @@ func (s *Service) autoMerge(ctx context.Context, repo Repository, number int) er
 	}
 	run.State = "unknown"
 	run.Reason = "merge request reserved; outcome not yet confirmed"
-	run.UpdatedAt = time.Now()
+	run.UpdatedAt = s.now()
 	reserved, err := s.updateAutoMerge(repo, number, run, true)
 	if err != nil || !reserved {
 		return err

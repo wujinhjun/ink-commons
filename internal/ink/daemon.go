@@ -5,7 +5,7 @@ package ink
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -51,7 +51,13 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 		return err
 	}
 
-	server := &http.Server{Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second}
+	server := &http.Server{
+		Handler:           service.Handler(),
+		ErrorLog:          slog.NewLogLogger(httpErrorHandler{service.log.Handler()}, slog.LevelError),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+	}
 	pollCtx, cancel := context.WithCancel(ctx)
 	var done = make(chan struct{})
 	go func() {
@@ -81,7 +87,7 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 			_ = server.Close()
 		}
 	}()
-	log.Printf("Ink Commons listening on Unix socket %s", socket)
+	service.log.Info("Ink Commons listening on Unix socket")
 	err = server.Serve(ln)
 	cancel()
 	<-stopped

@@ -124,7 +124,7 @@ func TestReviewContextRejectsRetiredTaskAndConcurrentReassignment(t *testing.T) 
 		w := st.Work[key(repo.Repo, p.Number)]
 		w.Reviewer = Assignee{GitHubLogin: "human"}
 		w.replaceTask(nil)
-		w.derive()
+		w.derive(time.Now())
 		if err := saveFixture(s.store, st); err != nil {
 			t.Fatal(err)
 		}

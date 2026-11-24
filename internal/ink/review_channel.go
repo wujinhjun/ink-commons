@@ -5,7 +5,6 @@ package ink
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
 )
@@ -56,10 +55,10 @@ func (s *Service) checkReviewChannel(ctx context.Context, id string) (reviewChan
 	s.mu.Lock()
 	w, err := s.store.loadWork(id)
 	var binding reviewChannelBinding
-	if err == nil && w != nil && !s.delivering[id] {
+	if err == nil && w != nil && matchesObservation(ctx, w) && !s.delivering[id] {
 		err = s.preparePendingConfig(w)
 		if t := w.Task; err == nil && t != nil && t.Delivery == "pending" && !w.executionBlocked() {
-			now := time.Now()
+			now := s.now()
 			if h := t.Handoff; (h == nil && !now.Before(t.RetryAt)) ||
 				(h != nil && h.State == "pending" && h.Wake.Preparation != "preparing" && !now.Before(h.Wake.RetryAt)) {
 				binding = s.reviewChannelDestination(w)

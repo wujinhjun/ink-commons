@@ -125,6 +125,9 @@ func workIndex(w *Work) statedb.SaveWorkParams {
 		ID: keyForWork(w), Repo: w.Repo, Number: int64(w.Pull.Number), Revision: w.storedRevision + 1,
 		PollPending: w.Pull.State == "open" || hasInFlightAutoMerge(w),
 	}
+	for _, run := range w.Approvals {
+		row.PollPending = row.PollPending || run.State == "pending"
+	}
 	// Approval receipts for an unmerged closed PR resume on reopen, which
 	// GitHub's open listing will discover even without a local poll entry.
 	if w.Pull.Merged && !row.PollPending {

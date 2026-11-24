@@ -21,8 +21,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 var repoName = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
@@ -32,36 +30,6 @@ func ValidRepository(name string) bool {
 }
 
 var shaPattern = regexp.MustCompile(`^[a-f0-9]{40}$`)
-
-type Repository struct {
-	TaskBlocked     *TaskBlockedHook `json:"task_blocked,omitempty"`
-	TaskMode        string           `json:"task_mode,omitempty"`
-	Review          *ReviewFeatures  `json:"review,omitempty"`
-	PostApproval    *ApprovalHook    `json:"postApproval,omitempty"`
-	ReviewerCommand string           `json:"reviewer_command,omitempty"`
-	Repo            string           `json:"repo"`
-	HumanDeveloper  string           `json:"human_developer,omitempty"`
-	AutoMerge       *AutoMergeConfig `json:"auto_merge,omitempty"`
-	ReviewerRoute   *execution.Route `json:"reviewer_route,omitempty"`
-	ReviewerLogin   string           `json:"reviewer_login"`
-}
-
-type Config struct {
-	WorkspaceFullSlots  int
-	RepositoryDefaults  Repository
-	Repositories        []Repository
-	PollSeconds         int
-	Reliability         Reliability
-	GitHubToken         string
-	GitHubCommand       string
-	GitHubCommandSHA256 string
-	GitHubReadArgs      []string
-	GitHubMergeArgs     []string
-	GitHubMergerCommand string
-	GitHubMergerSHA256  string
-	PollGate            string
-	ConfigOnly          bool
-}
 
 func (c Config) ValidateGitHubCommands() error {
 	if (c.GitHubReadArgs != nil || c.GitHubMergeArgs != nil) && c.GitHubCommand == "" {

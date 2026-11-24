@@ -119,7 +119,7 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 		return nil
 	}
 
-	now := time.Now()
+	now := s.now()
 	if !dirty {
 		mergeable := pull.Mergeable != nil && *pull.Mergeable
 		t := w.Task
@@ -168,7 +168,7 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 			if now.Sub(c.Since) < mergeConflictConfirmation {
 				return nil
 			}
-			w.setTask(Task{Role: "developer", SHA: pull.Head.SHA, ReviewID: review.ID, ReviewURL: review.URL, ConflictBase: &base}, w.Developer)
+			w.setTask(Task{Role: "developer", SHA: pull.Head.SHA, ReviewID: review.ID, ReviewURL: review.URL, ConflictBase: &base}, w.Developer, now)
 			if err := s.freezeTaskConfig(w); err != nil {
 				return err
 			}
