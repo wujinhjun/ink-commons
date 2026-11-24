@@ -52,6 +52,8 @@ func errorDiagnostic(err error) (string, bool) {
 	switch e := err.(type) {
 	case diagnosticError:
 		return string(e), true
+	case execution.AdapterTransportError:
+		return e.Error(), true
 	case execution.HTTPStatusError:
 		return fmt.Sprintf("provider HTTP %d", int(e)), true
 	case *sqlite.Error:

@@ -15,7 +15,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 type Service struct {
@@ -230,6 +229,14 @@ func (s *Service) beginDelivery(ctx context.Context, id string, channelCheck rev
 		return nil, nil
 	}
 
+	route := taskRoute(work, work.Task)
+	if route == nil || !route.Valid(false) {
+		return nil, fmt.Errorf("pending task has no resolved execution route")
+	}
+	provider := s.providers[route.Provider]
+	if !execution.Supports(provider, "deliver", provider != nil) {
+		return nil, fmt.Errorf("execution provider does not support deliver")
+	}
 	if err := s.freezeTaskConfig(work); err != nil {
 		return nil, err
 	}
@@ -241,10 +248,6 @@ func (s *Service) beginDelivery(ctx context.Context, id string, channelCheck rev
 	work.Task.Attempts++
 	if work.Task.ID == "" {
 		work.Task.ID = uuid.NewString()
-	}
-	route := taskRoute(work, work.Task)
-	if route == nil {
-		return nil, fmt.Errorf("pending task has no execution route")
 	}
 	attemptID := uuid.NewString()
 	work.Task.RetryAt = time.Time{}
@@ -312,6 +315,10 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 	if handled, err := s.dispatchHandoff(ctx, id, channelCheck); handled || err != nil {
 		return err
 	}
+	ready, err := s.prepareDirect(ctx, id, channelCheck)
+	if err != nil || !ready {
+		return err
+	}
 	work, err := s.beginDelivery(ctx, id, channelCheck)
 	if err != nil || work == nil {
 		return err
@@ -322,61 +329,10 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 		s.mu.Unlock()
 	}()
 	task := work.Task
-	if task.ConfigSnapshot != nil {
-		repo = task.ConfigSnapshot.Repository
-	}
-	route := work.Developer.Route
-	if task.Role == "reviewer" {
-		route = work.Reviewer.Route
-	}
-	if route == nil {
-		return fmt.Errorf("pending task has no assignee route")
-	}
-	executor, ok := s.providers[route.Provider]
-	if !ok {
-		task.Error = "execution provider is not configured"
-		return s.saveDelivery(id, work)
-	}
+	route := taskRoute(work, task)
+	executor := s.providers[route.Provider]
 	attempt := &task.Runs[len(task.Runs)-1]
 	delivery := attempt.Request
-	if route.Session == "" {
-		*route = allocationRoute(repo, *route)
-		attempt.Route = *route
-		if err := s.saveDelivery(id, work); err != nil {
-			return err
-		}
-		if err := execution.ValidateDestination(s.providers, *route, true); err != nil {
-			task.Error = "invalid unallocated destination: " + err.Error()
-			return s.saveDelivery(id, work)
-		}
-		if err := execution.ValidatePreparation(s.providers, *route, delivery); err != nil {
-			task.Error = "invalid preparation context: " + err.Error()
-			return s.saveDelivery(id, work)
-		}
-		preparation := delivery
-		if delivery.RequireSameChannel {
-			preparation.ReviewPlacement = channelCheck.placement
-		}
-		session, err := executor.Prepare(ctx, *route, preparation)
-		if err != nil {
-			task.Error = "prepare destination: " + err.Error()
-			return s.saveDelivery(id, work)
-		}
-		prepared := *route
-		prepared.Session = session
-		if err := execution.ValidateDestination(s.providers, prepared, false); err != nil {
-			task.Error = "provider returned an invalid destination"
-			return s.saveDelivery(id, work)
-		}
-		*route = prepared
-		attempt.Route = prepared
-		if err := s.saveDelivery(id, work); err != nil {
-			return err
-		}
-		if current, err := s.observedHeadCurrent(ctx); err != nil || !current {
-			return err
-		}
-	}
 	// Do not deliver a task superseded while its session was being allocated.
 	s.mu.Lock()
 	live, loadErr := s.store.loadWork(id)
@@ -403,16 +359,4 @@ func reviewSource(work *Work) *execution.Route {
 		return work.Developer.Route
 	}
 	return work.Origin
-}
-
-func allocationRoute(repo Repository, route execution.Route) execution.Route {
-	// A cc-connect parent is only an explicit per-work override. In particular,
-	// omitting it on assignment must not restore a legacy repository parent.
-	if route.Provider == ccconnect.Name {
-		return route
-	}
-	if fallback := repo.ReviewerRoute; route.Parent == "" && fallback != nil && fallback.Provider == route.Provider && fallback.Target == route.Target {
-		route.Parent = fallback.Parent
-	}
-	return route
 }

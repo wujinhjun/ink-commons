@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 )
 
 // Task snapshots are persisted before prepare/deliver/wake/claim. Retries keep
@@ -29,7 +28,7 @@ func cloneAssignee(a Assignee) *Assignee {
 }
 
 func taskStarted(t *Task) bool {
-	return t.ConfigSnapshot != nil || len(t.Runs) > 0 || t.Attempts > 0 ||
+	return t.Preparation != nil || t.ConfigSnapshot != nil || len(t.Runs) > 0 || t.Attempts > 0 ||
 		(t.Handoff != nil && (t.Handoff.Wake.Attempts > 0 || t.Handoff.State != "pending" || t.Handoff.Wake.Preparation != ""))
 }
 
@@ -59,9 +58,6 @@ func (s *Service) refreshPendingConfig(w *Work, repo Repository) {
 	reviewer := Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}
 	if repo.ReviewerRoute != nil {
 		route := *repo.ReviewerRoute
-		if route.Provider == ccconnect.Name && route.Session == "" {
-			route.Parent = ""
-		}
 		reviewer.Route = &route
 	}
 	if w.ReviewerOverride != nil {
@@ -70,7 +66,13 @@ func (s *Service) refreshPendingConfig(w *Work, repo Repository) {
 	if w.RoundConfig == nil || w.RoundConfig.SHA != w.Pull.Head.SHA {
 		// A session is runtime state. Reuse only when the configured destination and
 		// reviewer identity still match; otherwise prepare a new conversation.
-		if reviewer.GitHubLogin == w.Reviewer.GitHubLogin && compatibleRoute(reviewer.Route, w.Reviewer.Route) && reviewer.Route.Session == "" {
+		prior := w.Reviewer.Route
+		if w.RoundConfig != nil && w.RoundConfig.Reviewer.Route != nil {
+			// Compare the selected policy before placement filled in a parent.
+			prior = w.RoundConfig.Reviewer.Route
+		}
+		if w.Reviewer.Route != nil && reviewer.GitHubLogin == w.Reviewer.GitHubLogin &&
+			compatibleRoute(reviewer.Route, prior) && reviewer.Route.Session == "" {
 			reviewer.Route.Session = w.Reviewer.Route.Session
 		}
 		w.Reviewer = reviewer

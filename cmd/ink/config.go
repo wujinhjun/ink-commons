@@ -3,17 +3,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
 	"github.com/wujinhjun/ink-commons/internal/execution/httpagent"
 	"github.com/wujinhjun/ink-commons/internal/ink"
 )
@@ -21,20 +24,29 @@ import (
 // DaemonConfig contains only static process/provider settings. Mutable policy
 // lives in SQLite; optional policy settings seed a newly initialized database.
 type DaemonConfig struct {
-	LogLevel            string   `json:"log_level,omitempty"`
-	LogFormat           string   `json:"log_format,omitempty"`
-	GitHubCommand       string   `json:"github_command,omitempty"`
-	GitHubCommandSHA256 string   `json:"github_command_sha256,omitempty"`
-	GitHubMergerCommand string   `json:"github_merger_command,omitempty"`
-	GitHubReadArgs      []string `json:"github_read_args"`
-	GitHubMergeArgs     []string `json:"github_merge_args"`
-	GitHubMergerSHA256  string   `json:"github_merger_command_sha256,omitempty"`
-	WorkspaceFullSlots  int      `json:"workspace_full_slots"`
-	PollSeconds         int      `json:"poll_seconds"`
-	CCConnectURL        string   `json:"cc_connect_url"`
-	HTTPURL             string   `json:"http_provider_url,omitempty"`
-	HTTPExecution       bool     `json:"http_provider_execution,omitempty"`
+	LogLevel            string                    `json:"log_level,omitempty"`
+	LogFormat           string                    `json:"log_format,omitempty"`
+	GitHubCommand       string                    `json:"github_command,omitempty"`
+	GitHubCommandSHA256 string                    `json:"github_command_sha256,omitempty"`
+	GitHubMergerCommand string                    `json:"github_merger_command,omitempty"`
+	GitHubReadArgs      []string                  `json:"github_read_args"`
+	GitHubMergeArgs     []string                  `json:"github_merge_args"`
+	GitHubMergerSHA256  string                    `json:"github_merger_command_sha256,omitempty"`
+	WorkspaceFullSlots  int                       `json:"workspace_full_slots"`
+	PollSeconds         int                       `json:"poll_seconds"`
+	Providers           map[string]ProviderConfig `json:"providers,omitempty"`
 }
+
+type ProviderConfig struct {
+	URL          string   `json:"url"`
+	TokenEnv     string   `json:"token_env,omitempty"`
+	Managed      bool     `json:"managed,omitempty"`
+	Capabilities []string `json:"capabilities"`
+	RequireACK   bool     `json:"require_ack,omitempty"`
+}
+
+var providerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) {
 	var file struct {
@@ -108,35 +120,35 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 	}
 
 	client := &http.Client{
-		Timeout:       10 * time.Second,
+		Timeout:       25 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	// Keep accepting historical cc-connect origins even on a daemon with no
-	// delivery endpoint. Selecting one as the default reviewer requires its endpoint.
-	cc, err := ccconnect.New(client, file.CCConnectURL, os.Getenv("INK_CC_CONNECT_TOKEN"), os.Getenv("INK_DISCORD_TOKEN"))
-	if err != nil {
-		return cfg, nil, err
-	}
-	providers := map[string]execution.Executor{ccconnect.Name: cc}
-	if file.HTTPURL != "" {
-		newAgent := httpagent.New
-		if file.HTTPExecution {
-			newAgent = httpagent.NewManaged
+	providers := make(map[string]execution.Executor, len(file.Providers))
+	for _, name := range slices.Sorted(maps.Keys(file.Providers)) {
+		if !providerName.MatchString(name) {
+			return cfg, nil, fmt.Errorf("invalid provider name")
 		}
-		agent, err := newAgent(client, file.HTTPURL, os.Getenv("INK_HTTP_PROVIDER_TOKEN"))
+		entry := file.Providers[name]
+		var token string
+		if entry.TokenEnv != "" {
+			if !environmentName.MatchString(entry.TokenEnv) {
+				return cfg, nil, fmt.Errorf("provider %s: invalid token_env", name)
+			}
+			token = os.Getenv(entry.TokenEnv)
+			if strings.TrimSpace(token) == "" {
+				return cfg, nil, fmt.Errorf("provider %s: token_env is unset or empty", name)
+			}
+		}
+		agent, err := httpagent.New(client, entry.URL, token, entry.Capabilities, entry.Managed, entry.RequireACK)
 		if err != nil {
-			return cfg, nil, err
+			return cfg, nil, fmt.Errorf("provider %s: %w", name, err)
 		}
-		providers[httpagent.Name] = agent
-	}
-
-	if file.HTTPExecution && file.HTTPURL == "" {
-		return cfg, nil, fmt.Errorf("http_provider_execution requires http_provider_url")
+		if err := agent.CheckManaged(context.Background()); err != nil {
+			return cfg, nil, fmt.Errorf("provider %s: %w", name, err)
+		}
+		providers[name] = agent
 	}
 	if route := cfg.RepositoryDefaults.ReviewerRoute; route != nil {
-		if route.Provider == ccconnect.Name && file.CCConnectURL == "" {
-			return cfg, nil, fmt.Errorf("configure cc_connect_url for repository_defaults")
-		}
 		if err := execution.ValidateDestination(providers, *route, true); err != nil {
 			return cfg, nil, err
 		}
@@ -158,9 +170,6 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 		}
 		seen[repo.Repo] = true
 		if route := repo.ReviewerRoute; route != nil {
-			if route.Provider == ccconnect.Name && file.CCConnectURL == "" {
-				return cfg, nil, fmt.Errorf("%s: configure cc_connect_url for the reviewer", repo.Repo)
-			}
 			if err := execution.ValidateDestination(providers, *route, true); err != nil {
 				return cfg, nil, fmt.Errorf("%s reviewer: %w", repo.Repo, err)
 			}
@@ -174,8 +183,5 @@ func loadConfig(path string) (ink.Config, map[string]execution.Executor, error) 
 }
 
 func routeFromEnv(getenv func(string) string) execution.Route {
-	if provider := getenv("INK_PROVIDER"); provider != "" {
-		return execution.Route{Provider: provider, Target: getenv("INK_TARGET"), Session: getenv("INK_SESSION")}
-	}
-	return ccconnect.RouteFromEnv(getenv)
+	return execution.Route{Provider: getenv("INK_PROVIDER"), Target: getenv("INK_TARGET"), Session: getenv("INK_SESSION")}
 }

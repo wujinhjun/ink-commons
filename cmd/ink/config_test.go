@@ -5,22 +5,23 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution/httpagent"
 )
 
-func TestCCConnectConfigAndRoute(t *testing.T) {
-	t.Setenv("INK_CC_CONNECT_TOKEN", "test")
-	t.Setenv("INK_DISCORD_TOKEN", "test")
+func TestNamedAdapterConfigAndRoute(t *testing.T) {
+	t.Setenv("CHAT_ADAPTER_TOKEN", "test")
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{
-		"cc_connect_url":"http://127.0.0.1:9111/hook",
-		"repositories":[{"repo":"acme/project","reviewer_login":"reviewer","reviewer_route":{"provider":"cc-connect","target":"reviewer","parent":"77"}}]
+		"providers":{"chat":{"url":"http://127.0.0.1:8788/v1/execute","token_env":"CHAT_ADAPTER_TOKEN","capabilities":["placement","prepare","deliver"]},"another":{"url":"http://127.0.0.1:9999","capabilities":["notify"]}},
+		"repositories":[{"repo":"acme/project","reviewer_login":"reviewer","reviewer_route":{"provider":"chat","target":"reviewer","parent":"77"}}]
 	}`), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -28,21 +29,24 @@ func TestCCConnectConfigAndRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if actual := cfg.Repositories[0].ReviewerRoute; actual == nil || *actual != (execution.Route{Provider: ccconnect.Name, Target: "reviewer", Parent: "77"}) {
+	if actual := cfg.Repositories[0].ReviewerRoute; actual == nil || *actual != (execution.Route{Provider: "chat", Target: "reviewer", Parent: "77"}) {
 		t.Fatalf("configuration mismatch: %+v", actual)
 	}
-	if _, ok := providers[ccconnect.Name].(*ccconnect.Executor); !ok {
-		t.Fatal("cc-connect executor was not registered")
+	if _, ok := providers["chat"].(*httpagent.Executor); !ok {
+		t.Fatal("named adapter was not registered")
 	}
 
+	if len(providers) != 2 || !execution.Supports(providers["another"], "notify", false) {
+		t.Fatal("second named adapter is missing")
+	}
 	var route execution.Route
-	if err := json.Unmarshal([]byte(`{"provider":"cc-connect","target":"dev","session":"discord:19"}`), &route); err != nil {
+	if err := json.Unmarshal([]byte(`{"provider":"chat","target":"dev","session":"discord:19"}`), &route); err != nil {
 		t.Fatal(err)
 	}
 	getenv := func(name string) string {
-		return map[string]string{"CC_PROJECT": "dev", "CC_SESSION_KEY": "discord:19"}[name]
+		return map[string]string{"INK_PROVIDER": "chat", "INK_TARGET": "dev", "INK_SESSION": "discord:19"}[name]
 	}
-	if route != routeFromEnv(getenv) || route != (execution.Route{Provider: ccconnect.Name, Target: "dev", Session: "discord:19"}) {
+	if route != routeFromEnv(getenv) || route != (execution.Route{Provider: "chat", Target: "dev", Session: "discord:19"}) {
 		t.Fatalf("routing mismatch: %+v", route)
 	}
 }
@@ -53,7 +57,7 @@ func TestRemovedConfigFieldsAreRejected(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
 			entry := fmt.Sprintf(`%q:"obsolete"`, field)
 			if field == "project" || field == "session_key" {
-				entry = `"reviewer_route":{"provider":"cc-connect","target":"dev",` + entry + "}"
+				entry = `"reviewer_route":{"provider":"chat","target":"dev",` + entry + "}"
 			}
 			if err := os.WriteFile(path, []byte(`{"repositories":[{"repo":"acme/project","reviewer_login":"reviewer",`+entry+`}]}`), 0600); err != nil {
 				t.Fatal(err)
@@ -66,22 +70,39 @@ func TestRemovedConfigFieldsAreRejected(t *testing.T) {
 }
 
 func TestExecutionConfigRequiresExplicitMonitoring(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
+	t.Setenv("ADAPTER_TEST_TOKEN", "managed-test")
+	for _, declared := range []bool{false, true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer managed-test" {
+				t.Error("expected an authenticated read-only admission request")
+			}
+			fmt.Fprintf(w, `{"version":1,"capabilities":["deliver","status","stop"],"managed":%v,"stop_fences_delayed_delivery":%v}`, declared, declared)
+		}))
 		path := filepath.Join(t.TempDir(), "config.json")
-		body := fmt.Sprintf(`{"http_provider_url":"http://127.0.0.1:9999","http_provider_execution":%v,"execution":{"ack_seconds":5,"max_attempts":1},"repositories":[{"repo":"acme/project","reviewer_login":"reviewer"}]}`, enabled)
+		body := fmt.Sprintf(`{"providers":{"worker":{"url":%q,"managed":true,"token_env":"ADAPTER_TEST_TOKEN","capabilities":["deliver","status","stop"]}},"execution":{"ack_seconds":5,"max_attempts":1}}`, server.URL)
 		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
 		cfg, providers, err := loadConfig(path)
+		server.Close()
+		if !declared {
+			if err == nil {
+				t.Fatal("adapter without managed guarantees was admitted")
+			}
+			continue
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
-		capability, ok := providers["http"].(interface{ MonitoringEnabled() bool })
-		if !ok || capability.MonitoringEnabled() != enabled || cfg.Reliability.ACKSeconds != 5 || cfg.Reliability.MaxAttempts != 1 {
+		if !providers["worker"].(*httpagent.Executor).MonitoringEnabled() || cfg.Reliability.ACKSeconds != 5 || cfg.Reliability.MaxAttempts != 1 {
 			t.Fatal("execution configuration not applied")
 		}
 	}
-	for _, extra := range []string{`"http_provider_execution":true,`, `"execution":{"ack_seconds":-1},`, `"execution":{"max_attempts":101},`} {
+	for _, extra := range []string{
+		`"cc_connect_url":"http://localhost:8788",`, `"http_provider_url":"http://localhost:8788",`, `"http_provider_execution":true,`,
+		`"providers":{"worker":{"url":"http://127.0.0.1:9999","managed":true,"capabilities":["deliver","status"]}},`,
+		`"execution":{"ack_seconds":-1},`, `"execution":{"max_attempts":101},`,
+	} {
 		path := filepath.Join(t.TempDir(), "invalid.json")
 		if err := os.WriteFile(path, []byte(`{`+extra+`"repositories":[{"repo":"acme/project","reviewer_login":"reviewer"}]}`), 0600); err != nil {
 			t.Fatal(err)

@@ -232,7 +232,15 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	// repeated request cannot reset the task or allocate another session.
 	if action == "assign" && change.Role == "reviewer" && work.Linked {
 		requested := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
-		if requested.GitHubLogin != "" && sameReviewer(work.Reviewer, requested) {
+		sameAssignment := sameReviewer(work.Reviewer, requested)
+		if !sameAssignment && requested.Route != nil && requested.Route.Session == "" {
+			configured := work.ReviewerOverride
+			if configured == nil && work.RoundConfig != nil && work.RoundConfig.SHA == work.Pull.Head.SHA {
+				configured = &work.RoundConfig.Reviewer
+			}
+			sameAssignment = configured != nil && sameReviewer(*configured, requested)
+		}
+		if requested.GitHubLogin != "" && sameAssignment {
 			// Equal values still express an explicit PR override. Preserve the active
 			// task/session while recording that future rounds must not inherit.
 			if work.ReviewerOverride == nil || !bytes.Equal(jsonValue(work.ReviewerOverride), jsonValue(requested)) {
@@ -257,22 +265,45 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "assign" && change.Role == "reviewer" && change.Route != nil {
 		route := *change.Route
+		if t := work.Task; t != nil && t.Role == "reviewer" && route.Session == "" {
+			state := t.Preparation
+			if t.Handoff != nil {
+				state = &t.Handoff.Wake
+			}
+			if state != nil && state.Preparation == "preparing" {
+				fail(w, apiError{409, "conversation allocation is unresolved; bind a verified session before reassigning"})
+				return
+			}
+		}
 		preparation := execution.Delivery{Role: "reviewer", Source: reviewSource(work)}
 		if repository, ok := s.repo(repo); ok {
-			route = allocationRoute(repository, route)
 			repository.ReviewerRoute = change.Route
 			if err := repository.ValidateReviewFeatures(); err != nil {
 				fail(w, apiError{400, err.Error()})
 				return
 			}
-			if repository.Review != nil && repository.Review.Context.ThreadHistory && (reviewSource(work) == nil || reviewSource(work).Provider != "cc-connect") {
-				fail(w, apiError{400, "thread history requires a Discord development source"})
+			if err := s.validateEffective(repository); err != nil {
+				fail(w, apiError{400, err.Error()})
 				return
+			}
+			if repository.Review != nil && repository.Review.Context.ThreadHistory {
+				if err := s.validateHistorySource(preparation.Source); err != nil {
+					fail(w, apiError{400, err.Error()})
+					return
+				}
 			}
 			if repository.Review != nil {
 				preparation.RequireSameChannel = repository.Review.RequireSameChannel
 				preparation.ReuseDevelopmentThread = repository.Review.ReuseDevelopmentThread
 			}
+		}
+		binding := reviewChannelBinding{route: route, requireSame: preparation.RequireSameChannel, reuseThread: preparation.ReuseDevelopmentThread}
+		if preparation.Source != nil {
+			binding.source = *preparation.Source
+		}
+		if err := validatePlacementInput(binding); err != nil {
+			fail(w, apiError{400, err.Error()})
+			return
 		}
 		if route.Session == "" || preparation.RequireSameChannel {
 			if err := execution.ValidatePreparation(s.providers, route, preparation); err != nil {

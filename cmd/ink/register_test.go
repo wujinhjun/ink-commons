@@ -50,7 +50,7 @@ func TestRegisterDetectsGitRemoteAndUsesLocalDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chdir(cwd)
-	if err := register([]string{"--github-login", "reviewer", "--target", "review-project"}); err != nil {
+	if err := register([]string{"--github-login", "reviewer", "--provider", "chat", "--target", "review-project"}); err != nil {
 		t.Fatal(err)
 	}
 	repo := <-received

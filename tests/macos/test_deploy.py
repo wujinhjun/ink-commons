@@ -1015,6 +1015,17 @@ class DeployTest(unittest.TestCase):
             m.check_provider_endpoints({})
         connect.assert_not_called()
 
+    def test_named_provider_endpoint_preflight_fails_for_unreachable_adapter(self):
+        config = {'providers': {
+            'chat': {'url': 'http://127.0.0.1:8788/v1/execute', 'capabilities': ['wake']},
+            'other': {'url': 'https://example.test/v1/execute', 'capabilities': ['deliver']},
+        }}
+        with patch.object(m.socket, 'create_connection', side_effect=[MagicMock(), OSError('private error')]) as connect:
+            with self.assertRaisesRegex(m.DeploymentError, r'^configured provider endpoint unavailable: providers\.other\.url$'):
+                m.check_provider_endpoints(config)
+        self.assertEqual([call.args[0] for call in connect.call_args_list],
+                         [('127.0.0.1', 8788), ('example.test', 443)])
+
 
 class MacOSOutputTest(unittest.TestCase):
     def test_unload_waits_for_asynchronous_bootout(self):

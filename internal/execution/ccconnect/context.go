@@ -9,13 +9,11 @@ import (
 	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
-var _ execution.ConversationReader = (*Executor)(nil)
-
 // Only public threads under ordinary text channels are eligible. In particular,
 // a channel-level session must not expose unrelated channel conversations.
 func (e *Executor) publicDevelopmentThread(ctx context.Context, source execution.Route) (string, error) {
-	if source.Provider != Name || e.discordToken == "" {
-		return "", fmt.Errorf("development thread access requires cc-connect and INK_DISCORD_TOKEN")
+	if e.discordToken == "" {
+		return "", fmt.Errorf("development thread access requires INK_DISCORD_TOKEN")
 	}
 	id, err := discordChannel(source.Session)
 	if err != nil {
@@ -42,7 +40,7 @@ func (e *Executor) publicDevelopmentThread(ctx context.Context, source execution
 	if parent.ID != thread.Parent || parent.Type != 0 {
 		return "", fmt.Errorf("development thread requires a normal text-channel parent")
 	}
-	return id, nil
+	return thread.Parent, nil
 }
 
 func (e *Executor) ReadConversation(ctx context.Context, source execution.Route, before string) (execution.ConversationPage, error) {
@@ -51,11 +49,11 @@ func (e *Executor) ReadConversation(ctx context.Context, source execution.Route,
 	if err != nil || cursor == 0 {
 		return page, fmt.Errorf("invalid history cursor")
 	}
-	id, err := e.publicDevelopmentThread(ctx, source)
-	if err != nil {
+	if _, err := e.publicDevelopmentThread(ctx, source); err != nil {
 		return page, err
 	}
-	page.Session = "discord:" + id
+	id, _ := discordChannel(source.Session)
+	page.Session = source.Session
 	var messages []execution.ConversationMessage
 	const pageLimit = 50
 	if err := execution.GetJSON(ctx, e.client, "https://discord.com/api/v10/channels/"+id+"/messages?limit=50&before="+before, "Bot "+e.discordToken, &messages); err != nil {

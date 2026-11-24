@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution/adaptertest"
 )
 
 func TestRequireSameReviewChannel(t *testing.T) {
@@ -21,13 +21,13 @@ func TestRequireSameReviewChannel(t *testing.T) {
 	}{
 		{name: "default placement", wantSession: "discord:999", allocate: true},
 		{name: "reuse developer thread", reuse: true, wantSession: "discord:123"},
-		{name: "retry default placement after access restored", wantSession: "discord:999", allocate: true, restoreAccess: true, wantError: "read development conversation"},
-		{name: "retry thread reuse after access restored", reuse: true, wantSession: "discord:123", restoreAccess: true, wantError: "reuse development thread"},
+		{name: "retry default placement after access restored", wantSession: "discord:999", allocate: true, restoreAccess: true, wantError: "adapter placement: upstream HTTP 403"},
+		{name: "retry thread reuse after access restored", reuse: true, wantSession: "discord:123", restoreAccess: true, wantError: "adapter placement: upstream HTTP 403"},
 		{name: "same parent", parent: "77", wantSession: "discord:999", allocate: true},
 		{name: "same channel session", session: "discord:456:22", wantSession: "discord:456:22"},
-		{name: "cross-channel parent", parent: "88", wantError: "expected development channel 77, got review channel 88"},
-		{name: "cross-channel session", session: "discord:789", wantError: "expected development channel 77, got review channel 88"},
-		{name: "destination is unavailable", session: "discord:555", wantError: "read review conversation"},
+		{name: "cross-channel parent", parent: "88", wantError: "review and development parents differ"},
+		{name: "cross-channel session", session: "discord:789", wantError: "review and development parents differ"},
+		{name: "destination is unavailable", session: "discord:555", wantError: "adapter placement: upstream HTTP 403"},
 		{name: "disabled permits cross-channel session", session: "discord:789", wantSession: "discord:789", disabled: true},
 	}
 	for _, mode := range []string{"legacy", "cooperative"} {
@@ -64,17 +64,17 @@ func TestRequireSameReviewChannel(t *testing.T) {
 					}
 					return out.Result(), nil
 				})}
-				e, err := ccconnect.New(client, "http://127.0.0.1:9111/hook", "hook", "discord")
+				e, err := adaptertest.Discord(t, "chat", client, "http://127.0.0.1:9111/hook", "hook", "discord")
 				if err != nil {
 					t.Fatal(err)
 				}
-				route := &execution.Route{Provider: ccconnect.Name, Target: "reviewer", Parent: tc.parent, Session: tc.session}
+				route := &execution.Route{Provider: "chat", Target: "reviewer", Parent: tc.parent, Session: tc.session}
 				repo := Repository{
 					Repo: "acme/project", TaskMode: mode, ReviewerLogin: "reviewer",
 					ReviewerRoute: route,
 					Review:        &ReviewFeatures{RequireSameChannel: !tc.disabled, ReuseDevelopmentThread: tc.reuse},
 				}
-				s, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: e})
+				s, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{"chat": e})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -87,7 +87,7 @@ func TestRequireSameReviewChannel(t *testing.T) {
 				}
 				seed := &Work{
 					Repo: repo.Repo, Pull: p, Linked: true,
-					Developer: Assignee{Route: &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}},
+					Developer: Assignee{Route: &execution.Route{Provider: "chat", Target: "developer", Session: "discord:123"}},
 					Reviewer:  Assignee{GitHubLogin: "reviewer", Route: route},
 				}
 				seed.ReviewerOverride = cloneAssignee(seed.Reviewer)

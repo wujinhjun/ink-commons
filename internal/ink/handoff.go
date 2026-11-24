@@ -30,6 +30,8 @@ type TaskHandoff struct {
 }
 
 type TaskWake struct {
+	Route               *execution.Route                  `json:"route,omitempty"`
+	Request             *execution.Delivery               `json:"request,omitempty"`
 	Preparation         string                            `json:"preparation,omitempty"`
 	PreparationAttempts int                               `json:"preparation_attempts,omitempty"`
 	Allocation          *execution.ConversationAllocation `json:"allocation,omitempty"`
@@ -108,7 +110,12 @@ func (w *Work) handoffMergeBlocked() bool {
 }
 
 func reviewChannelUnverified(w *Work, t *Task) bool {
-	return t.Handoff.Assignee.Route != nil && t.Handoff.Wake.Preparation != "prepared" && deliveryFor(w, t, "", 0).RequireSameChannel
+	route := t.Handoff.Assignee.Route
+	if route == nil || t.Handoff.Wake.Preparation == "prepared" {
+		return false
+	}
+	d := deliveryFor(w, t, "", 0)
+	return policyNeedsPlacement(*route, d.RequireSameChannel, d.ReuseDevelopmentThread)
 }
 
 func handoffResponse(w *Work, t *Task, first bool) map[string]any {
@@ -189,6 +196,12 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		if reviewChannelUnverified(w, t) {
 			fail(out, apiError{409, "review channel must be verified before claiming"})
 			return
+		}
+		if owner.Route != nil {
+			if err := s.validateReviewPreparation(w); err != nil {
+				fail(out, apiError{409, "review preparation: " + err.Error()})
+				return
+			}
 		}
 		if err := s.freezeTaskConfig(w); err != nil {
 			fail(out, err)
@@ -417,9 +430,9 @@ func (w *Work) refreshHandoffWorkflow(now time.Time, c Reliability) {
 						message = "Conversation allocation is unresolved. Verify the thread, then bind it with ink review --session."
 					}
 					if h.Wake.RecoveryStopped {
-						message = "Discord rejected conversation creation. Correct the reported error and assign a verified session."
+						message = "Conversation recovery was stopped. Assign a verified session."
 					} else if h.Wake.canRecover() {
-						message = "Conversation allocation is unresolved. Same-channel thread lookup will retry."
+						message = "Conversation allocation is unresolved. The adapter will look up the original allocation."
 					}
 					w.raiseAlert("task_preparation_unknown", t.ID, message, now)
 				}

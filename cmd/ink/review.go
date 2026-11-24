@@ -24,12 +24,12 @@ func review(args []string) error {
 	flags := flag.NewFlagSet("review", flag.ContinueOnError)
 	githubCommand := flags.String("github-command", "", "CLI for the configured GitHub reviewer identity")
 	login := flags.String("github-login", "", "GitHub account that will submit the review")
-	provider := flags.String("provider", "cc-connect", "execution provider")
-	target := flags.String("target", "", "execution target, e.g. a cc-connect project")
+	provider := flags.String("provider", "", "execution provider")
+	target := flags.String("target", "", "execution target")
 	parent := flags.String("parent", "", "parent channel override (default: development conversation channel)")
 	session := flags.String("session", "", "existing execution session to reuse")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: ink review --github-login LOGIN [--target PROJECT [--parent CHANNEL_ID]] PR_URL")
+		fmt.Fprintln(flags.Output(), "Usage: ink review --github-login LOGIN [--provider NAME --target TARGET [--parent PARENT]] PR_URL")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -51,9 +51,9 @@ func review(args []string) error {
 		GitHubLogin   string           `json:"github_login"`
 		Route         *execution.Route `json:"route,omitempty"`
 	}{Role: "reviewer", GitHubLogin: strings.TrimSpace(*login), GitHubCommand: strings.TrimSpace(*githubCommand)}
-	if *target != "" || *parent != "" || *session != "" {
-		if strings.TrimSpace(*target) == "" {
-			return errors.New("--target is required for an execution route")
+	if *provider != "" || *target != "" || *parent != "" || *session != "" {
+		if strings.TrimSpace(*provider) == "" || strings.TrimSpace(*target) == "" {
+			return errors.New("--provider and --target are required for an execution route")
 		}
 		change.Route = &execution.Route{Provider: *provider, Target: *target, Parent: *parent, Session: *session}
 	}

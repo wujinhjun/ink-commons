@@ -588,17 +588,35 @@ def ink_plist(release, settings, user):
 
 def check_provider_endpoints(config):
     from urllib.parse import urlsplit
-    for key in ('cc_connect_url', 'http_provider_url'):
-        if not config.get(key):
-            continue
-        url = urlsplit(config[key])
-        if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password:
-            raise DeploymentError('invalid configured provider endpoint: ' + key)
+    endpoints = [(key, config[key]) for key in ('cc_connect_url', 'http_provider_url') if config.get(key)]
+    providers = config.get('providers')
+    if providers is not None:
+        if not isinstance(providers, dict):
+            raise DeploymentError('providers must be an object')
+        for name, entry in providers.items():
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name):
+                raise DeploymentError('invalid configured provider name')
+            label = 'providers.' + name + '.url'
+            address = entry.get('url') if isinstance(entry, dict) else None
+            endpoints.append((label, address))
+    for label, address in endpoints:
+        invalid = 'invalid configured provider endpoint: ' + label
+        if not isinstance(address, str):
+            raise DeploymentError(invalid)
         try:
-            with socket.create_connection((url.hostname, url.port or (443 if url.scheme == 'https' else 80)), timeout=2):
+            url = urlsplit(address)
+            port = url.port
+            if (url.scheme not in ('http', 'https') or not url.hostname or
+                    url.username is not None or url.password is not None or url.query or url.fragment):
+                raise DeploymentError(invalid)
+        except ValueError:
+            raise DeploymentError(invalid) from None
+        try:
+            with socket.create_connection((url.hostname, port if port is not None else
+                                           (443 if url.scheme == 'https' else 80)), timeout=2):
                 pass
         except OSError:
-            raise DeploymentError('configured provider endpoint unavailable: ' + key) from None
+            raise DeploymentError('configured provider endpoint unavailable: ' + label) from None
 
 
 def local_get(data, path, timeout=25):

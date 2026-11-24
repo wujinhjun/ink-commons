@@ -85,6 +85,7 @@ type Attempt struct {
 }
 
 type Task struct {
+	Preparation        *TaskWake           `json:"preparation,omitempty"`
 	AttemptsExhausted  bool                `json:"attempts_exhausted,omitempty"`
 	PreparationInvalid bool                `json:"preparation_invalid,omitempty"`
 	ConflictBase       *PullBase           `json:"conflict_base,omitempty"`
@@ -202,7 +203,7 @@ func (w *Work) setTask(task Task, assignee Assignee, now time.Time) {
 }
 
 func (w *Work) replaceTask(task *Task) {
-	if w.Task != nil && (len(w.Task.Runs) > 0 || w.Task.Handoff != nil) {
+	if w.Task != nil && (len(w.Task.Runs) > 0 || w.Task.Handoff != nil || w.Task.Preparation != nil) {
 		if h := w.Task.Handoff; h != nil && h.State == "pending" {
 			h.State = "superseded"
 		}

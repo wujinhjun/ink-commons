@@ -27,7 +27,7 @@ type notificationExecutor struct {
 
 func (e *notificationExecutor) NotificationACKRequired() bool { return e.requireACK }
 
-func (e *notificationExecutor) Notify(_ context.Context, r execution.Route, n execution.Notification) error {
+func (e *notificationExecutor) Notify(_ context.Context, r execution.Route, n execution.Notification, _ bool) error {
 	if e.onNotify != nil {
 		e.onNotify()
 	}

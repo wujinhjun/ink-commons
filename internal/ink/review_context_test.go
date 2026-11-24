@@ -9,13 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wujinhjun/ink-commons/internal/execution"
-	"github.com/wujinhjun/ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution/adaptertest"
 )
 
 type historyExecutor struct {
@@ -23,30 +22,43 @@ type historyExecutor struct {
 	calls  int
 	source execution.Route
 	before string
+	cutoff string
 	onRead func()
 }
 
-func (e *historyExecutor) ReadConversation(_ context.Context, r execution.Route, before string) (execution.ConversationPage, error) {
+func (e *historyExecutor) ReadConversation(_ context.Context, r execution.Route, d execution.Delivery, before string) (execution.ConversationPage, error) {
 	e.calls++
 	e.source = r
-	e.before = before
+	e.before, e.cutoff = before, d.ContextBefore
 	if e.onRead != nil {
 		e.onRead()
 	}
-	return execution.ConversationPage{Session: r.Session, Before: before, Messages: []execution.ConversationMessage{{ID: "100", Content: "original user requirement"}}}, nil
+	return execution.ConversationPage{TaskID: d.TaskID, SHA: d.SHA, ReviewBefore: d.ContextBefore, Session: r.Session, Before: before, Messages: []execution.ConversationMessage{{ID: "100", Timestamp: "2025-01-01T00:00:00Z", Content: "original user requirement"}}}, nil
+}
+
+func (e *historyExecutor) ResolveReviewPlacement(_ context.Context, _ execution.Route, d execution.Delivery) (*execution.ReviewPlacement, error) {
+	p := &execution.ReviewPlacement{Parent: "77", SourceParent: "77"}
+	if d.ReuseDevelopmentThread {
+		p.Session = d.Source.Session
+	}
+	return p, nil
+}
+
+func (e *historyExecutor) PrepareAllocation(ctx context.Context, r execution.Route, d execution.Delivery, _ execution.ConversationAllocation, _ string) (string, error) {
+	return e.Prepare(ctx, r, d)
 }
 
 func reviewContextFixture(t *testing.T, enabled bool, e execution.Executor) (*Service, Repository, Pull) {
 	t.Helper()
-	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer", ReviewerRoute: &execution.Route{Provider: ccconnect.Name, Target: "reviewer"}, Review: &ReviewFeatures{ReuseDevelopmentThread: true, Context: ReviewContextFeatures{ThreadHistory: enabled}}}
-	s, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{ccconnect.Name: e})
+	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer", ReviewerRoute: &execution.Route{Provider: "chat", Target: "reviewer"}, Review: &ReviewFeatures{ReuseDevelopmentThread: true, Context: ReviewContextFeatures{ThreadHistory: enabled}}}
+	s, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, filepath.Join(t.TempDir(), stateDatabase), map[string]execution.Executor{"chat": e})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
 	p := Pull{Number: 42, State: "open", URL: "https://github.com/acme/project/pull/42"}
 	p.Head.SHA = strings.Repeat("a", 40)
-	w := &Work{Repo: repo.Repo, Pull: p, Linked: true, Developer: Assignee{Route: &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}}, Reviewer: Assignee{GitHubLogin: "reviewer", Route: repo.ReviewerRoute}}
+	w := &Work{Repo: repo.Repo, Pull: p, Linked: true, Developer: Assignee{Route: &execution.Route{Provider: "chat", Target: "developer", Session: "discord:123"}}, Reviewer: Assignee{GitHubLogin: "reviewer", Route: repo.ReviewerRoute}}
 	w.Origin = cloneRoute(w.Developer.Route)
 	st, err := loadFixture(s.store)
 	if err != nil {
@@ -85,8 +97,8 @@ func TestReviewContextGateSHAAndBoundSource(t *testing.T) {
 		}
 		w := notificationWork(t, s, repo, p)
 		want := reviewHistoryBefore(w.Task.CreatedAt)
-		if e.before != want {
-			t.Fatalf("cutoff %s != %s", e.before, want)
+		if e.cutoff != want || e.before != "" {
+			t.Fatalf("cutoff %s != %s", e.cutoff, want)
 		}
 		d := deliveryFor(w, w.Task, "attempt", 1)
 		if d.ContextBefore != want || !d.ReuseDevelopmentThread {
@@ -97,12 +109,9 @@ func TestReviewContextGateSHAAndBoundSource(t *testing.T) {
 		if res.Code != 409 || e.calls != beforeCalls {
 			t.Fatal("old SHA could read history")
 		}
-		boundary, _ := strconv.ParseUint(want, 10, 64)
-		for _, cursor := range []string{"bad", "0", strconv.FormatUint(boundary+1, 10)} {
-			res = contextRequest(t, s, "sha="+p.Head.SHA+"&before="+cursor)
-			if res.Code != 400 || e.calls != beforeCalls {
-				t.Fatal("invalid future cursor reached Discord")
-			}
+		res = contextRequest(t, s, "sha="+p.Head.SHA+"&before="+strings.Repeat("x", 513))
+		if res.Code != 400 || e.calls != beforeCalls {
+			t.Fatal("oversized cursor reached adapter")
 		}
 		res = contextRequest(t, s, "sha="+p.Head.SHA+"&before=101")
 		if res.Code != 200 || e.before != "101" {
@@ -198,7 +207,7 @@ func TestDispatchReviewReusesThreadAndProvidesContextCommand(t *testing.T) {
 		}
 		return res.Result(), nil
 	})}
-	e, err := ccconnect.New(client, "http://127.0.0.1:9111/hook", "test", "discord-test")
+	e, err := adaptertest.Discord(t, "chat", client, "http://127.0.0.1:9111/hook", "test", "discord-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +231,7 @@ func TestReviewContextAttemptCannotFollowNewDeveloperSource(t *testing.T) {
 	w := st.Work[key(repo.Repo, p.Number)]
 	request := deliveryFor(w, w.Task, "attempt", 1)
 	w.Task.Runs = []Attempt{{ID: "attempt", State: "accepted", Request: request}}
-	w.Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:456"}
+	w.Developer.Route = &execution.Route{Provider: "chat", Target: "developer", Session: "discord:456"}
 	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +320,7 @@ func TestAutomaticReviewWithHistoryMissingSourceDoesNotStartAttempt(t *testing.T
 		t.Fatal(err)
 	}
 	work := st.Work[key(repo.Repo, p.Number)]
-	work.Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}
+	work.Developer.Route = &execution.Route{Provider: "chat", Target: "developer", Session: "discord:123"}
 	work.DeveloperOverride = cloneAssignee(work.Developer)
 	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
@@ -349,7 +358,7 @@ func TestReviewPreparationFailuresDoNotReserveAttempts(t *testing.T) {
 				}
 				return w.Result(), nil
 			})}
-			e, err := ccconnect.New(client, "http://127.0.0.1:9111/hook", "hook", "discord")
+			e, err := adaptertest.Discord(t, "chat", client, "http://127.0.0.1:9111/hook", "hook", "discord")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -386,8 +395,8 @@ func TestReviewPreparationFailuresDoNotReserveAttempts(t *testing.T) {
 			}
 			st, _ = loadFixture(s.store)
 			w = st.Work[key(repo.Repo, p.Number)]
-			w.Developer.Route = &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}
-			w.Reviewer.Route = &execution.Route{Provider: ccconnect.Name, Target: "reviewer"}
+			w.Developer.Route = &execution.Route{Provider: "chat", Target: "developer", Session: "discord:123"}
+			w.Reviewer.Route = &execution.Route{Provider: "chat", Target: "reviewer"}
 			w.ReviewerOverride = cloneAssignee(w.Reviewer)
 			w.DeveloperOverride = cloneAssignee(w.Developer)
 			if err := saveFixture(s.store, st); err != nil {
@@ -408,7 +417,7 @@ func TestReuseOnlyExplicitPlacementAllowsMissingDevelopmentSource(t *testing.T) 
 	for _, placement := range []string{"session", "parent"} {
 		t.Run(placement, func(t *testing.T) {
 			calls := 0
-			e, err := ccconnect.New(&http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+			e, err := adaptertest.Discord(t, "chat", &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
 				calls++
 				w := httptest.NewRecorder()
 				switch r.URL.Path {
@@ -494,7 +503,7 @@ func cooperativeContextFixture(t *testing.T, enabled bool, claim bool) (*Service
 func reassignContextDeveloper(t *testing.T, s *Service) {
 	t.Helper()
 	out := httptest.NewRecorder()
-	s.Handler().ServeHTTP(out, httptest.NewRequest("POST", "/v1/work/acme/project/42/assign", strings.NewReader(`{"role":"developer","github_login":"replacement","route":{"provider":"cc-connect","target":"developer","session":"discord:999"}}`)))
+	s.Handler().ServeHTTP(out, httptest.NewRequest("POST", "/v1/work/acme/project/42/assign", strings.NewReader(`{"role":"developer","github_login":"replacement","route":{"provider":"chat","target":"developer","session":"discord:999"}}`)))
 	if out.Code != 200 {
 		t.Fatal(out.Code, out.Body)
 	}
