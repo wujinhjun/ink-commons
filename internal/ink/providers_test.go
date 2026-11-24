@@ -362,3 +362,91 @@ func TestDirectHTTPAllocationUsesFindAfterRestart(t *testing.T) {
 		t.Fatal("new SHA discarded the session on the same configured route")
 	}
 }
+
+func TestInvalidPreparationLeavesPendingTaskOpenToProviderCorrection(t *testing.T) {
+	for _, mode := range []string{"legacy", "cooperative"} {
+		t.Run(mode, func(t *testing.T) {
+			operation := "deliver"
+			if mode == "cooperative" {
+				operation = "wake"
+			}
+			var requests []string
+			client := &http.Client{Transport: testTransport(func(r *http.Request) (*http.Response, error) {
+				var req httpagent.Request
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatal(err)
+				}
+				requests = append(requests, req.Route.Provider+":"+req.Operation)
+				response := httptest.NewRecorder()
+				switch req.Operation {
+				case "placement":
+					reply(response, 200, httpagent.Response{Placement: &execution.ReviewPlacement{Parent: "room"}})
+				case "prepare":
+					reply(response, 200, httpagent.Response{Session: "new-session"})
+				case operation:
+					if req.Route.Session != "new-session" {
+						t.Fatalf("unexpected dispatch route: %+v", req.Route)
+					}
+					reply(response, 200, httpagent.Response{Status: "accepted"})
+				default:
+					t.Fatalf("unexpected adapter operation: %s", req.Operation)
+				}
+				return response.Result(), nil
+			})}
+			newProvider := func(capabilities ...string) execution.Executor {
+				t.Helper()
+				adapter, err := httpagent.New(client, "http://127.0.0.1:5000/execute", "", capabilities, false, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return adapter
+			}
+			repo := Repository{Repo: "acme/project", TaskMode: mode, ReviewerLogin: "reviewer",
+				ReviewerRoute: &execution.Route{Provider: "unready", Target: "reviewer"}}
+			s, _ := centralConfigService(t, Config{Repositories: []Repository{repo}}, map[string]execution.Executor{
+				"unready": newProvider("placement", operation),
+				"working": newProvider("placement", "prepare", operation),
+			})
+			var pull Pull
+			pull.Number, pull.State, pull.Head.SHA = 3, "open", strings.Repeat("a", 40)
+			if err := s.observe(repo, pull, nil); err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			s.Handler().ServeHTTP(response, httptest.NewRequest("POST", "/v1/work/acme/project/3/link",
+				strings.NewReader(`{"github_login":"developer"}`)))
+			if response.Code != http.StatusOK {
+				t.Fatalf("link failed: %s", response.Body)
+			}
+			dispatch := func() *Work {
+				t.Helper()
+				if err := s.dispatch(context.Background(), repo, pull.Number); err != nil {
+					t.Fatal(err)
+				}
+				return notificationWork(t, s, repo, pull)
+			}
+			failed := dispatch()
+			task := failed.Task
+			diagnostic := task.Error
+			if task.Handoff != nil {
+				diagnostic = task.Handoff.Wake.Error
+				if task.Handoff.Wake.Request != nil || task.Handoff.Wake.Attempts != 0 {
+					t.Fatal("failed validation persisted a wake request")
+				}
+			}
+			if failed.RoundConfig != nil || task.ConfigSnapshot != nil || task.Preparation != nil ||
+				task.Delivery != "pending" || !strings.Contains(diagnostic, "does not support prepare") {
+				t.Fatalf("failed validation froze a pending task: %+v", task)
+			}
+			configAPI(t, s, "POST", repo.Repo, "reviewer_route", `{"provider":"working","target":"reviewer"}`, http.StatusOK)
+			corrected := dispatch()
+			if corrected.Task.ID != task.ID || corrected.Task.ConfigSnapshot == nil ||
+				corrected.Reviewer.Route.Provider != "working" || corrected.Reviewer.Route.Session != "new-session" {
+				t.Fatalf("correction did not dispatch the same task: %+v", corrected.Task)
+			}
+			if got := strings.Join(requests, ","); got != "unready:placement,working:placement,working:prepare,working:"+operation {
+				t.Fatalf("unexpected adapter requests: %s", got)
+			}
+		})
+	}
+}

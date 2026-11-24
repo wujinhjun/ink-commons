@@ -111,18 +111,10 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 		s.mu.Unlock()
 		return true, err
 	}
-	if err := s.freezeTaskConfig(w); err != nil {
-		s.mu.Unlock()
-		return true, err
-	}
-	if h.Wake.Request == nil {
-		d := deliveryFor(w, t, "", 0)
-		h.Wake.Request = &d
-	}
-	d := *h.Wake.Request
 	prepared := *route
+	wake := h.Wake
 	if !recovering {
-		if err := reservePreparation(executor, &h.Wake, &prepared, d, channelCheck.placement, s.now()); err != nil {
+		if err := reservePreparation(executor, &wake, &prepared, deliveryFor(w, t, "", 0), channelCheck.placement, s.now()); err != nil {
 			h.Wake.Error = err.Error()
 			s.refreshWorkflow(w, s.now())
 			err = s.store.saveWork(w)
@@ -130,6 +122,16 @@ func (s *Service) dispatchHandoff(ctx context.Context, id string, channelCheck r
 			return true, err
 		}
 	}
+	if err := s.freezeTaskConfig(w); err != nil {
+		s.mu.Unlock()
+		return true, err
+	}
+	if wake.Request == nil {
+		d := deliveryFor(w, t, "", 0)
+		wake.Request = &d
+	}
+	h.Wake = wake
+	d := *wake.Request
 	// Until preparation is saved, claims against a newly resolved route fail.
 	needsPreparation := route.Session == ""
 	if !needsPreparation {

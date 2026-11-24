@@ -81,19 +81,20 @@ func (s *Service) prepareDirect(ctx context.Context, id string, check reviewChan
 		state.RecoveryAttempts++
 		state.RetryAt = s.now().Add(taskWakeRetryDelay(state.RecoveryAttempts))
 	} else {
-		if err := s.freezeTaskConfig(work); err != nil {
-			s.mu.Unlock()
-			return false, err
-		}
-		d := deliveryFor(work, task, "", 0)
-		state = &TaskWake{Request: &d}
-		if err := reservePreparation(provider, state, &prepared, d, check.placement, s.now()); err != nil {
+		state = &TaskWake{}
+		if err := reservePreparation(provider, state, &prepared, deliveryFor(work, task, "", 0), check.placement, s.now()); err != nil {
 			task.PreparationInvalid, task.Error = true, "conversation preparation: "+err.Error()
 			s.refreshWorkflow(work, s.now())
 			err := s.store.saveWork(work)
 			s.mu.Unlock()
 			return false, err
 		}
+		if err := s.freezeTaskConfig(work); err != nil {
+			s.mu.Unlock()
+			return false, err
+		}
+		d := deliveryFor(work, task, "", 0)
+		state.Request = &d
 		state.RetryAt = s.now().Add(taskWakeRetryDelay(1))
 		state.Route = cloneRoute(&prepared)
 		task.Preparation = state
