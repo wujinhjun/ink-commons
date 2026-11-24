@@ -18,11 +18,11 @@
 
 需要接续既有 PR 时，在停机前盘点已投递、正在运行和待交接的任务。让原领取者完成能结清的交接。对仍需提交交接或显式重试的 cooperative 任务，安全保留执行侧的原领取凭据。SQLite 备份和 JSON 导出只含领取凭据的哈希，原凭据位于领取侧状态目录的 `claims/TASK_UUID.json`，或当时通过 `--claim-file` 指定的路径。保持文件归原领取者所有、权限为 `0600`，默认 `claims` 目录权限为 `0700`。更换领取侧路径时，将原文件安全移到新默认位置，或在后续命令中通过 `--claim-file` 指向保留的文件。之后用原凭据提交交接或重试已阻塞的任务。参见 [领取与交接](handoff.md#agent-操作)。
 
-停止源 daemon 时，核对是否有新增领取凭据需要保留。迁移窗口内只允许一套 daemon 处理这些 PR。使用 [状态备份流程](../README.md#状态备份与回滚) 生成完整备份，并在目标服务用户下恢复。将 SQLite 备份和 JSON 导出当作私有运行数据保存。里面可能含有真实账号、执行路由、文件路径、会话标识和历史配置，即使当前全局配置已经替换。
+停止源 daemon 时，核对是否有新增领取凭据需要保留。迁移窗口内只允许一套 daemon 处理这些 PR。使用 [离线备份流程](deployment.md#offline-backup--diagnostics-export) 生成完整备份，并在目标服务用户下恢复。将 SQLite 备份和 JSON 导出当作私有运行数据保存。里面可能含有真实账号、执行路由、文件路径、会话标识和历史配置，即使当前全局配置已经替换。
 
 ## 重建启动环境
 
-- 为目标服务用户安装 GitHub 客户端或包装器，更新 `github_command` 和需要的 `github_merger_command` 绝对路径。配置了 reader 摘要时，用目标可执行文件的已批准摘要更新 `github_command_sha256`。专用 merger 必须设置其已批准的 `github_merger_command_sha256`。使用 GitHub App 时，在目标安装中核对 reader、reviewer 和适用的 merger 身份及对受管仓库的权限。参数与身份模式见 [GitHub CLI 适配](configuration.md#github-cli-适配) 和 [自动合入身份](../README.md#自动合入身份)。
+- 为目标服务用户安装 GitHub 客户端或包装器（或配置原生 `github_reader` / `github_merger`），更新 `github_command` 和需要的 `github_merger_command` 绝对路径。配置了 reader 摘要时，用目标可执行文件的已批准摘要更新 `github_command_sha256`。专用 merger 必须设置其已批准的 `github_merger_command_sha256`。使用 GitHub App 时，在目标安装中核对 reader、reviewer 和适用的 merger 身份及对受管仓库的权限。参数与身份模式见 [GitHub CLI 适配](configuration.md#github-cli-适配) 和 [GitHub 凭据与合入契约](github-contracts.md)。
 - 将旧 `cc_connect_url`、`http_provider_url` 和 `http_provider_execution` 转为 [具名 `providers`](adapters.md)。为保留已有路由，可沿用原 provider 名称。旧 cc-connect webhook 配置和 Discord 凭据放入独立 Adapter 环境，daemon 只持有对应的 Adapter Bearer 凭据。旧托管 HTTP 服务需要实现 [只读准入声明](adapter-http-v1.md#managed-admission) 后才能启用 `managed`。
 - 按目标平台准备服务，参见 [systemd 与 launchd 服务模板](../deploy/README.md)。接续既有 PR 时，先准备目标二进制与环境文件，按下节核查后再启动正式服务。
 
@@ -48,7 +48,7 @@ ink config list --repo example/project --pr 42 --effective
 
 核对 `reviewer_login`、`reviewer_command`、`human_developer` 和 `reviewer_route`，用 [`ink config set` 或 `unset`](configuration.md#cli) 修正相应作用域。PR 的显式指派可覆盖仓库设置。将 `post_approval.command` 指向目标主机上可执行的绝对路径，并在恢复批准处理前部署该文件。将显式 `task_blocked.discord_channel_id` 改为包含 provider、target、session 的 `task_blocked.route`。沿用 v6 数据库时，由旧版 daemon 先 unset 所有含旧字段的阻塞通知配置，切换后通过新版恢复。纯会话 ID 的历史通知仅在能匹配原任务的冻结来源时恢复。若要保留按开发会话自动放置，移除旧 cc-connect 审查路由中此前被忽略的默认 `parent`，因为具名路由现在会采用它。
 
-已冻结的任务配置、投递回执、PR 负责人、会话绑定和已准备的批准事件会随备份恢复。用 [工作项 API](../README.md#本地-api) 逐项核对 `config_snapshot`、显式指派和运行状态。改全局或仓库默认值只会影响后续配置解析。已保留的批准事件继续沿用其已记录的命令和去重记录。参见 [任务生效边界](configuration.md#任务生效边界)。
+已冻结的任务配置、投递回执、PR 负责人、会话绑定和已准备的批准事件会随备份恢复。用 [`ink work` 命令](cli.md#work-items) 逐项核对 `config_snapshot`、显式指派和运行状态。改全局或仓库默认值只会影响后续配置解析。已保留的批准事件继续沿用其已记录的命令和去重记录。参见 [任务生效边界](configuration.md#任务生效边界)。
 
 发现旧路由时，可在目标端保持核查模式，按下面的顺序处理：
 
@@ -71,4 +71,4 @@ ink review --github-login 'reviewer[bot]' --provider cc-connect --target new-rev
 
 以实际运行 Agent 的用户执行 `ink init` 和 `ink init --check`。使用自定义发现目录时，两条命令都传相同的 `--skills-dir`。启动新的 Agent 会话加载指令。
 
-需要从 Git 推送登记开发来源时，在目标 checkout 检查 `git config --get core.hooksPath`。未设置时，使用 `git rev-parse --git-path hooks/pre-push` 确定安装位置。按 [pre-push 说明](../README.md#开始) 安装或接入现有 hook，再确认从实际运行 Git 的环境能通过 `PATH` 或设置的 `INK_BIN` 找到 `ink`，并能访问目标 daemon 的 socket。也可通过 [工作项 API](../README.md#本地-api) 显式登记来源。
+需要从 Git 推送登记开发来源时，在目标 checkout 检查 `git config --get core.hooksPath`。未设置时，使用 `git rev-parse --git-path hooks/pre-push` 确定安装位置。按 [pre-push 说明](deployment.md#optional-git-pre-push-provenance-hook) 安装或接入现有 hook，再确认从实际运行 Git 的环境能通过 `PATH` 或设置的 `INK_BIN` 找到 `ink`，并能访问目标 daemon 的 socket。也可通过 [`ink work link`](cli.md#work-items) 显式登记来源。

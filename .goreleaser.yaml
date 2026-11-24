@@ -33,6 +33,7 @@ archives:
     formats: [tar.gz]
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
     files:
+      - LICENSE
       - config.example.json
       - config.schema.json
       - deploy/README.md

@@ -17,6 +17,19 @@ import (
 
 const prePushHook = `#!/bin/sh
 if [ "$#" -ge 2 ]; then
+  if [ -n "${INK_BIN:-}" ]; then
+    "$INK_BIN" pre-push "$2"
+  elif command -v ink >/dev/null 2>&1; then
+    ink pre-push "$2"
+  elif [ -x "$HOME/.local/lib/ink-commons/ink" ]; then
+    "$HOME/.local/lib/ink-commons/ink" pre-push "$2"
+  fi
+fi
+exit 0
+`
+
+const legacyPrePushHook = `#!/bin/sh
+if [ "$#" -ge 2 ]; then
   "$HOME/.local/lib/ink-commons/ink" pre-push "$2"
 fi
 exit 0
@@ -116,7 +129,7 @@ func hookStatus(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if bytes.Equal(content, []byte(prePushHook)) {
+	if bytes.Equal(content, []byte(prePushHook)) || bytes.Equal(content, []byte(legacyPrePushHook)) {
 		return "installed", nil
 	}
 	return "unmanaged", nil
