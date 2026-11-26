@@ -1,9 +1,7 @@
 name: Ink Commons CI
 
 on:
-  pull_request:
-  push:
-    branches: [main, feat/opensource-v0.1]
+  workflow_dispatch:
 
 permissions:
   contents: read
