@@ -1,22 +1,28 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type Service struct {
+	now                func() time.Time
+	log                *slog.Logger
+	pollMu             sync.Mutex
+	pullLocks          pullLocks
+	hooks              approvalQueue
 	store              *stateStore
 	workspaceMu        sync.Mutex
 	workspaceRoot      string
@@ -30,6 +36,13 @@ type Service struct {
 }
 
 func NewService(config Config, path string, providers map[string]execution.Executor) (*Service, error) {
+	logger, err := newLogger(os.Stderr, config.LogLevel, config.LogFormat)
+	if err != nil {
+		return nil, err
+	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
 	if config.WorkspaceFullSlots < 0 || config.WorkspaceFullSlots > 32 {
 		return nil, fmt.Errorf("workspace_full_slots must be between 0 and 32")
 	}
@@ -49,94 +62,18 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 			return nil, err
 		}
 	}
+	up, err := configuredUpstream(config)
+	if err != nil {
+		return nil, err
+	}
 	store, err := openStore(path)
 	if err != nil {
 		return nil, err
 	}
-	st, err := store.load()
-	if err != nil {
+	if err := store.initializeConfig(config); err != nil {
 		store.db.Close()
 		return nil, err
 	}
-	if err := store.migrateConfig(config, st); err != nil {
-		store.db.Close()
-		return nil, err
-	}
-	records, err := store.configRecords()
-	if err != nil {
-		store.db.Close()
-		return nil, err
-	}
-	for _, record := range records {
-		if record.Scope == legacyConfigScope {
-			continue
-		}
-		if _, err := effectiveFromRecords(records, record.Scope); err != nil {
-			store.db.Close()
-			return nil, err
-		}
-	}
-	changed := false
-	for _, w := range st.Work {
-		if w.InheritsConfig == nil {
-			managed := false
-			w.InheritsConfig = &managed
-			w.ReviewerOverride = cloneAssignee(w.Reviewer)
-			w.DeveloperOverride = cloneAssignee(w.Developer)
-		}
-		for _, t := range w.executionTasks() {
-			if t.ConfigSnapshot == nil && taskStarted(t) {
-				effective, err := store.effectiveConfig(w.Repo)
-				if err != nil {
-					// Historical state can contain work whose repository was removed.
-					// Preserve it for recovery without registering it again.
-					effective, err = resolveConfig("", nil, nil, 0)
-					if err != nil {
-						store.db.Close()
-						return nil, err
-					}
-					effective.Repository.Repo = w.Repo
-					effective.Execution = config.Reliability.defaults()
-				}
-				effective.Repository.ReviewerLogin = w.Reviewer.GitHubLogin
-				effective.Repository.ReviewerCommand = w.Reviewer.GitHubCommand
-				effective.Repository.ReviewerRoute = cloneAssignee(w.Reviewer).Route
-				effective.Repository.HumanDeveloper = w.Developer.GitHubLogin
-				effective.Repository.Review = w.Review
-				effective.Repository.TaskMode = normalTaskMode(w.TaskMode)
-				t.ConfigSnapshot = &TaskConfigSnapshot{EffectiveConfig: effective, Reviewer: *cloneAssignee(w.Reviewer), Developer: *cloneAssignee(w.Developer), Legacy: true, SHA: t.SHA, Source: cloneRoute(reviewSource(w))}
-				if t.Handoff != nil {
-					if t.Role == "reviewer" {
-						t.ConfigSnapshot.Reviewer = *cloneAssignee(t.Handoff.Assignee)
-					} else {
-						t.ConfigSnapshot.Developer = *cloneAssignee(t.Handoff.Assignee)
-					}
-				}
-				if len(t.Runs) > 0 {
-					t.ConfigSnapshot.Source = cloneRoute(t.Runs[len(t.Runs)-1].Request.Source)
-				}
-				if t.Role == "reviewer" && t.SHA == w.Pull.Head.SHA {
-					w.RoundConfig = copyTaskSnapshot(t.ConfigSnapshot)
-				}
-			}
-		}
-		if migrateExecution(w) {
-			changed = true
-		}
-		w.refreshWorkflow(time.Now(), config.Reliability.defaults())
-		changed = true
-	}
-	if changed {
-		if err := store.save(st); err != nil {
-			store.db.Close()
-			return nil, err
-		}
-	}
-	up := newUpstream(config.GitHubToken)
-	up.command = config.GitHubCommand
-	up.commandDigest = config.GitHubCommandSHA256
-	up.readArgs, up.mergeArgs = config.GitHubReadArgs, config.GitHubMergeArgs
-	up.mergerCommand, up.mergerDigest = config.GitHubMergerCommand, config.GitHubMergerSHA256
 	stateDir := filepath.Dir(path)
 	if resolved, err := filepath.EvalSymlinks(stateDir); err == nil {
 		stateDir = resolved
@@ -144,11 +81,16 @@ func NewService(config Config, path string, providers map[string]execution.Execu
 	if absolute, err := filepath.Abs(stateDir); err == nil {
 		stateDir = absolute
 	}
-	return &Service{store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool),
+	return &Service{now: config.Now, log: logger, store: store, config: config, up: up, providers: providers, delivering: make(map[string]bool),
 		workspaceRoot: filepath.Join(stateDir, "workspaces"), fullWorkspaceSlots: config.WorkspaceFullSlots}, nil
 }
 
-func (s *Service) Close() error { return s.store.db.Close() }
+func (s *Service) Close() error {
+	s.stopApprovals()
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+	return s.store.db.Close()
+}
 
 // Caller holds s.mu. All repository policy is resolved from central SQLite.
 func (s *Service) repo(name string) (Repository, bool) {
@@ -161,158 +103,43 @@ func (s *Service) repositories() []Repository {
 	defer s.mu.Unlock()
 	repos, err := s.runtimeRepositories()
 	if err != nil {
-		log.Printf("load repository configuration: %v", err)
+		s.warnError("load repository configuration", err)
 	}
 	return repos
 }
 
-func (s *Service) recordPushes(st *state, pushes []Push, now time.Time) {
+func (s *Service) recordPushes(pushes []Push, now time.Time) error {
+	records, err := s.store.configRecords()
+	if err != nil {
+		return err
+	}
+	registered := recordMap(records)
+	accepted := make([]Push, 0, len(pushes))
 	for _, p := range pushes {
-		if _, ok := s.repo(p.Repo); !ok {
-			continue
-		}
-		p.At = now
-		replaced := false
-		for i, old := range st.Pushes {
-			if p.Repo == old.Repo && p.Ref == old.Ref && p.SHA == old.SHA && p.Route == old.Route {
-				st.Pushes[i] = p
-				replaced = true
-				break
-			}
-		}
-		if !replaced {
-			st.Pushes = append(st.Pushes, p)
+		if _, ok := registered[p.Repo]; ok && p.Repo != "" {
+			p.At = now
+			accepted = append(accepted, p)
 		}
 	}
-}
-
-func matchOrigin(pushes []Push, pull Pull) *execution.Route {
-	if pull.Head.Repo == nil || !validSHA(pull.Head.SHA) {
-		return nil
-	}
-	var match *execution.Route
-	for _, p := range pushes {
-		if !strings.EqualFold(p.Repo, pull.Head.Repo.FullName) || p.Ref != pull.Head.Ref || p.SHA != pull.Head.SHA {
-			continue
-		}
-		if match != nil && *match != p.Route {
-			return nil
-		}
-		route := p.Route
-		match = &route
-	}
-	return match
+	return s.store.savePushes(accepted, now)
 }
 
 func key(repo string, number int) string { return fmt.Sprintf("%s#%d", repo, number) }
 
-func (s *Service) Poll(ctx context.Context) {
-	defer func() { s.lastPoll.Store(time.Now().Unix()) }()
-	if err := s.reconcileBlockedNotices(ctx); err != nil {
-		log.Printf("blocked task notifications: %v", err)
-	}
-	if err := s.reconcileHandoffs(ctx); err != nil {
-		log.Printf("handoff verification: %v", err)
-	}
-	if err := s.reconcileExecutions(ctx); err != nil {
-		log.Printf("execution recovery: %v", err)
-	}
-	for _, repo := range s.repositories() {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := s.pollRepo(ctx, repo); err != nil {
-			log.Printf("sync %s: %v", repo.Repo, err)
-		}
-	}
-}
-
-func (s *Service) pollRepo(ctx context.Context, repo Repository) error {
-	path := "/repos/" + repo.Repo + "/pulls"
-	pulls, err := listPages[Pull](ctx, s.up, path+"?state=open")
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	snapshot, err := s.store.load()
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-
-	open := make(map[int]bool, len(pulls))
-	for _, pull := range pulls {
-		open[pull.Number] = true
-	}
-	for _, work := range snapshot.Work {
-		if work.Repo != repo.Repo || (work.Pull.State != "open" && !work.pendingMergedNotification() && !hasInFlightAutoMerge(work)) || open[work.Pull.Number] {
-			continue
-		}
-		var pull Pull
-		_, err := s.up.gitHubGet(ctx, fmt.Sprintf("%s/%d", path, work.Pull.Number), &pull)
-		if err != nil {
-			log.Printf("refresh %s: %v", key(repo.Repo, work.Pull.Number), err)
-			continue
-		}
-		pulls = append(pulls, pull)
-	}
-	for _, pull := range pulls {
-		if pull.Number <= 0 || (pull.State != "closed" && (pull.State != "open" || !validSHA(pull.Head.SHA))) {
-			continue
-		}
-		var reviews []Review
-		if pull.State == "open" && !pull.Draft {
-			reviews, err = listPages[Review](ctx, s.up, fmt.Sprintf("%s/%d/reviews", path, pull.Number))
-			if err != nil {
-				log.Printf("reviews %s: %v", key(repo.Repo, pull.Number), err)
-				continue
-			}
-		}
-		if err := s.observe(repo, pull, reviews); err != nil {
-			return err
-		}
-		if err := s.notifyApproved(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-		if err := s.postApproval(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-		if err := s.autoMerge(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-		if err := s.notifyMerged(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-		if err := s.dispatch(ctx, repo, pull.Number); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	work, err := s.store.loadWork(key(repo.Repo, pull.Number))
 	if err != nil {
 		return err
 	}
-	prunePushes(&st, time.Now())
-	id := key(repo.Repo, pull.Number)
-	work := st.Work[id]
+	return s.saveObservation(repo, pull, reviews, work)
+}
+
+// Caller holds s.mu.
+func (s *Service) saveObservation(repo Repository, pull Pull, reviews []Review, work *Work) error {
 	if work == nil {
-		managed := true
-		work = &Work{InheritsConfig: &managed, Repo: repo.Repo, Reviewer: Assignee{GitHubLogin: repo.ReviewerLogin, GitHubCommand: repo.ReviewerCommand}, Developer: Assignee{GitHubLogin: repo.HumanDeveloper}}
-		if repo.ReviewerRoute != nil {
-			route := *repo.ReviewerRoute
-			// Discord placement belongs to this PR's development conversation.
-			// Legacy repository parents must not silently move new reviews elsewhere.
-			if route.Provider == ccconnect.Name && route.Session == "" {
-				route.Parent = ""
-			}
-			work.Reviewer.Route = &route
-		}
-		st.Work[id] = work
+		work = &Work{Repo: repo.Repo}
 	}
 	work.Version++
 	work.Pull = pull
@@ -324,21 +151,25 @@ func (s *Service) observe(repo Repository, pull Pull, reviews []Review) error {
 	repo = latest.Repository
 	s.refreshPendingConfig(work, repo)
 	if pull.State == "open" && !work.Linked {
-		if origin := matchOrigin(st.Pushes, pull); origin != nil {
+		origin, err := s.store.matchOrigin(pull, s.now())
+		if err != nil {
+			return err
+		}
+		if origin != nil {
 			work.Origin, work.Linked, work.Developer.Route = origin, true, origin
 		}
 	}
 	if pull.State == "open" && !pull.Draft {
 		work.Reviews = mergeReviews(work.Reviews, reviews)
 	}
-	work.derive()
+	work.derive(s.now())
 	if work.Task != nil && work.Task.Delivery == "manual" && !taskStarted(work.Task) {
 		if err := s.freezeTaskConfig(work); err != nil {
 			return err
 		}
 	}
-	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	return s.store.save(st)
+	s.refreshWorkflow(work, s.now())
+	return s.store.saveWork(work)
 }
 
 func mergeReviews(previous, current []Review) []Review {
@@ -361,54 +192,56 @@ func mergeReviews(previous, current []Review) []Review {
 	return current
 }
 
-func prunePushes(st *state, now time.Time) {
-	cutoff := now.Add(-7 * 24 * time.Hour)
-	kept := st.Pushes[:0]
-	for _, push := range st.Pushes {
-		if push.At.After(cutoff) {
-			kept = append(kept, push)
-		}
-	}
-	st.Pushes = kept
-}
-
-func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Work, error) {
+func (s *Service) beginDelivery(ctx context.Context, id string, channelCheck reviewChannelCheck) (*Work, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	work, err := s.store.loadWork(id)
 	if err != nil {
 		return nil, err
 	}
-	work := st.Work[id]
+	if !matchesObservation(ctx, work) {
+		return nil, nil
+	}
 	if work != nil {
 		if err := s.preparePendingConfig(work); err != nil {
 			return nil, err
 		}
 	}
-	if work == nil || work.Task == nil || work.Task.Handoff != nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || time.Now().Before(work.Task.RetryAt) {
+	if work == nil || work.Task == nil || work.Task.Handoff != nil || work.Task.Delivery != "pending" || s.delivering[id] || work.executionBlocked() || s.now().Before(work.Task.RetryAt) {
 		return nil, nil
 	}
 	// Missing provenance is a local configuration problem, not an unknown
 	// external execution. Reject it before reserving an attempt or session.
 	if err := s.validateReviewPreparation(work); err != nil {
+		work.Task.PreparationInvalid = true
 		work.Task.Error = "review preparation: " + err.Error()
-		work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-		return nil, s.store.save(st)
+		s.refreshWorkflow(work, s.now())
+		return nil, s.store.saveWork(work)
 	}
 
 	if current, err := channelCheck.result(s, work); !current || err != nil {
 		if err != nil {
+			work.Task.PreparationInvalid = true
 			work.Task.Error = "review preparation: " + err.Error()
-			work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-			return nil, s.store.save(st)
+			s.refreshWorkflow(work, s.now())
+			return nil, s.store.saveWork(work)
 		}
 		return nil, nil
 	}
 
+	route := taskRoute(work, work.Task)
+	if route == nil || !route.Valid(false) {
+		return nil, fmt.Errorf("pending task has no resolved execution route")
+	}
+	provider := s.providers[route.Provider]
+	if !execution.Supports(provider, "deliver", provider != nil) {
+		return nil, fmt.Errorf("execution provider does not support deliver")
+	}
 	if err := s.freezeTaskConfig(work); err != nil {
 		return nil, err
 	}
 
+	work.Task.PreparationInvalid = false
 	// Persist the attempt before making external requests. If the daemon restarts
 	// during delivery, the operator can inspect the unknown outcome before retrying.
 	work.Task.Delivery, work.Task.Error = "unknown", "delivery interrupted or in progress"
@@ -416,14 +249,10 @@ func (s *Service) beginDelivery(id string, channelCheck reviewChannelCheck) (*Wo
 	if work.Task.ID == "" {
 		work.Task.ID = uuid.NewString()
 	}
-	route := taskRoute(work, work.Task)
-	if route == nil {
-		return nil, fmt.Errorf("pending task has no execution route")
-	}
 	attemptID := uuid.NewString()
 	work.Task.RetryAt = time.Time{}
-	work.Task.Runs = append(work.Task.Runs, Attempt{ID: attemptID, Number: work.Task.Attempts, Route: *route, Request: deliveryFor(work, work.Task, attemptID, work.Task.Attempts), State: "unknown", CreatedAt: time.Now()})
-	if err := s.store.save(st); err != nil {
+	work.Task.Runs = append(work.Task.Runs, Attempt{ID: attemptID, Number: work.Task.Attempts, Route: *route, Request: deliveryFor(work, work.Task, attemptID, work.Task.Attempts), State: "unknown", CreatedAt: s.now()})
+	if err := s.store.saveWork(work); err != nil {
 		return nil, err
 	}
 	s.delivering[id] = true
@@ -434,11 +263,10 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Reload so hooks and operations on other PRs can save while delivery runs.
-	st, err := s.store.load()
+	live, err := s.store.loadWork(id)
 	if err != nil {
 		return err
 	}
-	live := st.Work[id]
 	if live == nil {
 		return nil
 	}
@@ -459,8 +287,8 @@ func (s *Service) saveDelivery(id string, work *Work) error {
 			}
 		}
 	}
-	live.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	return s.store.save(st)
+	s.refreshWorkflow(live, s.now())
+	return s.store.saveWork(live)
 }
 
 func (s *Service) dispatch(ctx context.Context, repo Repository, number int) error {
@@ -472,10 +300,26 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 	if err != nil {
 		return err
 	}
+	if _, guarded := ctx.Value(observationKey{}).(prObservation); guarded {
+		live, err := s.store.loadWork(id)
+		if err != nil {
+			return err
+		}
+		if !matchesObservation(ctx, live) || live.Task == nil || live.Task.Delivery != "pending" {
+			return nil
+		}
+		if current, err := s.observedHeadCurrent(ctx); err != nil || !current {
+			return err
+		}
+	}
 	if handled, err := s.dispatchHandoff(ctx, id, channelCheck); handled || err != nil {
 		return err
 	}
-	work, err := s.beginDelivery(id, channelCheck)
+	ready, err := s.prepareDirect(ctx, id, channelCheck)
+	if err != nil || !ready {
+		return err
+	}
+	work, err := s.beginDelivery(ctx, id, channelCheck)
 	if err != nil || work == nil {
 		return err
 	}
@@ -485,63 +329,14 @@ func (s *Service) dispatch(ctx context.Context, repo Repository, number int) err
 		s.mu.Unlock()
 	}()
 	task := work.Task
-	if task.ConfigSnapshot != nil {
-		repo = task.ConfigSnapshot.Repository
-	}
-	route := work.Developer.Route
-	if task.Role == "reviewer" {
-		route = work.Reviewer.Route
-	}
-	if route == nil {
-		return fmt.Errorf("pending task has no assignee route")
-	}
-	executor, ok := s.providers[route.Provider]
-	if !ok {
-		task.Error = "execution provider is not configured"
-		return s.saveDelivery(id, work)
-	}
+	route := taskRoute(work, task)
+	executor := s.providers[route.Provider]
 	attempt := &task.Runs[len(task.Runs)-1]
 	delivery := attempt.Request
-	if route.Session == "" {
-		*route = allocationRoute(repo, *route)
-		attempt.Route = *route
-		if err := s.saveDelivery(id, work); err != nil {
-			return err
-		}
-		if err := execution.ValidateDestination(s.providers, *route, true); err != nil {
-			task.Error = "invalid unallocated destination: " + err.Error()
-			return s.saveDelivery(id, work)
-		}
-		if err := execution.ValidatePreparation(s.providers, *route, delivery); err != nil {
-			task.Error = "invalid preparation context: " + err.Error()
-			return s.saveDelivery(id, work)
-		}
-		preparation := delivery
-		if delivery.RequireSameChannel {
-			preparation.ReviewPlacement = channelCheck.placement
-		}
-		session, err := executor.Prepare(ctx, *route, preparation)
-		if err != nil {
-			task.Error = "prepare destination: " + err.Error()
-			return s.saveDelivery(id, work)
-		}
-		prepared := *route
-		prepared.Session = session
-		if err := execution.ValidateDestination(s.providers, prepared, false); err != nil {
-			task.Error = "provider returned an invalid destination"
-			return s.saveDelivery(id, work)
-		}
-		*route = prepared
-		attempt.Route = prepared
-		if err := s.saveDelivery(id, work); err != nil {
-			return err
-		}
-	}
 	// Do not deliver a task superseded while its session was being allocated.
 	s.mu.Lock()
-	latest, loadErr := s.store.load()
-	live := latest.Work[id]
-	current := loadErr == nil && live != nil && live.Task != nil && live.Task.ID == task.ID
+	live, loadErr := s.store.loadWork(id)
+	current := loadErr == nil && live != nil && live.Task != nil && live.Task.ID == task.ID && matchesObservation(ctx, live)
 	s.mu.Unlock()
 	if loadErr != nil {
 		return loadErr
@@ -564,16 +359,4 @@ func reviewSource(work *Work) *execution.Route {
 		return work.Developer.Route
 	}
 	return work.Origin
-}
-
-func allocationRoute(repo Repository, route execution.Route) execution.Route {
-	// A cc-connect parent is only an explicit per-work override. In particular,
-	// omitting it on assignment must not restore a legacy repository parent.
-	if route.Provider == ccconnect.Name {
-		return route
-	}
-	if fallback := repo.ReviewerRoute; route.Parent == "" && fallback != nil && fallback.Provider == route.Provider && fallback.Target == route.Target {
-		route.Parent = fallback.Parent
-	}
-	return route
 }

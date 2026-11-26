@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -12,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type testTransport func(*http.Request) (*http.Response, error)
@@ -86,7 +88,10 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 
 	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer-bot", ReviewerRoute: &execution.Route{Provider: "test", Target: "reviewer"}}
 	cfg := Config{Repositories: []Repository{repo}}
-	path := filepath.Join(t.TempDir(), stateDatabase)
+	path := filepath.Join(t.TempDir(), "state", stateDatabase)
+	if err := InitializeState(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
 	makeService := func() *Service {
 		service, err := NewService(cfg, path, map[string]execution.Executor{"test": executor})
 		if err != nil {
@@ -128,7 +133,7 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 		if err := s.reconcileExecutions(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.pollRepo(context.Background(), repo); err != nil {
+		if err := pollRepoForTest(context.Background(), s, repo); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -211,20 +216,15 @@ func TestReviewLoopAndHumanTakeover(t *testing.T) {
 	}
 }
 
-func TestAmbiguousOrigin(t *testing.T) {
-	var pull Pull
-	pull.Head.SHA, pull.Head.Ref = strings.Repeat("a", 40), "feature"
-	pull.Head.Repo = &struct {
-		FullName string `json:"full_name"`
-	}{"acme/project"}
-	first := Push{Repo: "acme/project", Ref: pull.Head.Ref, SHA: pull.Head.SHA, Route: execution.Route{Provider: "test", Target: "dev", Session: "dev-session"}}
-	second := first
-	second.Route.Session = "other-session"
-	if matchOrigin([]Push{first, second}, pull) != nil {
-		t.Fatal("matched ambiguous origin")
+func pollRepoForTest(ctx context.Context, s *Service, repo Repository) error {
+	var syncErr error
+	listErr := s.pollRepo(ctx, repo, nil, func(job pollJob) {
+		if err := s.pollPull(ctx, job); err != nil && syncErr == nil {
+			syncErr = err
+		}
+	})
+	if listErr != nil {
+		return listErr
 	}
-	second.Repo = "fork/project"
-	if route := matchOrigin([]Push{first, second}, pull); route == nil || *route != first.Route {
-		t.Fatal("did not match source repo")
-	}
+	return syncErr
 }

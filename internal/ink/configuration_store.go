@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -5,18 +7,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"sort"
 
-	"ink-commons/internal/ink/statedb"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 )
-
-const legacyConfigScope = "@legacy-json"
 
 func readConfigRecords(tx *sql.Tx) ([]ConfigRecord, error) {
 	rows, err := statedb.New(tx).ListRuntimeConfig(context.Background())
 	if err != nil {
-		return nil, err
+		// database/sql scan errors can quote the stored value when a row has an
+		// invalid column type. Preserve the read stage and safe error details.
+		return nil, diagnosticError("cannot read runtime configuration rows: " + redactedError(err))
 	}
 	var records []ConfigRecord
 	for _, row := range rows {
@@ -25,26 +26,24 @@ func readConfigRecords(tx *sql.Tx) ([]ConfigRecord, error) {
 			return nil, err
 		}
 		if record.Values == nil || record.Revision < 1 {
-			return nil, fmt.Errorf("invalid configuration record %q", row.Scope)
+			return nil, diagnosticError("invalid runtime configuration record")
 		}
-		if row.Scope != legacyConfigScope {
-			if row.Scope != "" && !ValidRepository(row.Scope) {
-				return nil, fmt.Errorf("invalid configuration scope %q", row.Scope)
-			}
-			if err := validateValues(record.Values); err != nil {
-				return nil, err
-			}
+		if row.Scope != "" && !ValidRepository(row.Scope) {
+			return nil, diagnosticError("invalid runtime configuration scope")
+		}
+		if err := validateValues(record.Values); err != nil {
+			return nil, err
 		}
 		records = append(records, record)
 	}
 	if len(records) > 0 {
 		global, ok := recordMap(records)[""]
 		if !ok {
-			return nil, fmt.Errorf("runtime configuration is missing global settings")
+			return nil, diagnosticError("runtime configuration is missing global settings")
 		}
 		for _, record := range records {
 			if record.Revision > global.Revision {
-				return nil, fmt.Errorf("configuration generation is inconsistent")
+				return nil, diagnosticError("runtime configuration generation is inconsistent")
 			}
 		}
 	}
@@ -55,48 +54,6 @@ func putConfigRecord(tx *sql.Tx, record ConfigRecord) error {
 	return statedb.New(tx).PutRuntimeConfig(context.Background(), statedb.PutRuntimeConfigParams{
 		Scope: record.Scope, Payload: string(jsonValue(record.Values)), Revision: record.Revision,
 	})
-}
-
-func importConfigRecords(tx *sql.Tx, records []ConfigRecord) error {
-	seen := map[string]bool{}
-	for _, record := range records {
-		if seen[record.Scope] {
-			return fmt.Errorf("duplicate configuration scope %q", record.Scope)
-		}
-		seen[record.Scope] = true
-		if record.Scope != legacyConfigScope {
-			if record.Scope != "" && !ValidRepository(record.Scope) {
-				return fmt.Errorf("invalid configuration scope")
-			}
-			if err := validateValues(record.Values); err != nil {
-				return err
-			}
-		}
-		if record.Values == nil || record.Revision < 1 {
-			return fmt.Errorf("invalid configuration revision")
-		}
-		if err := putConfigRecord(tx, record); err != nil {
-			return err
-		}
-	}
-	if len(records) > 0 && !seen[""] {
-		return fmt.Errorf("configuration export is missing global settings")
-	}
-	if len(records) > 0 {
-		global := recordMap(records)[""]
-		for _, record := range records {
-			if record.Revision > global.Revision {
-				return fmt.Errorf("configuration generation is inconsistent")
-			}
-			if record.Scope == legacyConfigScope {
-				continue
-			}
-			if _, err := effectiveFromRecords(records, record.Scope); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func recordMap(records []ConfigRecord) map[string]ConfigRecord {
@@ -139,9 +96,8 @@ func (s *stateStore) effectiveConfig(name string) (EffectiveConfig, error) {
 	return result, tx.Commit()
 }
 
-// Import once, atomically. The old repositories table and a copy of the JSON
-// runtime input remain as migration evidence. Neither is consulted afterwards.
-func (s *stateStore) migrateConfig(config Config, st state) error {
+// Seed runtime settings only in an explicitly initialized database.
+func (s *stateStore) initializeConfig(config Config) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -151,45 +107,29 @@ func (s *stateStore) migrateConfig(config Config, st state) error {
 	if err != nil {
 		return err
 	}
-	if _, exists := recordMap(records)[""]; exists {
-		return tx.Commit()
-	}
-	global := sparseRepositoryValues(config.RepositoryDefaults)
-	var reliability map[string]json.RawMessage
-	_ = json.Unmarshal(jsonValue(config.Reliability), &reliability)
-	for key, value := range reliability {
-		global["execution."+key] = value
-	}
-	if err := putConfigRecord(tx, ConfigRecord{Scope: "", Values: global, Revision: 1}); err != nil {
-		return err
-	}
-	// Static JSON won before this migration, so import it last.
-	for _, repo := range append(append([]Repository{}, st.Repositories...), config.Repositories...) {
-		if err := putConfigRecord(tx, ConfigRecord{Scope: repo.Repo, Values: legacyRepositoryValues(repo), Revision: 1}); err != nil {
+	if len(records) == 0 {
+		if err := putConfigRecord(tx, ConfigRecord{Scope: "", Values: ConfigValues(staticGlobal(config)), Revision: 1}); err != nil {
+			return err
+		}
+		for _, repo := range config.Repositories {
+			if err := putConfigRecord(tx, ConfigRecord{Scope: repo.Repo, Values: repositoryValues(repo), Revision: 1}); err != nil {
+				return err
+			}
+		}
+		records, err = readConfigRecords(tx)
+		if err != nil {
 			return err
 		}
 	}
-	archive := ConfigValues{"repository_defaults": jsonValue(config.RepositoryDefaults), "repositories": jsonValue(config.Repositories), "execution": jsonValue(config.Reliability)}
-	if err := putConfigRecord(tx, ConfigRecord{Scope: legacyConfigScope, Values: archive, Revision: 1}); err != nil {
-		return err
-	}
-	migrated, err := readConfigRecords(tx)
-	if err != nil {
-		return err
-	}
-	for _, record := range migrated {
-		if record.Scope == legacyConfigScope {
-			continue
-		}
-		if _, err := effectiveFromRecords(migrated, record.Scope); err != nil {
+	for _, record := range records {
+		if _, err := effectiveFromRecords(records, record.Scope); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-// Called under Service.mu. Config mutations never use the workflow's full-state
-// save path, so in-flight delivery snapshots cannot overwrite a new setting.
+// Called under Service.mu. Configuration revisions belong to runtime_config.
 func (s *Service) changeConfig(scope, key string, value json.RawMessage, unset bool) (ConfigRecord, error) {
 	tx, err := s.store.db.Begin()
 	if err != nil {
@@ -216,22 +156,18 @@ func (s *Service) changeConfig(scope, key string, value json.RawMessage, unset b
 	indexed[scope] = record
 	global := indexed[""]
 	for name := range indexed {
-		if name == legacyConfigScope {
-			continue
+		var overrides ConfigValues
+		if name != "" {
+			overrides = indexed[name].Values
 		}
-		effective, err := resolveConfig(name, GlobalConfig(global.Values), RepositoryOverride(indexed[name].Values), global.Revision)
-		if name == "" {
-			effective, err = resolveConfig("", GlobalConfig(global.Values), nil, global.Revision)
-		}
+		effective, err := s.resolveRepositoryPolicy(name, global, overrides)
 		if err != nil {
-			return record, apiError{400, err.Error()}
+			return record, err
 		}
-		if err := s.validateEffective(effective.Repository); err != nil {
-			return record, apiError{400, err.Error()}
-		}
-		if name != "" && name == scope && key == "auto_merge" {
-			if err := s.validateAutoMergeIdentity(effective.Repository); err != nil {
-				return record, apiError{400, err.Error()}
+		inheritsCommand := scope == "" && key == "reviewer_command" && effective.Sources[key] != "repository"
+		if name != "" && (name == scope || inheritsCommand) && mergeIdentityInput(key) {
+			if err := s.validateRuntimeMergeIdentity(effective.Repository); err != nil {
+				return record, err
 			}
 		}
 	}
@@ -264,7 +200,7 @@ func (s *Service) runtimeRepositories() ([]Repository, error) {
 	}
 	result := []Repository{}
 	for _, record := range records {
-		if record.Scope == "" || record.Scope == legacyConfigScope {
+		if record.Scope == "" {
 			continue
 		}
 		cfg, err := effectiveFromRecords(records, record.Scope)
@@ -296,12 +232,9 @@ func (s *Service) registerConfig(name string, values ConfigValues) (Repository, 
 		}
 		return current.Repository, false, tx.Commit()
 	}
-	effective, err := resolveConfig(name, GlobalConfig(global.Values), RepositoryOverride(values), global.Revision)
+	effective, err := s.resolveRepositoryPolicy(name, global, values)
 	if err != nil {
-		return Repository{}, false, apiError{400, err.Error()}
-	}
-	if err := s.validateEffective(effective.Repository); err != nil {
-		return Repository{}, false, apiError{400, err.Error()}
+		return Repository{}, false, err
 	}
 	if old, ok := indexed[name]; ok {
 		if !bytes.Equal(canonicalValues(old.Values), canonicalValues(values)) {
@@ -309,8 +242,8 @@ func (s *Service) registerConfig(name string, values ConfigValues) (Repository, 
 		}
 		return effective.Repository, false, tx.Commit()
 	}
-	if err := s.validateAutoMergeIdentity(effective.Repository); err != nil {
-		return Repository{}, false, apiError{400, err.Error()}
+	if err := s.validateRuntimeMergeIdentity(effective.Repository); err != nil {
+		return Repository{}, false, err
 	}
 	global.Revision++
 	if err := putConfigRecord(tx, global); err != nil {

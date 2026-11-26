@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -5,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type wakeExecutor struct {
@@ -55,18 +58,19 @@ func newHandoffFixture(t *testing.T) *handoffFixture {
 	f.repo = Repository{Repo: "acme/project", TaskMode: "cooperative", ReviewerLogin: "reviewer", ReviewerRoute: &execution.Route{Provider: "test", Target: "reviewer", Session: "review-session"}}
 	f.pull = Pull{Number: 42, URL: "https://github.com/acme/project/pull/42", State: "open"}
 	f.pull.Head.SHA = strings.Repeat("a", 40)
-	s, err := NewService(Config{Repositories: []Repository{f.repo}}, f.path, map[string]execution.Executor{"test": f.executor})
+	s, err := newFixtureService(t, Config{Repositories: []Repository{f.repo}}, f.path, map[string]execution.Executor{"test": f.executor})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.s = s
 	t.Cleanup(func() { f.s.Close() })
 	f.upstream()
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	w := &Work{Repo: f.repo.Repo, TaskMode: "cooperative", Linked: true, Pull: f.pull, Reviewer: Assignee{GitHubLogin: "reviewer", Route: f.repo.ReviewerRoute}, Developer: Assignee{GitHubLogin: "developer", Route: &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}}}
-	w.derive()
+	w.DeveloperOverride = cloneAssignee(w.Developer)
+	w.derive(time.Now())
 	st.Work[key(f.repo.Repo, 42)] = w
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	return f
@@ -116,7 +120,7 @@ func (f *handoffFixture) upstream() {
 }
 func (f *handoffFixture) work(t *testing.T) *Work {
 	t.Helper()
-	st, err := f.s.store.load()
+	st, err := loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +183,11 @@ func TestCooperativeHandoffFullLoopWithGitHubObservingFirst(t *testing.T) {
 	if got := f.claim(t, reviewTask, claimA, 200); got["first"] != true {
 		t.Fatal(got)
 	}
+	f.restart(t)
+	if got := f.claim(t, reviewTask, claimA, 200); got["first"] != false {
+		t.Fatalf("replaying the persisted claim acquired a second turn: %v", got)
+	}
+	f.claim(t, reviewTask, claimB, 409)
 	// GitHub's result creates a successor, but it must remain unclaimable.
 	f.reviews = []Review{reviewFor(7, f.pull.Head.SHA, "reviewer", "CHANGES_REQUESTED")}
 	f.observe(t)
@@ -260,10 +269,10 @@ func TestCooperativeClaimIsAtomicAndNeverExpiresIntoDuplicateWork(t *testing.T) 
 	if won != 1 {
 		t.Fatalf("owners: %d", won)
 	}
-	st, _ := f.s.store.load()
+	st, _ := loadFixture(f.s.store)
 	w := st.Work[key(f.repo.Repo, 42)]
 	w.Task.Handoff.ClaimedAt = time.Now().Add(-24 * time.Hour)
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	f.restart(t)
@@ -317,7 +326,7 @@ func TestCooperativeVerificationFencesObservationRacesAndStaleResults(t *testing
 	f.beforeRead = func() { f.observe(t) }
 	f.verify(t)
 	w := f.work(t)
-	_, old := findTask(state{Work: map[string]*Work{"w": w}}, task.ID)
+	old := w.findTask(task.ID)
 	if old.Handoff.State != "submitted" {
 		t.Fatal("stale network observation committed across version change")
 	}
@@ -329,7 +338,7 @@ func TestCooperativeVerificationFencesObservationRacesAndStaleResults(t *testing
 	if w.Task.ID != newTask.ID || w.executionBlocked() {
 		t.Fatal("old handoff affected a new task")
 	}
-	_, old = findTask(state{Work: map[string]*Work{"w": w}}, task.ID)
+	old = w.findTask(task.ID)
 	if old.Handoff.State != "superseded" {
 		t.Fatal(old.Handoff)
 	}
@@ -341,11 +350,12 @@ func TestCooperativeVerificationFencesObservationRacesAndStaleResults(t *testing
 
 func TestCooperativeWakesRetryWithoutExecutingOrAllocatingAgain(t *testing.T) {
 	f := newHandoffFixture(t)
-	st, _ := f.s.store.load()
+	st, _ := loadFixture(f.s.store)
 	w := st.Work[key(f.repo.Repo, 42)]
 	w.Reviewer.Route.Session = ""
+	w.ReviewerOverride = cloneAssignee(w.Reviewer)
 	w.Task.Handoff.Assignee.Route.Session = ""
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.s.dispatch(context.Background(), f.repo, 42); err != nil {
@@ -370,9 +380,9 @@ func TestCooperativeWakesRetryWithoutExecutingOrAllocatingAgain(t *testing.T) {
 	if len(f.executor.wakes) != 1 {
 		t.Fatal("wake retried before its persisted deadline")
 	}
-	st, _ = f.s.store.load()
+	st, _ = loadFixture(f.s.store)
 	st.Work[key(f.repo.Repo, 42)].Task.Handoff.Wake.RetryAt = time.Time{}
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.s.dispatch(context.Background(), f.repo, 42); err != nil {
@@ -394,16 +404,17 @@ func TestCooperativeWakesRetryWithoutExecutingOrAllocatingAgain(t *testing.T) {
 func TestCooperativeAmbiguousPreparationIsNotRepeated(t *testing.T) {
 	f := newHandoffFixture(t)
 	f.executor.prepareError = true
-	st, _ := f.s.store.load()
+	st, _ := loadFixture(f.s.store)
 	w := st.Work[key(f.repo.Repo, 42)]
 	w.Reviewer.Route.Session = ""
+	w.ReviewerOverride = cloneAssignee(w.Reviewer)
 	w.Task.Handoff.Assignee.Route.Session = ""
-	_ = f.s.store.save(st)
+	_ = saveFixture(f.s.store, st)
 	_ = f.s.dispatch(context.Background(), f.repo, 42)
 	f.restart(t)
-	st, _ = f.s.store.load()
+	st, _ = loadFixture(f.s.store)
 	st.Work[key(f.repo.Repo, 42)].Task.Handoff.Wake.RetryAt = time.Time{}
-	_ = f.s.store.save(st)
+	_ = saveFixture(f.s.store, st)
 	_ = f.s.dispatch(context.Background(), f.repo, 42)
 	if f.executor.prepared != 1 || len(f.executor.wakes) != 0 {
 		t.Fatal("ambiguous allocation was repeated")
@@ -497,10 +508,10 @@ func TestConfigOnlyReassignmentPreservesClaimUntilAuthorizedHandoffAndRetry(t *t
 
 func TestCooperativeNeverClearsLegacyUnknown(t *testing.T) {
 	f := newHandoffFixture(t)
-	st, _ := f.s.store.load()
+	st, _ := loadFixture(f.s.store)
 	w := st.Work[key(f.repo.Repo, 42)]
 	w.History = append(w.History, &Task{ID: "legacy", Runs: []Attempt{{ID: "old", State: "unknown"}}})
-	_ = f.s.store.save(st)
+	_ = saveFixture(f.s.store, st)
 	f.claim(t, f.work(t).Task, claimA, 409)
 	f.restart(t)
 	w = f.work(t)
@@ -525,6 +536,7 @@ func TestCooperativeCloseAndDraftPreserveOwnershipUntilHandoff(t *testing.T) {
 				t.Fatal("PR transition released owner")
 			}
 			f.submit(t, task, claimA, HandoffSubmission{RequestID: "retired", Handoff: true, ReviewID: 7, Outcome: "APPROVED"}, 200)
+			f.restart(t)
 			f.verify(t)
 			if f.work(t).executionBlocked() || f.work(t).Task != nil {
 				t.Fatal("retired handoff restarted work")
@@ -590,23 +602,6 @@ func TestCooperativeAutoMergeDoesNotRunBeforeVerifiedHandoff(t *testing.T) {
 	f.beforeRead = nil
 }
 
-func TestCooperativeSchemaUpgradeProtectsClaimsFromOlderBinaries(t *testing.T) {
-	f := newHandoffFixture(t)
-	task := f.work(t).Task
-	f.claim(t, task, claimA, 200)
-	if _, err := f.s.store.db.Exec("DROP TABLE workspace_allocations; DROP TABLE runtime_config; PRAGMA user_version=2"); err != nil {
-		t.Fatal(err)
-	}
-	f.restart(t)
-	var version int
-	if err := f.s.store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
-		t.Fatal(version, err)
-	}
-	if f.work(t).Task.Handoff.ClaimHash != claimHash(claimA) {
-		t.Fatal("migration discarded claim")
-	}
-}
-
 func TestResolvedCooperativeHistoryDoesNotGateLaterLegacyApproval(t *testing.T) {
 	for _, sameSHA := range []bool{false, true} {
 		t.Run(fmt.Sprintf("sameSHA=%v", sameSHA), func(t *testing.T) {
@@ -658,26 +653,27 @@ func TestReassignmentPreservesCooperativeDeliveryIdentity(t *testing.T) {
 				f.reviews = []Review{reviewFor(7, f.pull.Head.SHA, "reviewer", "CHANGES_REQUESTED")}
 				f.observe(t)
 			}
-			task := f.work(t).Task
-			st, _ := f.s.store.load()
+			st, _ := loadFixture(f.s.store)
 			w := st.Work[key(f.repo.Repo, 42)]
 			w.Task.Handoff.Assignee.GitHubCommand = "/original-command"
 			if role == "reviewer" {
 				w.Reviewer.GitHubCommand = "/original-command"
+				w.ReviewerOverride = cloneAssignee(w.Reviewer)
 			} else {
 				w.Developer.GitHubCommand = "/original-command"
+				w.DeveloperOverride = cloneAssignee(w.Developer)
 			}
-			if err := f.s.store.save(st); err != nil {
+			if err := saveFixture(f.s.store, st); err != nil {
 				t.Fatal(err)
 			}
-			task = f.work(t).Task
+			task := f.work(t).Task
 			f.claim(t, task, claimA, 200)
-			st, _ = f.s.store.load()
+			st, _ = loadFixture(f.s.store)
 			w = st.Work[key(f.repo.Repo, 42)]
-			if err := applyChange(w, "assign", workChange{Role: role, GitHubLogin: "replacement", GitHubCommand: "/replacement-command", Route: &execution.Route{Provider: "test", Target: "replacement", Session: "replacement-session"}}); err != nil {
+			if err := applyChange(w, "assign", workChange{Role: role, GitHubLogin: "replacement", GitHubCommand: "/replacement-command", Route: &execution.Route{Provider: "test", Target: "replacement", Session: "replacement-session"}}, time.Now()); err != nil {
 				t.Fatal(err)
 			}
-			if err := f.s.store.save(st); err != nil {
+			if err := saveFixture(f.s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			f.restart(t)
@@ -704,11 +700,26 @@ func TestReassignmentPreservesCooperativeDeliveryIdentity(t *testing.T) {
 				f.submit(t, task, claimA, HandoffSubmission{RequestID: "original-review", Handoff: true, ReviewID: 9, Outcome: "APPROVED"}, 200)
 				f.verify(t)
 				w := f.work(t)
-				_, old := findTask(state{Work: map[string]*Work{"w": w}}, task.ID)
+				old := w.findTask(task.ID)
 				if old.Handoff.State != "completed" || w.Task.ID != replacementTask || w.executionBlocked() {
 					t.Fatal("original owner could not finish without changing the replacement task")
 				}
 			}
 		})
 	}
+}
+
+func (s *Service) reconcileHandoffs(ctx context.Context) error {
+	s.mu.Lock()
+	ids, err := statedb.New(s.store.db).ListHandoffPending(ctx)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := s.reconcileHandoffWork(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

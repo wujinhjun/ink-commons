@@ -1,14 +1,15 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strconv"
 	"strings"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 // Export reads a single SQLite snapshot and retains only declared policy.
@@ -21,9 +22,6 @@ func (s *Service) exportConfiguration(w http.ResponseWriter, r *http.Request) {
 	global := ConfigValues{}
 	repositories := map[string]ConfigValues{}
 	for _, record := range records {
-		if record.Scope == legacyConfigScope {
-			continue
-		}
 		if record.Values == nil {
 			record.Values = ConfigValues{}
 		}
@@ -36,37 +34,56 @@ func (s *Service) exportConfiguration(w http.ResponseWriter, r *http.Request) {
 	reply(w, http.StatusOK, map[string]any{"schema": 1, "global": global, "repositories": repositories})
 }
 
-func (s *Service) validateEffective(repo Repository) error {
+func ValidateRepositoryProvider(repo Repository, providers map[string]execution.Executor) error {
 	if repo.ReviewerRoute == nil {
 		return nil
 	}
-	if provider, ok := s.providers[repo.ReviewerRoute.Provider].(interface{ ValidateDelivery() error }); ok {
-		if err := provider.ValidateDelivery(); err != nil {
-			return err
+	if err := execution.ValidateDestination(providers, *repo.ReviewerRoute, true); err != nil {
+		return err
+	}
+	provider := providers[repo.ReviewerRoute.Provider]
+	if normalTaskMode(repo.TaskMode) == "cooperative" {
+		_, wakes := provider.(execution.TaskWaker)
+		if !execution.Supports(provider, "wake", wakes) {
+			return fmt.Errorf("execution provider does not support wake")
+		}
+	} else if !execution.Supports(provider, "deliver", true) {
+		return fmt.Errorf("execution provider does not support deliver")
+	}
+	var requireSame, reuse bool
+	if review := repo.Review; review != nil {
+		requireSame, reuse = review.RequireSameChannel, review.ReuseDevelopmentThread
+	}
+	if policyNeedsPlacement(*repo.ReviewerRoute, requireSame, reuse) {
+		_, resolves := provider.(execution.PlacementResolver)
+		if !execution.Supports(provider, "placement", resolves) {
+			return fmt.Errorf("execution provider does not support placement")
 		}
 	}
-	return execution.ValidateDestination(s.providers, *repo.ReviewerRoute, true)
+	return nil
 }
 
-func (s *Service) validateAutoMergeIdentity(repo Repository) error {
+func (s *Service) validateEffective(repo Repository) error {
+	return ValidateRepositoryProvider(repo, s.providers)
+}
+
+func validateAutoMergeIdentity(up upstream, repo Repository) error {
 	if repo.AutoMerge == nil || !repo.AutoMerge.Enabled {
 		return nil
 	}
-	merger, err := s.up.merger(repo.AutoMerge.ReuseReaderIdentity)
-	if err != nil {
-		return err
+	if _, err := up.resolveMerger(repo.Repo, repo.AutoMerge.ReuseReaderIdentity, repo.ReviewerCommand); err != nil {
+		return fmt.Errorf("automatic merge credentials: %w", err)
 	}
-	if merger.command == "" {
-		return fmt.Errorf("automatic merge requires a dedicated GitHub merger App")
-	}
-	if _, err := exec.LookPath(merger.command); err != nil {
-		return fmt.Errorf("configured GitHub merge command is unavailable")
-	}
-	if err := checkCommandDigest(merger.command, merger.commandDigest); err != nil {
-		return err
-	}
-	if sameAppCommand(repo.ReviewerCommand, merger.command) {
-		return fmt.Errorf("reviewer and merger must use separate GitHub Apps")
+	return nil
+}
+
+func mergeIdentityInput(key string) bool {
+	return key == "auto_merge" || key == "reviewer_command"
+}
+
+func (s *Service) validateRuntimeMergeIdentity(repo Repository) error {
+	if err := validateAutoMergeIdentity(s.up, repo); err != nil {
+		return apiError{400, StartupDiagnostic(err)}
 	}
 	return nil
 }
@@ -126,12 +143,11 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 			fail(w, apiError{400, "invalid PR number"})
 			return
 		}
-		st, err := s.store.load()
+		work, err := s.store.loadWork(key(scope, number))
 		if err != nil {
 			fail(w, err)
 			return
 		}
-		work := st.Work[key(scope, number)]
 		if work == nil {
 			fail(w, apiError{404, "PR not observed yet"})
 			return

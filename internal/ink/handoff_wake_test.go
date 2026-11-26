@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -12,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
-	"ink-commons/internal/execution/ccconnect"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution/adaptertest"
 )
 
 func TestTaskWakeRetryDelay(t *testing.T) {
@@ -39,7 +41,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			var s *Service
 			repo := Repository{
 				Repo: "acme/project", TaskMode: "cooperative", ReviewerLogin: "reviewer",
-				ReviewerRoute: &execution.Route{Provider: ccconnect.Name, Target: "reviewer"},
+				ReviewerRoute: &execution.Route{Provider: "chat", Target: "reviewer"},
 			}
 			p := Pull{Number: 42, State: "open", URL: "https://github.com/acme/project/pull/42"}
 			p.Head.SHA = strings.Repeat("a", 40)
@@ -64,12 +66,12 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 					}
 					title = body.Name
 					wake := notificationWork(t, s, repo, p).Task.Handoff.Wake
-					if wake.Preparation != "preparing" || wake.Allocation == nil || wake.Allocation.Name != title ||
+					if wake.Preparation != "preparing" || wake.Allocation == nil || wake.Allocation.ID == "" || !strings.HasPrefix(title, "Review acme/project #42 · ") ||
 						wake.Allocation.Parent != "77" || wake.Allocation.ReservedAt == nil || wake.Allocation.ReservedAt.IsZero() {
 						t.Fatalf("Discord request was not reserved: %+v", wake)
 					}
 					reservedAt = *wake.Allocation.ReservedAt
-					return nil, io.EOF
+					return nil, context.DeadlineExceeded
 				case "GET /api/v10/channels/123":
 					sourceReads++
 					if sourceReads == 1 {
@@ -127,13 +129,16 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 				}
 				return out.Result(), nil
 			})}
-			e, err := ccconnect.New(client, "http://127.0.0.1:9111/hook", "hook", "discord")
+			e, err := adaptertest.Discord(t, "chat", client, "http://127.0.0.1:9111/hook", "hook", "discord")
 			if err != nil {
 				t.Fatal(err)
 			}
-			db := filepath.Join(t.TempDir(), stateDatabase)
+			db := filepath.Join(t.TempDir(), "state", stateDatabase)
+			if err := InitializeState(filepath.Dir(db)); err != nil {
+				t.Fatal(err)
+			}
 			open := func() *Service {
-				service, err := NewService(Config{Repositories: []Repository{repo}}, db, map[string]execution.Executor{ccconnect.Name: e})
+				service, err := NewService(Config{Repositories: []Repository{repo}}, db, map[string]execution.Executor{"chat": e})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -141,17 +146,18 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 				return service
 			}
 			s = open()
-			st, err := s.store.load()
+			st, err := loadFixture(s.store)
 			if err != nil {
 				t.Fatal(err)
 			}
 			id := key(repo.Repo, p.Number)
 			st.Work[id] = &Work{
 				Repo: repo.Repo, Pull: p, Linked: true,
-				Developer: Assignee{Route: &execution.Route{Provider: ccconnect.Name, Target: "developer", Session: "discord:123"}},
+				Developer: Assignee{Route: &execution.Route{Provider: "chat", Target: "developer", Session: "discord:123"}},
 				Reviewer:  Assignee{GitHubLogin: "reviewer", Route: repo.ReviewerRoute},
 			}
-			if err := s.store.save(st); err != nil {
+			st.Work[id].DeveloperOverride = cloneAssignee(st.Work[id].Developer)
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.observe(repo, p, nil); err != nil {
@@ -165,12 +171,12 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			}
 			retry := func() {
 				t.Helper()
-				st, err := s.store.load()
+				st, err := loadFixture(s.store)
 				if err != nil {
 					t.Fatal(err)
 				}
 				st.Work[id].Task.Handoff.Wake.RetryAt = time.Time{}
-				if err := s.store.save(st); err != nil {
+				if err := saveFixture(s.store, st); err != nil {
 					t.Fatal(err)
 				}
 				dispatch()
@@ -179,7 +185,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			w := notificationWork(t, s, repo, p)
 			wake := w.Task.Handoff.Wake
 			if creates != 0 || wakes != 0 || wake.Allocation != nil || wake.Preparation != "" ||
-				wake.PreparationAttempts != 1 || !strings.Contains(wake.Error, "read development conversation 123: upstream transport failure: EOF") {
+				wake.PreparationAttempts != 1 || !strings.Contains(wake.Error, "adapter placement: upstream HTTP 502") {
 				t.Fatalf("development lookup should be retryable without reserving a write: %+v", wake)
 			}
 			dispatch()
@@ -188,7 +194,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			}
 			retry()
 			w = notificationWork(t, s, repo, p)
-			if creates != 1 || wakes != 0 || !strings.Contains(w.Task.Handoff.Wake.Error, "create Discord thread in channel 77: upstream transport failure: EOF") {
+			if creates != 1 || wakes != 0 || !strings.Contains(w.Task.Handoff.Wake.Error, "adapter prepare: upstream HTTP 504") {
 				t.Fatalf("expected ambiguous creation with original error and no wake: %+v", w.Task.Handoff.Wake)
 			}
 			s.Close()
@@ -196,7 +202,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 			retry()
 			w = notificationWork(t, s, repo, p)
 			h := w.Task.Handoff
-			if creates != 1 || h.Wake.RecoveryAttempts != 1 || !strings.Contains(h.Wake.AllocationError, "EOF") {
+			if creates != 1 || h.Wake.RecoveryAttempts != 1 || !strings.Contains(h.Wake.AllocationError, "upstream HTTP 504") {
 				t.Fatalf("wrong recovery bookkeeping: %+v, creates=%d", h.Wake, creates)
 			}
 			if outcome == "missing" || outcome == "ambiguous" {
@@ -205,7 +211,7 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 				}
 				h = notificationWork(t, s, repo, p).Task.Handoff
 				if creates != 1 || wakes != 0 || h.Wake.RecoveryAttempts != maxAllocationRecoveryAttempts || h.Wake.canRecover() ||
-					archiveReads != maxAllocationRecoveryAttempts || !strings.Contains(h.Wake.Error, "EOF") {
+					archiveReads != maxAllocationRecoveryAttempts || !strings.Contains(h.Wake.Error, "upstream HTTP 504") {
 					t.Fatalf("unresolved allocation should stay fenced: %+v, creates=%d, wakes=%d", h.Wake, creates, wakes)
 				}
 				return
@@ -230,20 +236,19 @@ func TestDiscordAllocationRecoversAfterRestart(t *testing.T) {
 	}
 }
 
-func TestDiscordPreparationDistinguishesRejectedAndAmbiguousCreates(t *testing.T) {
+func TestAdapterPreparationErrorsOnlyPermitReadOnlyRecovery(t *testing.T) {
 	for _, tc := range []struct {
 		status               execution.HTTPStatusError
-		wantRetryCreate      bool
 		wantReadOnlyRecovery bool
 	}{
-		{status: http.StatusTooManyRequests, wantRetryCreate: true},
-		{status: http.StatusForbidden},
+		{status: http.StatusTooManyRequests, wantReadOnlyRecovery: true},
+		{status: http.StatusForbidden, wantReadOnlyRecovery: true},
 		{status: http.StatusBadGateway, wantReadOnlyRecovery: true},
 	} {
 		t.Run(tc.status.Error(), func(t *testing.T) {
 			wake := TaskWake{Preparation: "preparing", Allocation: &execution.ConversationAllocation{Parent: "77", Name: "Review"}}
 			wake.recordPreparationError(fmt.Errorf("create Discord thread: %w", tc.status), false)
-			if (wake.Preparation == "" && wake.Allocation == nil) != tc.wantRetryCreate ||
+			if wake.Preparation != "preparing" || wake.Allocation == nil ||
 				wake.canRecover() != tc.wantReadOnlyRecovery || !strings.Contains(wake.AllocationError, tc.status.Error()) {
 				t.Fatalf("incorrect allocation handling: %+v", wake)
 			}

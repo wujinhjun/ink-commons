@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -5,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,25 +17,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/spf13/cobra"
 
-	"ink-commons/internal/ink"
-	"ink-commons/internal/workspace"
+	"github.com/wujinhjun/ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/workspace"
 )
 
-func workspaceCommand(args []string) error {
-	usage := errors.New("usage: ink workspace list|acquire|release|remove [flags]")
-	if len(args) == 0 {
-		return usage
-	}
-	switch args[0] {
-	case "list", "acquire", "release", "remove":
-	default:
-		return usage
-	}
-	flags := flag.NewFlagSet("workspace "+args[0], flag.ContinueOnError)
-	asJSON := flags.Bool("json", false, "emit JSON")
+func workspaceCommand(options *cliOptions, action string) *cobra.Command {
+	command := &cobra.Command{Use: action}
+	flags := command.Flags()
 	repo, kind, ref, branch, request, id, task, claimFile := ".", "auto", "", "", "", "", "", ""
-	switch args[0] {
+	switch action {
 	case "list":
 		flags.StringVar(&repo, "repo", repo, "local clone or worktree")
 	case "acquire":
@@ -48,50 +41,51 @@ func workspaceCommand(args []string) error {
 	default:
 		flags.StringVar(&id, "id", id, "workspace allocation ID")
 	}
-	if err := flags.Parse(args[1:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("unexpected workspace arguments")
-	}
-	repo, err := filepath.Abs(repo)
-	if err != nil {
-		return err
-	}
-	switch args[0] {
-	case "list":
-		return listWorkspaces(repo, *asJSON)
-	case "acquire":
-		if request == "" {
-			return errors.New("workspace acquire requires --request-id")
+
+	command.RunE = func(_ *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			return errors.New("unexpected workspace arguments")
 		}
-		payload := map[string]any{"source": repo, "request_id": request, "preference": kind, "ref": ref, "branch": branch, "task_id": task}
-		if task != "" {
-			credential, err := workspaceTaskCredential(task, claimFile)
-			if err != nil {
-				return err
+		repo, err := filepath.Abs(repo)
+		if err != nil {
+			return err
+		}
+		switch action {
+		case "list":
+			return options.listWorkspaces(repo, options.json)
+		case "acquire":
+			if request == "" {
+				return errors.New("workspace acquire requires --request-id")
 			}
-			payload["owner"], payload["claim_token"] = credential.Route, credential.Token
-		} else if claimFile != "" {
-			return errors.New("--claim-file requires --task")
-		} else if route := routeFromEnv(os.Getenv); route.Valid(false) {
-			payload["owner"] = route
+			payload := map[string]any{"source": repo, "request_id": request, "preference": kind, "ref": ref, "branch": branch, "task_id": task}
+			if task != "" {
+				credential, err := options.workspaceTaskCredential(task, claimFile)
+				if err != nil {
+					return err
+				}
+				payload["owner"], payload["claim_token"] = credential.Route, credential.Token
+			} else if claimFile != "" {
+				return errors.New("--claim-file requires --task")
+			} else if route := routeFromEnv(os.Getenv); route.Valid(false) {
+				payload["owner"] = route
+			}
+			return options.changeWorkspace("/v1/workspaces", payload, options.json)
+		default:
+			if id == "" {
+				return fmt.Errorf("workspace %s requires --id", action)
+			}
+			return options.changeWorkspace("/v1/workspaces/"+url.PathEscape(id)+"/"+action, nil, options.json)
 		}
-		return changeWorkspace("/v1/workspaces", payload, *asJSON)
-	default:
-		if id == "" {
-			return fmt.Errorf("workspace %s requires --id", args[0])
-		}
-		return changeWorkspace("/v1/workspaces/"+url.PathEscape(id)+"/"+args[0], nil, *asJSON)
 	}
+	return command
 }
 
-func workspaceTaskCredential(task, path string) (taskCredential, error) {
+func (options *cliOptions) workspaceTaskCredential(task, path string) (taskCredential, error) {
 	if _, err := uuid.Parse(task); err != nil {
 		return taskCredential{}, errors.New("--task must be a task UUID")
 	}
 	if path == "" {
-		dir, err := directory()
+		dir, err := options.directory()
 		if err != nil {
 			return taskCredential{}, err
 		}
@@ -112,9 +106,9 @@ type workspaceInventory struct {
 	Allocations []ink.WorkspaceAllocation `json:"allocations,omitempty"`
 }
 
-func listWorkspaces(repo string, asJSON bool) error {
+func (options *cliOptions) listWorkspaces(repo string, asJSON bool) error {
 	var inventory workspaceInventory
-	found, err := workspaceAPI(http.MethodGet, "/v1/workspaces?repo="+url.QueryEscape(repo), nil, &inventory)
+	found, err := options.workspaceAPI(http.MethodGet, "/v1/workspaces?repo="+url.QueryEscape(repo), nil, &inventory)
 	if err != nil {
 		return err
 	}
@@ -160,9 +154,9 @@ func listWorkspaces(repo string, asJSON bool) error {
 	return nil
 }
 
-func changeWorkspace(path string, payload any, asJSON bool) error {
+func (options *cliOptions) changeWorkspace(path string, payload any, asJSON bool) error {
 	var result ink.WorkspaceAllocation
-	found, err := workspaceAPI(http.MethodPost, path, payload, &result)
+	found, err := options.workspaceAPI(http.MethodPost, path, payload, &result)
 	if err != nil {
 		return err
 	}
@@ -176,8 +170,8 @@ func changeWorkspace(path string, payload any, asJSON bool) error {
 	return nil
 }
 
-func workspaceAPI(method, path string, payload any, result any) (bool, error) {
-	dir, err := directory()
+func (options *cliOptions) workspaceAPI(method, path string, payload any, result any) (bool, error) {
+	dir, err := options.directory()
 	if err != nil {
 		return false, err
 	}
@@ -213,7 +207,7 @@ func workspaceAPI(method, path string, payload any, result any) (bool, error) {
 		if res.StatusCode == http.StatusNotFound && problem.Error == "" {
 			return false, nil
 		}
-		return true, fmt.Errorf("workspace HTTP %d: %s", res.StatusCode, problem.Error)
+		return true, daemonProblem(res.StatusCode, problem.Error)
 	}
 	return true, json.NewDecoder(res.Body).Decode(result)
 }

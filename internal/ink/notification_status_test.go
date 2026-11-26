@@ -1,16 +1,21 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func readNoticeStatus(t *testing.T, s *Service, id string, code int) *execution.MergeStatus {
@@ -69,7 +74,7 @@ func TestNotificationStatusUsesCurrentReadOnlyObservation(t *testing.T) {
 		{"observed merge", "merged", "merged", "", false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st, _ := s.store.load()
+			st, _ := loadFixture(s.store)
 			w := st.Work[key(repo.Repo, p.Number)]
 			w.Pull = p
 			w.Phase = tc.phase
@@ -87,7 +92,7 @@ func TestNotificationStatusUsesCurrentReadOnlyObservation(t *testing.T) {
 			}
 			repo.AutoMerge = &AutoMergeConfig{Enabled: tc.enabled, Method: "squash"}
 			setRepositoryConfigForTest(t, s, repo)
-			if err := s.store.save(st); err != nil {
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 			before, _ := json.Marshal(st)
@@ -98,7 +103,7 @@ func TestNotificationStatusUsesCurrentReadOnlyObservation(t *testing.T) {
 			if tc.state == "merged" && status.MergeSHA != strings.Repeat("d", 40) {
 				t.Fatal("merge SHA missing")
 			}
-			next, _ := s.store.load()
+			next, _ := loadFixture(s.store)
 			after, _ := json.Marshal(next)
 			if string(before) != string(after) {
 				t.Fatal("status mutated persisted state or acknowledged event")
@@ -137,16 +142,16 @@ func TestMergedNoticeIsReservedWithResultAndRecoveredAfterRestart(t *testing.T) 
 			}
 			event := w.Notifications[0].EventID
 			// 模拟在发送前退出，GitHub 之后已从 open 列表移除该 PR。
-			st, _ := s.store.load()
+			st, _ := loadFixture(s.store)
 			w = st.Work[key(repo.Repo, p.Number)]
 			w.Pull.State = "closed"
 			w.Pull.Merged = true
 			w.Phase = "merged"
-			if !w.pendingMergedNotification() {
-				t.Fatal("unsent completion excluded from closed PR recovery")
-			}
-			if err := s.store.save(st); err != nil {
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
+			}
+			if !pollIncludes(t, s, repo.Repo, p.Number) {
+				t.Fatal("unsent completion excluded from closed PR recovery")
 			}
 			s.Close()
 			s2, err := NewService(Config{Repositories: []Repository{repo}}, path, map[string]execution.Executor{"test": e})
@@ -167,9 +172,9 @@ func TestMergedNoticeIsReservedWithResultAndRecoveredAfterRestart(t *testing.T) 
 				t.Fatal("completion repeated before deadline")
 			}
 			if ack {
-				st, _ := s2.store.load()
+				st, _ := loadFixture(s2.store)
 				st.Work[key(repo.Repo, p.Number)].Notifications[0].RetryAt = time.Time{}
-				s2.store.save(st)
+				saveFixture(s2.store, st)
 				if err := s2.notifyMerged(context.Background(), repo, p.Number); err != nil {
 					t.Fatal(err)
 				}
@@ -179,7 +184,7 @@ func TestMergedNoticeIsReservedWithResultAndRecoveredAfterRestart(t *testing.T) 
 				receiptFirst(t, s2, event, true)
 				receiptFirst(t, s2, event, false)
 			}
-			if notificationWork(t, s2, repo, p).pendingMergedNotification() {
+			if pollIncludes(t, s2, repo.Repo, p.Number) {
 				t.Fatal("terminal notice kept polling closed PR")
 			}
 		})
@@ -238,9 +243,11 @@ func TestAmbiguousMergeNotifiesOnlyAfterSameHeadIsConfirmed(t *testing.T) {
 			f := newAutoMergeFixture(t)
 			e := &notificationExecutor{requireACK: true}
 			f.s.providers = map[string]execution.Executor{"test": e}
-			st, _ := f.s.store.load()
-			st.Work[key(f.repo.Repo, 42)].Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
-			f.s.store.save(st)
+			st, _ := loadFixture(f.s.store)
+			work := st.Work[key(f.repo.Repo, 42)]
+			work.Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
+			work.DeveloperOverride = cloneAssignee(work.Developer)
+			saveFixture(f.s.store, st)
 			f.lostResponse = true
 			if err := f.s.autoMerge(context.Background(), f.repo, 42); err != nil {
 				t.Fatal(err)
@@ -267,7 +274,7 @@ func TestAmbiguousMergeNotifiesOnlyAfterSameHeadIsConfirmed(t *testing.T) {
 				}
 				return
 			}
-			if len(w.Notifications) != 1 || w.Notifications[0].Event != "pr_merged" || !w.pendingMergedNotification() {
+			if len(w.Notifications) != 1 || w.Notifications[0].Event != "pr_merged" || !pollIncludes(t, f.s, f.repo.Repo, f.pull.Number) {
 				t.Fatal("confirmed result did not reserve durable notice")
 			}
 			if err := f.s.notifyMerged(context.Background(), f.repo, 42); err != nil {
@@ -289,11 +296,11 @@ func TestHistoricalLegacyApprovalWithoutAttemptCountIsNotReplayed(t *testing.T) 
 	if err := s.notifyApproved(context.Background(), repo, p.Number); err != nil {
 		t.Fatal(err)
 	}
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	n := &st.Work[key(repo.Repo, p.Number)].Notifications[0]
 	n.Attempts = 0
 	n.State = "unknown"
-	s.store.save(st)
+	saveFixture(s.store, st)
 	if err := s.notifyApproved(context.Background(), repo, p.Number); err != nil {
 		t.Fatal(err)
 	}
@@ -306,9 +313,11 @@ func TestPollRecoversMergeAfterClosedObservationBeforeReconcile(t *testing.T) {
 	f := newAutoMergeFixture(t)
 	e := &notificationExecutor{requireACK: true}
 	f.s.providers = map[string]execution.Executor{"test": e}
-	st, _ := f.s.store.load()
-	st.Work[key(f.repo.Repo, 42)].Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
-	f.s.store.save(st)
+	st, _ := loadFixture(f.s.store)
+	work := st.Work[key(f.repo.Repo, 42)]
+	work.Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
+	work.DeveloperOverride = cloneAssignee(work.Developer)
+	saveFixture(f.s.store, st)
 	f.lostResponse = true
 	if err := f.s.autoMerge(context.Background(), f.repo, 42); err != nil {
 		t.Fatal(err)
@@ -342,18 +351,18 @@ func TestPollRecoversMergeAfterClosedObservationBeforeReconcile(t *testing.T) {
 	}
 }
 
-func TestUpgradeDoesNotBackfillCompletedMergeNotices(t *testing.T) {
+func TestCompletedMergeDoesNotBackfillUnreservedNotices(t *testing.T) {
 	f := newAutoMergeFixture(t)
 	e := &notificationExecutor{requireACK: true}
 	f.s.providers = map[string]execution.Executor{"test": e}
-	st, _ := f.s.store.load()
+	st, _ := loadFixture(f.s.store)
 	w := st.Work[key(f.repo.Repo, 42)]
 	w.Developer.Route = &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
 	w.AutoMerges = []AutoMergeRun{{SHA: f.pull.Head.SHA, State: "merged", MergeSHA: strings.Repeat("d", 40)}}
 	w.Pull.State = "closed"
 	w.Pull.Merged = true
 	w.Phase = "merged"
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.s.autoMerge(context.Background(), f.repo, 42); err != nil {
@@ -363,7 +372,98 @@ func TestUpgradeDoesNotBackfillCompletedMergeNotices(t *testing.T) {
 		t.Fatal(err)
 	}
 	w = notificationWork(t, f.s, f.repo, f.pull)
-	if len(w.Notifications) != 0 || len(e.notices) != 0 || w.pendingMergedNotification() {
+	if len(w.Notifications) != 0 || len(e.notices) != 0 || pollIncludes(t, f.s, f.repo.Repo, f.pull.Number) {
 		t.Fatal("upgrade backfilled already completed merges")
+	}
+}
+
+func TestPollReconcilesOnlyPendingClosedPullsAfterRestart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := InitializeState(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, stateDatabase)
+	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer"}
+	e := &notificationExecutor{requireACK: true}
+	cfg := Config{Repositories: []Repository{repo}}
+	providers := map[string]execution.Executor{"test": e}
+	s, err := NewService(cfg, path, providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}
+	owner := Assignee{Route: route}
+	sha := strings.Repeat("a", 40)
+	pulls := make(map[string]Pull)
+	for _, n := range []int{10, 11, 12, 99} {
+		pull := Pull{Number: n, State: "closed", Merged: n == 10}
+		pull.Head.SHA = sha
+		pulls[fmt.Sprintf("/repos/acme/project/pulls/%d", n)] = pull
+		work := &Work{Repo: repo.Repo, Pull: pull, Linked: true, Developer: owner, DeveloperOverride: &owner}
+		work.derive(time.Now())
+		switch n {
+		case 10, 11:
+			event := "review_approved"
+			if n == 10 {
+				event = "pr_merged"
+			}
+			work.Notifications = []NotificationRun{{
+				Notification: execution.Notification{EventID: fmt.Sprintf("event-%d", n), Event: event, SHA: sha},
+				Route:        route, RequireACK: true, State: "awaiting_ack", Attempts: 1,
+			}}
+		case 12:
+			work.AutoMerges = []AutoMergeRun{{State: "pending", SHA: sha, RequestID: testStackRequestID}}
+		}
+		if err := s.store.saveWork(work); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A malformed archived payload must not interfere with polling other PRs.
+	if _, err := s.store.db.Exec("UPDATE work_items SET payload = 'broken' WHERE id = 'acme/project#99'"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = NewService(cfg, path, providers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var readNumbers []int
+	s.up.github = "https://stub.invalid"
+	s.up.http.Transport = testTransport(func(r *http.Request) (*http.Response, error) {
+		out := httptest.NewRecorder()
+		if r.URL.Path == "/repos/acme/project/pulls" && r.URL.Query().Get("state") == "open" {
+			reply(out, 200, []Pull{})
+		} else if pull, ok := pulls[r.URL.Path]; ok && r.Method == http.MethodGet {
+			readNumbers = append(readNumbers, pull.Number)
+			reply(out, 200, pull)
+		} else {
+			t.Fatalf("unexpected GitHub request: %s %s", r.Method, r.URL)
+		}
+		return out.Result(), nil
+	})
+	if err := pollRepoForTest(context.Background(), s, repo); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(readNumbers, []int{10, 12}) {
+		t.Fatalf("unexpected closed PR lookups: %v", readNumbers)
+	}
+	if len(e.notices) != 1 || e.notices[0].EventID != "event-10" {
+		t.Fatalf("wrong pending receipt sent: %+v", e.notices)
+	}
+	receiptFirst(t, s, "event-10", true)
+	receiptFirst(t, s, "event-10", false)
+	closed, err := s.store.loadNotification("event-11")
+	if err != nil || closed == nil || closed.Notifications[0].State != "awaiting_ack" {
+		t.Fatalf("closed unmerged receipt was not preserved: %+v, %v", closed, err)
+	}
+	merged, err := s.store.loadWork(key(repo.Repo, 12))
+	if err != nil || merged == nil || merged.AutoMerges[0].State != "failed" {
+		t.Fatalf("pending stack request not reconciled from closed PR: %+v, %v", merged, err)
+	}
+	readNumbers = nil
+	if err := pollRepoForTest(context.Background(), s, repo); err != nil || len(readNumbers) != 0 {
+		t.Fatalf("settled PRs kept polling: %v, %v", readNumbers, err)
 	}
 }

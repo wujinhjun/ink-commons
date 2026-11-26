@@ -1,0 +1,48 @@
+version: 2
+project_name: ink-commons
+
+builds:
+  - id: ink
+    main: ./cmd/ink
+    binary: ink
+    env: &pure_go
+      - CGO_ENABLED=0
+    goos: &supported_os [linux, darwin]
+    goarch: &supported_arch [amd64, arm64]
+    flags: &build_flags [-trimpath, -buildvcs=false]
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/wujinhjun/ink-commons/internal/ink.BuildVersion={{ .Version }}
+        -X github.com/wujinhjun/ink-commons/internal/ink.BuildRevision={{ .FullCommit }}
+  - id: ink-adapter-ccconnect
+    main: ./cmd/ink-adapter-ccconnect
+    binary: ink-adapter-ccconnect
+    env: *pure_go
+    goos: *supported_os
+    goarch: *supported_arch
+    flags: *build_flags
+    ldflags:
+      - >-
+        -s -w
+        -X main.buildVersion={{ .Version }}
+        -X main.buildRevision={{ .FullCommit }}
+
+archives:
+  - ids: [ink, ink-adapter-ccconnect]
+    formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE
+      - config.example.json
+      - config.schema.json
+      - deploy/README.md
+      - deploy/systemd/*.service
+      - deploy/launchd/*.plist
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+changelog:
+  sort: asc

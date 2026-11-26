@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -144,7 +146,7 @@ exit 1
 func TestMergerRequiresDedicatedPinnedCommand(t *testing.T) {
 	up := newUpstream("reader-token")
 	up.command = "/unused-reader"
-	if _, err := up.merger(false); err == nil {
+	if _, err := up.mergeRole(false); err == nil {
 		t.Fatal("reader used as merger")
 	}
 	script := filepath.Join(t.TempDir(), "merger")
@@ -153,7 +155,7 @@ func TestMergerRequiresDedicatedPinnedCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	up.mergerCommand, up.mergerDigest = script, fmt.Sprintf("%x", sha256.Sum256(body))
-	merger, err := up.merger(false)
+	merger, err := up.mergeRole(false)
 	if err != nil || merger.command != script || merger.token != "" {
 		t.Fatalf("incorrect merger routing: %v", err)
 	}
@@ -186,7 +188,7 @@ printf 'HTTP/2.0 200 OK\r\n\r\n{"merged":true,"sha":"ddddddddddddddddddddddddddd
 	if _, err := up.gitHubGet(context.Background(), "/repos/acme/project/pulls", &result); err != nil {
 		t.Fatal(err)
 	}
-	merger, err := up.merger(true)
+	merger, err := up.mergeRole(true)
 	if err != nil {
 		t.Fatal(err)
 	}

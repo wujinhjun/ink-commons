@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func contextExecutor(t *testing.T, kind int, messages []execution.ConversationMessage, inspect func(*http.Request)) *Executor {
@@ -59,7 +59,7 @@ func TestReuseDevelopmentThreadKeepsIndependentProject(t *testing.T) {
 	route := execution.Route{Provider: Name, Target: "reviewer"}
 	task := execution.Delivery{ReuseDevelopmentThread: true, Source: source}
 	session, err := e.Prepare(context.Background(), route, task)
-	if err != nil || session != "discord:123" || source.Target != "developer" || route.Target != "reviewer" {
+	if err != nil || session != "discord:123:456" || source.Target != "developer" || route.Target != "reviewer" {
 		t.Fatalf("reuse: %s %v", session, err)
 	}
 	route.Target = "developer"

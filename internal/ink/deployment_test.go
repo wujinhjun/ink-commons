@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -21,7 +23,7 @@ func TestDeploymentGateBlocksPollingAndWrites(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.Write([]byte(`[]`)) }))
 	defer upstream.Close()
 	cfg := Config{PollGate: gate, Repositories: []Repository{{Repo: "acme/project", ReviewerLogin: "reviewer"}}}
-	service, err := NewService(cfg, filepath.Join(dir, "state.sqlite3"), nil)
+	service, err := newFixtureService(t, cfg, filepath.Join(dir, "state.sqlite3"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +64,9 @@ func TestServeDeploymentWaitsForGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
+	if err := InitializeState(dir); err != nil {
+		t.Fatal(err)
+	}
 	gate := filepath.Join(dir, "gate")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -109,7 +114,7 @@ func TestConfigOnlyPermitsConfigWritesWithPollingDisabled(t *testing.T) {
 	if err := os.WriteFile(gate, []byte("ready"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(Config{PollGate: gate, ConfigOnly: true}, filepath.Join(dir, "state.sqlite3"), nil)
+	service, err := newFixtureService(t, Config{PollGate: gate, ConfigOnly: true}, filepath.Join(dir, "state.sqlite3"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

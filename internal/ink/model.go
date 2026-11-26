@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -5,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type Assignee struct {
@@ -71,7 +73,6 @@ type Attempt struct {
 	RecoveryReason  string             `json:"recovery_reason,omitempty"`
 	RetryAt         time.Time          `json:"retry_at,omitempty"`
 	State           string             `json:"state"`
-	Legacy          bool               `json:"legacy,omitempty"`
 	ID              string             `json:"attempt_id"`
 	Number          int                `json:"number"`
 	Route           execution.Route    `json:"route"`
@@ -84,20 +85,23 @@ type Attempt struct {
 }
 
 type Task struct {
-	ConflictBase   *PullBase           `json:"conflict_base,omitempty"`
-	ConfigSnapshot *TaskConfigSnapshot `json:"config_snapshot,omitempty"`
-	Handoff        *TaskHandoff        `json:"handoff,omitempty"`
-	CreatedAt      time.Time           `json:"created_at,omitempty"`
-	ID             string              `json:"task_id,omitempty"`
-	Runs           []Attempt           `json:"runs,omitempty"`
-	RetryAt        time.Time           `json:"retry_at,omitempty"`
-	Role           string              `json:"role"`
-	SHA            string              `json:"sha"`
-	ReviewID       int64               `json:"review_id,omitempty"`
-	ReviewURL      string              `json:"review_url,omitempty"`
-	Delivery       string              `json:"delivery"`
-	Error          string              `json:"error,omitempty"`
-	Attempts       int                 `json:"attempts"`
+	Preparation        *TaskWake           `json:"preparation,omitempty"`
+	AttemptsExhausted  bool                `json:"attempts_exhausted,omitempty"`
+	PreparationInvalid bool                `json:"preparation_invalid,omitempty"`
+	ConflictBase       *PullBase           `json:"conflict_base,omitempty"`
+	ConfigSnapshot     *TaskConfigSnapshot `json:"config_snapshot,omitempty"`
+	Handoff            *TaskHandoff        `json:"handoff,omitempty"`
+	CreatedAt          time.Time           `json:"created_at,omitempty"`
+	ID                 string              `json:"task_id,omitempty"`
+	Runs               []Attempt           `json:"runs,omitempty"`
+	RetryAt            time.Time           `json:"retry_at,omitempty"`
+	Role               string              `json:"role"`
+	SHA                string              `json:"sha"`
+	ReviewID           int64               `json:"review_id,omitempty"`
+	ReviewURL          string              `json:"review_url,omitempty"`
+	Delivery           string              `json:"delivery"`
+	Error              string              `json:"error,omitempty"`
+	Attempts           int                 `json:"attempts"`
 }
 
 type Alert struct {
@@ -113,8 +117,8 @@ type Workflow struct {
 	Reason string `json:"reason,omitempty"`
 }
 type Work struct {
+	storedRevision    int64
 	MergeConflict     *MergeConflict      `json:"merge_conflict,omitempty"`
-	InheritsConfig    *bool               `json:"inherits_config,omitempty"`
 	ReviewerOverride  *Assignee           `json:"reviewer_override,omitempty"`
 	DeveloperOverride *Assignee           `json:"developer_override,omitempty"`
 	RoundConfig       *TaskConfigSnapshot `json:"round_config,omitempty"`
@@ -123,7 +127,7 @@ type Work struct {
 	Review            *ReviewFeatures     `json:"review,omitempty"`
 	AutoMerges        []AutoMergeRun      `json:"auto_merges,omitempty"`
 	Notifications     []NotificationRun   `json:"notifications,omitempty"`
-	Approvals         []ApprovalRun       `json:"postApproval,omitempty"`
+	Approvals         []ApprovalRun       `json:"post_approval,omitempty"`
 	Workflow          Workflow            `json:"workflow"`
 	Alerts            []Alert             `json:"alerts,omitempty"`
 	Repo              string              `json:"repo"`
@@ -138,7 +142,7 @@ type Work struct {
 	Reviews           []Review            `json:"reviews,omitempty"`
 }
 
-func (w *Work) derive() {
+func (w *Work) derive(now time.Time) {
 	w.retireStaleConflictTasks()
 	if w.Pull.State == "closed" {
 		w.Phase = "closed"
@@ -167,7 +171,7 @@ func (w *Work) derive() {
 	}
 	if latest == nil {
 		w.Phase = "review_pending"
-		w.setTask(Task{Role: "reviewer", SHA: w.Pull.Head.SHA}, w.Reviewer)
+		w.setTask(Task{Role: "reviewer", SHA: w.Pull.Head.SHA}, w.Reviewer, now)
 		return
 	}
 	if latest.State == "APPROVED" {
@@ -178,10 +182,10 @@ func (w *Work) derive() {
 		return
 	}
 	w.Phase = "changes_requested"
-	w.setTask(Task{Role: "developer", SHA: w.Pull.Head.SHA, ReviewID: latest.ID, ReviewURL: latest.URL}, w.Developer)
+	w.setTask(Task{Role: "developer", SHA: w.Pull.Head.SHA, ReviewID: latest.ID, ReviewURL: latest.URL}, w.Developer, now)
 }
 
-func (w *Work) setTask(task Task, assignee Assignee) {
+func (w *Work) setTask(task Task, assignee Assignee, now time.Time) {
 	if w.Task != nil && w.Task.Role == task.Role && w.Task.SHA == task.SHA && w.Task.ReviewID == task.ReviewID &&
 		(w.Task.ConflictBase == nil) == (task.ConflictBase == nil) {
 		return
@@ -190,7 +194,7 @@ func (w *Work) setTask(task Task, assignee Assignee) {
 	if assignee.Route != nil {
 		task.Delivery = "pending"
 	}
-	task.CreatedAt = time.Now()
+	task.CreatedAt = now
 	task.ID = uuid.NewString()
 	if w.TaskMode == "cooperative" {
 		task.Handoff = &TaskHandoff{State: "pending", Assignee: assignee}
@@ -199,7 +203,7 @@ func (w *Work) setTask(task Task, assignee Assignee) {
 }
 
 func (w *Work) replaceTask(task *Task) {
-	if w.Task != nil && (len(w.Task.Runs) > 0 || w.Task.Handoff != nil) {
+	if w.Task != nil && (len(w.Task.Runs) > 0 || w.Task.Handoff != nil || w.Task.Preparation != nil) {
 		if h := w.Task.Handoff; h != nil && h.State == "pending" {
 			h.State = "superseded"
 		}

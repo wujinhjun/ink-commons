@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -11,19 +13,20 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-task-")
+	dir, err := os.MkdirTemp("/tmp", "ink-task-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
 	t.Setenv("INK_DATA_DIR", dir)
 	t.Setenv("INK_PROVIDER", "")
-	t.Setenv("CC_PROJECT", "developer")
-	t.Setenv("CC_SESSION_KEY", "discord:123")
+	t.Setenv("INK_PROVIDER", "chat")
+	t.Setenv("INK_TARGET", "developer")
+	t.Setenv("INK_SESSION", "discord:123")
 	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
 	if err != nil {
 		t.Fatal(err)
@@ -43,11 +46,11 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 	go server.Serve(ln)
 	defer server.Close()
 	id := uuid.NewString()
-	if err := taskCommand([]string{"claim", "--task", id}); err != nil {
+	if err := run([]string{"task", "claim", "--task", id}); err != nil {
 		t.Fatal(err)
 	}
 	first := <-requests
-	if err := taskCommand([]string{"claim", "--task", id}); err != nil {
+	if err := run([]string{"task", "claim", "--task", id}); err != nil {
 		t.Fatal(err)
 	}
 	repeated := <-requests
@@ -60,11 +63,11 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 		t.Fatal("credential was not private", err)
 	}
 	args := []string{"submit", "--task", id, "--handoff", "--request-id", "fixed", "--new-sha", strings.Repeat("b", 40)}
-	if err := taskCommand(args); err != nil {
+	if err := run(append([]string{"task"}, args...)); err != nil {
 		t.Fatal(err)
 	}
 	submitted := <-requests
-	if err := taskCommand(args); err != nil {
+	if err := run(append([]string{"task"}, args...)); err != nil {
 		t.Fatal(err)
 	}
 	replayed := <-requests
@@ -73,21 +76,24 @@ func TestTaskCLIUsesDurablePrivateCredentialAndIdempotentSubmission(t *testing.T
 	if string(a) != string(b) {
 		t.Fatal("submission retry changed identity/evidence")
 	}
-	if err := taskCommand([]string{"status", "--task", id}); err != nil {
+	if err := run([]string{"task", "status", "--task", id}); err != nil {
 		t.Fatal(err)
 	}
 	if status := <-requests; status["token"] != nil {
 		t.Fatal("status leaked credential")
 	}
-	t.Setenv("CC_PROJECT", "other")
-	if err := taskCommand([]string{"claim", "--task", id}); err == nil {
+	t.Setenv("INK_TARGET", "other")
+	if err := run([]string{"task", "claim", "--task", id}); err == nil {
 		t.Fatal("credential reused from another route")
 	}
 }
 
 func TestTaskCredentialRejectsSymlinksAndPublicFiles(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "claim.json")
-	if err := os.WriteFile(path, []byte(`{}`), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readTaskCredential(path); err == nil {
@@ -127,15 +133,15 @@ func TestTaskModeConfigurationIsValidated(t *testing.T) {
 }
 
 func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-task-route-")
+	dir, err := os.MkdirTemp("/tmp", "ink-task-route-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
 	t.Setenv("INK_DATA_DIR", dir)
 	t.Setenv("INK_PROVIDER", "")
-	t.Setenv("CC_PROJECT", "")
-	t.Setenv("CC_SESSION_KEY", "")
+	t.Setenv("INK_TARGET", "")
+	t.Setenv("INK_SESSION", "")
 	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
 	if err != nil {
 		t.Fatal(err)
@@ -156,45 +162,45 @@ func TestTaskClaimExplicitRouteWithoutEnvironment(t *testing.T) {
 	defer server.Close()
 
 	id := uuid.NewString()
-	if err := taskCommand([]string{
+	if err := run([]string{"task",
 		"claim", "--task", id,
-		"--provider", "cc-connect", "--target", "yu-bingtao-codex-acp", "--session", "discord:123",
+		"--provider", "chat", "--target", "review-project", "--session", "discord:123",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	claim := <-requests
 	route, ok := claim["route"].(map[string]any)
-	if !ok || route["provider"] != "cc-connect" || route["target"] != "yu-bingtao-codex-acp" || route["session"] != "discord:123" {
+	if !ok || route["provider"] != "chat" || route["target"] != "review-project" || route["session"] != "discord:123" {
 		t.Fatalf("explicit claim route not sent: %#v", claim["route"])
 	}
 
 	// The private credential keeps the route, so submit does not need the
 	// original environment or repeated route flags.
 	args := []string{"submit", "--task", id, "--handoff", "--request-id", "fixed", "--new-sha", strings.Repeat("b", 40)}
-	if err := taskCommand(args); err != nil {
+	if err := run(append([]string{"task"}, args...)); err != nil {
 		t.Fatal(err)
 	}
 	submitted := <-requests
 	route, ok = submitted["route"].(map[string]any)
-	if !ok || route["target"] != "yu-bingtao-codex-acp" || route["session"] != "discord:123" {
+	if !ok || route["target"] != "review-project" || route["session"] != "discord:123" {
 		t.Fatalf("submit lost the explicit claim route: %#v", submitted["route"])
 	}
 
-	if err := taskCommand([]string{"claim", "--task", uuid.NewString(), "--target", "yu-bingtao-codex-acp"}); err == nil {
+	if err := run([]string{"task", "claim", "--task", uuid.NewString(), "--target", "review-project"}); err == nil {
 		t.Fatal("partial explicit route accepted")
 	}
 }
 
 func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-task-reject-")
+	dir, err := os.MkdirTemp("/tmp", "ink-task-reject-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
 	t.Setenv("INK_DATA_DIR", dir)
-	t.Setenv("INK_PROVIDER", "")
-	t.Setenv("CC_PROJECT", "wrong-project")
-	t.Setenv("CC_SESSION_KEY", "discord:999")
+	t.Setenv("INK_PROVIDER", "chat")
+	t.Setenv("INK_TARGET", "wrong-project")
+	t.Setenv("INK_SESSION", "discord:999")
 	ln, err := net.Listen("unix", filepath.Join(dir, "ink.sock"))
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +225,7 @@ func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
 	defer server.Close()
 
 	id := uuid.NewString()
-	if err := taskCommand([]string{"claim", "--task", id}); err == nil {
+	if err := run([]string{"task", "claim", "--task", id}); err == nil {
 		t.Fatal("rejected environment claim was accepted")
 	}
 	first := <-requests
@@ -232,9 +238,9 @@ func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
 		t.Fatalf("rejected claim was not recorded: %#v %v", credential, err)
 	}
 
-	if err := taskCommand([]string{
+	if err := run([]string{"task",
 		"claim", "--task", id,
-		"--provider", "cc-connect", "--target", "correct-project", "--session", "discord:123",
+		"--provider", "chat", "--target", "correct-project", "--session", "discord:123",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -250,25 +256,25 @@ func TestTaskClaimRecoversFromRejectedEnvironmentRoute(t *testing.T) {
 }
 
 func TestExplicitTaskRoutePreservesExactValues(t *testing.T) {
-	route, err := explicitTaskRoute(" cc-connect ", " target ", " discord:123 ")
+	route, err := explicitTaskRoute(" chat ", " target ", " discord:123 ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if route.Provider != " cc-connect " || route.Target != " target " || route.Session != " discord:123 " {
+	if route.Provider != " chat " || route.Target != " target " || route.Session != " discord:123 " {
 		t.Fatalf("explicit route was normalized: %#v", route)
 	}
 }
 
 func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-task-legacy-route-")
+	dir, err := os.MkdirTemp("/tmp", "ink-task-legacy-route-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
 	t.Setenv("INK_DATA_DIR", dir)
 	t.Setenv("INK_PROVIDER", "")
-	t.Setenv("CC_PROJECT", "")
-	t.Setenv("CC_SESSION_KEY", "")
+	t.Setenv("INK_TARGET", "")
+	t.Setenv("INK_SESSION", "")
 	claims := filepath.Join(dir, "claims")
 	if err := os.Mkdir(claims, 0700); err != nil {
 		t.Fatal(err)
@@ -294,16 +300,16 @@ func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
 	credential := taskCredential{
 		TaskID: id,
 		Token:  token,
-		Route:  &execution.Route{Provider: "cc-connect", Target: "old-target", Session: "discord:999"},
+		Route:  &execution.Route{Provider: "chat", Target: "old-target", Session: "discord:999"},
 	}
 	data, _ := json.Marshal(credential)
 	path := filepath.Join(claims, id+".json")
 	if err := writeTaskCredential(path, append(data, '\n')); err != nil {
 		t.Fatal(err)
 	}
-	if err := taskCommand([]string{
+	if err := run([]string{"task",
 		"claim", "--task", id, "--replace-route",
-		"--provider", "cc-connect", "--target", "new-target", "--session", "discord:123",
+		"--provider", "chat", "--target", "new-target", "--session", "discord:123",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +323,7 @@ func TestTaskClaimReplacesLegacyCredentialRoute(t *testing.T) {
 		t.Fatalf("replacement not persisted: %#v %v", credential, err)
 	}
 
-	if err := taskCommand([]string{"claim", "--task", id, "--replace-route"}); err == nil || !strings.Contains(err.Error(), "--replace-route requires") {
+	if err := run([]string{"task", "claim", "--task", id, "--replace-route"}); err == nil || !strings.Contains(err.Error(), "--replace-route requires") {
 		t.Fatalf("missing explicit route was not rejected: %v", err)
 	}
 }
@@ -329,7 +335,7 @@ func TestTaskRejectionIsBoundToTheAttempt(t *testing.T) {
 	credential := taskCredential{
 		TaskID:    id,
 		Token:     token,
-		Route:     &execution.Route{Provider: "cc-connect", Target: "target", Session: "discord:123"},
+		Route:     &execution.Route{Provider: "chat", Target: "target", Session: "discord:123"},
 		AttemptID: "current",
 	}
 	data, _ := json.Marshal(credential)
@@ -356,7 +362,10 @@ func TestTaskLockRejectsSymlinksAndPublicFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "claim.json")
 	target := filepath.Join(dir, "target")
-	if err := os.WriteFile(target, []byte("target"), 0644); err != nil {
+	if err := os.WriteFile(target, []byte("target"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path+".lock"); err != nil {
@@ -372,7 +381,10 @@ func TestTaskLockRejectsSymlinksAndPublicFiles(t *testing.T) {
 	if err := os.Remove(path + ".lock"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path+".lock", []byte("public"), 0644); err != nil {
+	if err := os.WriteFile(path+".lock", []byte("public"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path+".lock", 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := lockTaskCredential(path); err == nil {

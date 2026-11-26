@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -10,7 +12,12 @@ import (
 )
 
 func (s *Service) listRepositories(w http.ResponseWriter, r *http.Request) {
-	reply(w, 200, s.repositories())
+	repos, err := s.runtimeRepositories()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	reply(w, 200, repos)
 }
 
 func (s *Service) registerRepository(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +39,7 @@ func (s *Service) registerRepository(w http.ResponseWriter, r *http.Request) {
 	delete(raw, "repo")
 	values := ConfigValues(raw)
 	if err := validateValues(values); err != nil {
-		fail(w, apiError{400, err.Error()})
+		fail(w, apiError{400, StartupDiagnostic(err)})
 		return
 	}
 	// Permission check uses the daemon's identity, never invoking shell credentials.
@@ -40,7 +47,7 @@ func (s *Service) registerRepository(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	var pulls []Pull
 	if _, err := s.up.gitHubGet(ctx, "/repos/"+name+"/pulls?state=open&per_page=1", &pulls); err != nil {
-		fail(w, apiError{422, fmt.Sprintf("cannot read repository PRs: %v", err)})
+		fail(w, apiError{422, fmt.Sprintf("cannot read repository PRs: %s", redactedError(err))})
 		return
 	}
 	s.mu.Lock()

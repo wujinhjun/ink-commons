@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -9,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 // TaskHandoff is a cooperative business handoff, never an executor termination
@@ -28,6 +30,8 @@ type TaskHandoff struct {
 }
 
 type TaskWake struct {
+	Route               *execution.Route                  `json:"route,omitempty"`
+	Request             *execution.Delivery               `json:"request,omitempty"`
 	Preparation         string                            `json:"preparation,omitempty"`
 	PreparationAttempts int                               `json:"preparation_attempts,omitempty"`
 	Allocation          *execution.ConversationAllocation `json:"allocation,omitempty"`
@@ -56,15 +60,15 @@ type handoffInput struct {
 	Submission *HandoffSubmission `json:"submission,omitempty"`
 }
 
-func findTask(st state, id string) (*Work, *Task) {
-	for _, w := range st.Work {
+func (w *Work) findTask(id string) *Task {
+	if w != nil {
 		for _, t := range w.executionTasks() {
 			if t.ID == id {
-				return w, t
+				return t
 			}
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 func claimHash(token string) string {
@@ -106,7 +110,12 @@ func (w *Work) handoffMergeBlocked() bool {
 }
 
 func reviewChannelUnverified(w *Work, t *Task) bool {
-	return t.Handoff.Assignee.Route != nil && t.Handoff.Wake.Preparation != "prepared" && deliveryFor(w, t, "", 0).RequireSameChannel
+	route := t.Handoff.Assignee.Route
+	if route == nil || t.Handoff.Wake.Preparation == "prepared" {
+		return false
+	}
+	d := deliveryFor(w, t, "", 0)
+	return policyNeedsPlacement(*route, d.RequireSameChannel, d.ReuseDevelopmentThread)
 }
 
 func handoffResponse(w *Work, t *Task, first bool) map[string]any {
@@ -130,18 +139,21 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	w, t, err := s.store.loadTask(r.PathValue("task"))
 	if err != nil {
 		fail(out, err)
 		return
 	}
-	w, t := findTask(st, r.PathValue("task"))
 	if t == nil || t.Handoff == nil {
 		fail(out, apiError{404, "cooperative task not found"})
 		return
 	}
 	if r.Method == http.MethodGet {
 		reply(out, 200, handoffResponse(w, t, false))
+		return
+	}
+	if _, err := s.store.effectiveConfig(w.Repo); err != nil {
+		fail(out, err)
 		return
 	}
 	if len(input.Token) < 32 || len(input.Token) > 256 {
@@ -182,18 +194,24 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if w.Task != t || h.State != "pending" || w.Pull.State != "open" || w.Pull.Draft || !w.Linked || w.executionBlocked() {
-			fail(out, apiError{409, "task is not eligible; wait for the previous handoff or resolve legacy execution"})
+			fail(out, apiError{409, "task is not eligible; wait for the previous handoff or resolve the previous execution"})
 			return
 		}
 		if reviewChannelUnverified(w, t) {
 			fail(out, apiError{409, "review channel must be verified before claiming"})
 			return
 		}
+		if owner.Route != nil {
+			if err := s.validateReviewPreparation(w); err != nil {
+				fail(out, apiError{409, "review preparation: " + err.Error()})
+				return
+			}
+		}
 		if err := s.freezeTaskConfig(w); err != nil {
 			fail(out, err)
 			return
 		}
-		h.State, h.ClaimHash, h.ClaimedAt = "claimed", hash, time.Now()
+		h.State, h.ClaimHash, h.ClaimedAt = "claimed", hash, s.now()
 		first = true
 	case "retry":
 		if h.ClaimHash != hash || h.ClaimHash == "" {
@@ -207,7 +225,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		h.State = "superseded"
 		if w.Task == t {
 			w.replaceTask(nil)
-			w.derive()
+			w.derive(s.now())
 		}
 		first = true
 	case "submit":
@@ -237,7 +255,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 				fail(out, apiError{400, "blocked handoff requires a reason and no result evidence"})
 				return
 			}
-			h.State, h.FinishedAt = "blocked", time.Now()
+			h.State, h.FinishedAt = "blocked", s.now()
 		} else if t.Role == "developer" {
 			if !validSHA(result.NewSHA) || result.NewSHA == t.SHA || result.ReviewID != 0 || result.Outcome != "" {
 				fail(out, apiError{400, "developer handoff requires a different valid new_sha"})
@@ -252,7 +270,7 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 			h.State = "submitted"
 		}
 		h.Submission = result
-		h.SubmittedAt = time.Now()
+		h.SubmittedAt = s.now()
 		h.Verification = "waiting for GitHub verification"
 		if h.State == "blocked" {
 			h.Verification = result.Reason
@@ -263,8 +281,8 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 		fail(out, apiError{404, "expected claim or submit"})
 		return
 	}
-	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	if err := s.store.save(st); err != nil {
+	s.refreshWorkflow(w, s.now())
+	if err := s.store.saveWork(w); err != nil {
 		fail(out, err)
 		return
 	}
@@ -274,22 +292,21 @@ func (s *Service) handoffTask(out http.ResponseWriter, r *http.Request) {
 // Verify outside the state lock. On return, version and claim comparisons fence
 // observations/assignments that raced with the network request. Completion,
 // successor creation and its pending wake record share one SQLite transaction.
-func (s *Service) reconcileHandoffs(ctx context.Context) error {
-	s.mu.Lock()
-	st, err := s.store.load()
-	s.mu.Unlock()
+func (s *Service) reconcileHandoffWork(ctx context.Context, id string) error {
+	w, err := s.store.loadWork(id)
 	if err != nil {
 		return err
 	}
-	for _, w := range st.Work {
-		for _, t := range w.executionTasks() {
-			if h := t.Handoff; h != nil && h.State == "submitted" {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				if err := s.verifyHandoff(ctx, w, t); err != nil {
-					return err
-				}
+	if w == nil {
+		return nil
+	}
+	for _, t := range w.executionTasks() {
+		if h := t.Handoff; h != nil && h.State == "submitted" {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err := s.verifyHandoff(ctx, w, t); err != nil {
+				return err
 			}
 		}
 	}
@@ -343,11 +360,10 @@ func (s *Service) verifyHandoff(ctx context.Context, snapshot *Work, task *Task)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live, err := s.store.load()
+	w, t, err := s.store.loadTask(task.ID)
 	if err != nil {
 		return err
 	}
-	w, t := findTask(live, task.ID)
 	if t == nil || t.Handoff == nil || w.Version != snapshot.Version || t.Handoff.State != "submitted" || t.Handoff.ClaimHash != task.Handoff.ClaimHash || t.Handoff.Submission == nil || *t.Handoff.Submission != result {
 		return nil
 	}
@@ -358,17 +374,17 @@ func (s *Service) verifyHandoff(ctx context.Context, snapshot *Work, task *Task)
 		// complete work on behalf of a newer task. Evidence belongs to this task.
 		h.State = state
 		if state != "submitted" {
-			h.FinishedAt = time.Now()
+			h.FinishedAt = s.now()
 		}
 		w.Pull = pull
 		if task.Role == "reviewer" {
 			w.Reviews = mergeReviews(w.Reviews, reviews)
 		}
 		w.Version++
-		w.derive()
+		w.derive(s.now())
 	}
-	w.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	return s.store.save(live)
+	s.refreshWorkflow(w, s.now())
+	return s.store.saveWork(w)
 }
 
 func (w *Work) refreshHandoffWorkflow(now time.Time, c Reliability) {
@@ -418,9 +434,9 @@ func (w *Work) refreshHandoffWorkflow(now time.Time, c Reliability) {
 						message = "Conversation allocation is unresolved. Verify the thread, then bind it with ink review --session."
 					}
 					if h.Wake.RecoveryStopped {
-						message = "Discord rejected conversation creation. Correct the reported error and assign a verified session."
+						message = "Conversation recovery was stopped. Assign a verified session."
 					} else if h.Wake.canRecover() {
-						message = "Conversation allocation is unresolved. Same-channel thread lookup will retry."
+						message = "Conversation allocation is unresolved. The adapter will look up the original allocation."
 					}
 					w.raiseAlert("task_preparation_unknown", t.ID, message, now)
 				}

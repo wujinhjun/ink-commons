@@ -1,87 +1,103 @@
+//go:build linux || darwin
+
 package main
 
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"ink-commons/internal/ink"
+	"github.com/spf13/cobra"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 const prePushHook = `#!/bin/sh
+if [ "$#" -ge 2 ]; then
+  if [ -n "${INK_BIN:-}" ]; then
+    "$INK_BIN" pre-push "$2"
+  elif command -v ink >/dev/null 2>&1; then
+    ink pre-push "$2"
+  elif [ -x "$HOME/.local/lib/ink-commons/ink" ]; then
+    "$HOME/.local/lib/ink-commons/ink" pre-push "$2"
+  fi
+fi
+exit 0
+`
+
+const legacyPrePushHook = `#!/bin/sh
 if [ "$#" -ge 2 ]; then
   "$HOME/.local/lib/ink-commons/ink" pre-push "$2"
 fi
 exit 0
 `
 
-func hookCommand(args []string) error {
-	if len(args) == 0 || (args[0] != "install" && args[0] != "status") {
-		return errors.New("usage: ink hook install|status [--checkout DIR] [--repo OWNER/REPO]")
-	}
-	flags := flag.NewFlagSet("hook "+args[0], flag.ContinueOnError)
+func hookCommand(options *cliOptions, action string) *cobra.Command {
+	command := &cobra.Command{Use: action}
+	flags := command.Flags()
 	checkout := flags.String("checkout", ".", "Git checkout to inspect or install into")
 	repo := flags.String("repo", "", "only report status if origin pushes to OWNER/REPO")
-	if err := flags.Parse(args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
+
+	command.RunE = func(_ *cobra.Command, args []string) error {
+		if len(args) != 0 {
+			return errors.New("unexpected hook arguments")
 		}
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("unexpected hook arguments")
-	}
-	if *repo != "" {
-		name := strings.ToLower(strings.TrimSpace(*repo))
-		if args[0] != "status" || !ink.ValidRepository(name) {
-			return errors.New("--repo requires hook status and a valid owner/repo")
+		if *repo != "" {
+			name := strings.ToLower(strings.TrimSpace(*repo))
+			if action != "status" || !ink.ValidRepository(name) {
+				return errors.New("--repo requires hook status and a valid owner/repo")
+			}
+			if !checkoutPushesTo(*checkout, name) {
+				return options.hookResult("unknown")
+			}
 		}
-		if !checkoutPushesTo(*checkout, name) {
-			fmt.Println("unknown")
-			return nil
+		output, err := exec.Command("git", "-C", *checkout, "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push").Output()
+		if err != nil {
+			return errors.New("cannot resolve the checkout's pre-push hook path")
 		}
+		path := strings.TrimRight(string(output), "\r\n")
+		if !filepath.IsAbs(path) {
+			return errors.New("Git returned an invalid hook path")
+		}
+		status, err := hookStatus(path)
+		if err != nil {
+			return err
+		}
+		if action == "status" || status == "installed" {
+			return options.hookResult(status)
+		}
+		if status == "unmanaged" {
+			return errors.New("pre-push hook already exists; chain the Ink entry or use explicit link")
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return err
+		}
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0700)
+		if err != nil {
+			return err
+		}
+		if _, err := file.WriteString(prePushHook); err != nil {
+			file.Close()
+			os.Remove(path)
+			return err
+		}
+		if err := file.Close(); err != nil {
+			os.Remove(path)
+			return err
+		}
+		return options.hookResult("installed")
 	}
-	output, err := exec.Command("git", "-C", *checkout, "rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push").Output()
-	if err != nil {
-		return errors.New("cannot resolve the checkout's pre-push hook path")
+	return command
+}
+
+func (options *cliOptions) hookResult(status string) error {
+	if options.json {
+		return printJSON(map[string]string{"status": status})
 	}
-	path := strings.TrimRight(string(output), "\r\n")
-	if !filepath.IsAbs(path) {
-		return errors.New("Git returned an invalid hook path")
-	}
-	status, err := hookStatus(path)
-	if err != nil {
-		return err
-	}
-	if args[0] == "status" || status == "installed" {
-		fmt.Println(status)
-		return nil
-	}
-	if status == "unmanaged" {
-		return errors.New("pre-push hook already exists; chain the Ink entry or use explicit link")
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0700)
-	if err != nil {
-		return err
-	}
-	if _, err := file.WriteString(prePushHook); err != nil {
-		file.Close()
-		os.Remove(path)
-		return err
-	}
-	if err := file.Close(); err != nil {
-		os.Remove(path)
-		return err
-	}
-	fmt.Println("installed")
+	fmt.Println(status)
 	return nil
 }
 
@@ -113,7 +129,7 @@ func hookStatus(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if bytes.Equal(content, []byte(prePushHook)) {
+	if bytes.Equal(content, []byte(prePushHook)) || bytes.Equal(content, []byte(legacyPrePushHook)) {
 		return "installed", nil
 	}
 	return "unmanaged", nil

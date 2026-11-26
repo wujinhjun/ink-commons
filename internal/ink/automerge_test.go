@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -42,22 +44,27 @@ func newAutoMergeFixture(t *testing.T) *autoMergeFixture {
 	r := Review{ID: 1, SHA: f.pull.Head.SHA, State: "APPROVED", SubmittedAt: time.Now()}
 	r.User.Login = "reviewer"
 	f.reviews = []Review{r}
-	s, err := NewService(Config{Repositories: []Repository{f.repo}}, f.path, nil)
+	t.Setenv("INK_TEST_MERGER_PAT", "fixture-merger-pat")
+	s, err := newFixtureService(t, Config{Repositories: []Repository{f.repo}, GitHubMerger: fixtureMergerCredential()}, f.path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.s = s
 	t.Cleanup(func() { f.s.Close() })
 	f.installTransport(t)
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	st.Work[key(f.repo.Repo, 42)] = &Work{Repo: f.repo.Repo, Pull: f.pull, Linked: true, Reviewer: Assignee{GitHubLogin: "reviewer"}}
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.observe(f.repo, f.pull, f.reviews); err != nil {
 		t.Fatal(err)
 	}
 	return f
+}
+
+func fixtureMergerCredential() *GitHubCredential {
+	return &GitHubCredential{TokenEnv: "INK_TEST_MERGER_PAT"}
 }
 
 func (f *autoMergeFixture) installTransport(t *testing.T) {
@@ -76,7 +83,7 @@ func (f *autoMergeFixture) installTransport(t *testing.T) {
 			if input["sha"] != strings.Repeat("a", 40) || input["merge_method"] != f.repo.AutoMerge.method() {
 				t.Fatalf("unguarded merge: %+v", input)
 			}
-			st, err := f.s.store.load()
+			st, err := loadFixture(f.s.store)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -142,6 +149,75 @@ func TestAutoMergePollDedupAndRestart(t *testing.T) {
 	}
 }
 
+func TestAutoMergeRetriesRefusedWritesWithFreshPreflight(t *testing.T) {
+	for _, stack := range []bool{false, true} {
+		for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+			t.Run(fmt.Sprintf("stack=%t/status=%d", stack, status), func(t *testing.T) {
+				f := newAutoMergeFixture(t)
+				if stack {
+					f.setStack(1, "main")
+				}
+				ctx := context.Background()
+				base := f.s.up.http.Transport
+				submits, checks := 0, 0
+				f.s.up.http.Transport = testTransport(func(r *http.Request) (*http.Response, error) {
+					if strings.HasSuffix(r.URL.Path, "/check-runs") {
+						checks++
+					}
+					if r.Method != http.MethodPut {
+						return base.RoundTrip(r)
+					}
+					submits++
+					w := httptest.NewRecorder()
+					if submits == 1 {
+						if status == http.StatusTooManyRequests {
+							w.Header().Set("Retry-After", "300")
+						}
+						w.WriteHeader(status)
+						return w.Result(), nil
+					}
+					if status == http.StatusUnauthorized && r.Header.Get("Authorization") != "Bearer refreshed-fixture-merger" {
+						t.Error("retry did not use the refreshed credential")
+					}
+					if !stack {
+						return base.RoundTrip(r)
+					}
+					reply(w, http.StatusAccepted, map[string]any{"status": "pending", "details": map[string]string{"uuid": testStackRequestID}})
+					return w.Result(), nil
+				})
+				f.s.Poll(ctx)
+				run := notificationWork(t, f.s, f.repo, f.pull).AutoMerges[0]
+				if submits != 1 || run.State != "waiting" || run.RequestID != "" ||
+					!strings.Contains(run.Reason, fmt.Sprintf("HTTP %d", status)) {
+					t.Fatalf("refused merge did not release the reservation: %+v (submits=%d)", run, submits)
+				}
+				checksAfterRefusal := checks
+				if status == http.StatusTooManyRequests {
+					f.s.Poll(ctx)
+					if submits != 1 || checks != checksAfterRefusal {
+						t.Fatal("poll sent GitHub requests during secondary cooldown")
+					}
+					throttle := f.s.up.throttle
+					throttle.mu.Lock()
+					throttle.secondary.until = time.Now().Add(-time.Second)
+					throttle.mu.Unlock()
+				} else {
+					t.Setenv("INK_TEST_MERGER_PAT", "refreshed-fixture-merger")
+				}
+				f.s.Poll(ctx)
+				run = notificationWork(t, f.s, f.repo, f.pull).AutoMerges[0]
+				wantState, wantID := "merged", ""
+				if stack {
+					wantState, wantID = "pending", testStackRequestID
+				}
+				if submits != 2 || checks <= checksAfterRefusal || run.State != wantState || run.RequestID != wantID {
+					t.Fatalf("recovered merge did not rerun preflight and submit: %+v (submits=%d, checks=%d)", run, submits, checks)
+				}
+			})
+		}
+	}
+}
+
 func TestAutoMergeWaitsForChecksAndMergeability(t *testing.T) {
 	for _, scenario := range []string{"queued", "failure", "unknown conclusion", "checks denied", "later page failure", "conflict", "unknown mergeability", "unstable", "head changed", "approval revoked"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -186,7 +262,9 @@ func TestAutoMergeDisabledAndNonQualifyingReviews(t *testing.T) {
 			f := newAutoMergeFixture(t)
 			switch scenario {
 			case "disabled":
-				f.repo.AutoMerge = &AutoMergeConfig{}
+				if _, err := f.s.changeConfig(f.repo.Repo, "auto_merge", jsonValue(AutoMergeConfig{}), false); err != nil {
+					t.Fatal(err)
+				}
 			case "draft":
 				f.pull.Draft = true
 			case "closed":
@@ -198,9 +276,9 @@ func TestAutoMergeDisabledAndNonQualifyingReviews(t *testing.T) {
 			case "changes requested":
 				f.reviews[0].State = "CHANGES_REQUESTED"
 			case "unlinked":
-				st, _ := f.s.store.load()
+				st, _ := loadFixture(f.s.store)
 				st.Work[key(f.repo.Repo, 42)].Linked = false
-				if err := f.s.store.save(st); err != nil {
+				if err := saveFixture(f.s.store, st); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -283,7 +361,7 @@ func TestAutoMergeConcurrentReservationAndWaitingCannotOverwrite(t *testing.T) {
 func TestAutoMergeRegistrationRequiresRepositoryOptIn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), stateDatabase)
 	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "reviewer", AutoMerge: &AutoMergeConfig{Enabled: true, Method: "squash"}}}
-	s, err := NewService(cfg, path, nil)
+	s, err := newFixtureService(t, cfg, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +453,7 @@ func TestHistoricalUnknownsAllReconcileWhenPRCloses(t *testing.T) {
 	for _, merged := range []bool{false, true} {
 		f := newAutoMergeFixture(t)
 		oldSHA := strings.Repeat("e", 40)
-		st, err := f.s.store.load()
+		st, err := loadFixture(f.s.store)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,7 +461,7 @@ func TestHistoricalUnknownsAllReconcileWhenPRCloses(t *testing.T) {
 			{SHA: oldSHA, Reviewer: "reviewer", State: "unknown", Reason: "response lost"},
 			{SHA: f.pull.Head.SHA, Reviewer: "reviewer", State: "unknown", Reason: "response lost"},
 		}
-		if err := f.s.store.save(st); err != nil {
+		if err := saveFixture(f.s.store, st); err != nil {
 			t.Fatal(err)
 		}
 		f.pull.State = "closed"

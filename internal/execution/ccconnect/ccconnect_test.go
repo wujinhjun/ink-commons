@@ -10,15 +10,13 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type testTransport func(*http.Request) (*http.Response, error)
 
 func TestApprovalNotificationEntersDeveloperContext(t *testing.T) {
-	if !(&Executor{}).NotificationACKRequired() {
-		t.Fatal("cc-connect must require an agent receipt")
-	}
+
 	for _, response := range []string{`{"status":"accepted"}`, `{"status":"busy"}`} {
 		t.Run(response, func(t *testing.T) {
 			calls := 0
@@ -54,7 +52,7 @@ func TestApprovalNotificationEntersDeveloperContext(t *testing.T) {
 				t.Fatal(err)
 			}
 			n := execution.Notification{EventID: "approval-event", Event: "review_approved", Repository: "acme/project", Number: 42, URL: "https://github.com/acme/project/pull/42", SHA: "abc", Reviewer: "reviewer-bot", ReviewID: 9, ReviewURL: "https://github.com/acme/project/pull/42#pullrequestreview-9"}
-			err = e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n)
+			err = e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n, true)
 			if (err == nil) != strings.Contains(response, "accepted") || calls != 1 {
 				t.Fatalf("unexpected acceptance: calls=%d err=%v", calls, err)
 			}
@@ -376,7 +374,7 @@ func TestCooperativeWakeRequiresClaimBeforeAnyWork(t *testing.T) {
 	if err := e.WakeTask(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, execution.Delivery{TaskID: "task-1", URL: "https://github.com/acme/project/pull/42"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"not an execution authorization", "ink task claim --task task-1", "--provider 'cc-connect'", "--target 'developer'", "--session 'discord:123'", "first=true", "first=false", "--handoff", "--request-id", "--new-sha", "--review-id", "After handoff, perform no more work", "never repeat code work"} {
+	for _, required := range []string{"not an execution authorization", "ink task claim --task 'task-1'", "--provider 'cc-connect'", "--target 'developer'", "--session 'discord:123'", "first=true", "first=false", "--handoff", "--request-id", "--new-sha", "--review-id", "After handoff, perform no more work", "never repeat code work"} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("missing %q", required)
 		}
@@ -399,7 +397,7 @@ func TestCooperativeWakeRequiresClaimBeforeAnyWork(t *testing.T) {
 	wantHeader := "Ink Commons: GitHub reports a merge conflict after approval.\n" +
 		"PR: https://github.com/acme/project/pull/42\n" +
 		"Target branch: main\n" +
-		"First run: ink task claim --task conflict-task --provider 'cc-connect' --target 'developer' --session 'discord:123'\n"
+		"First run: ink task claim --task 'conflict-task' --provider 'cc-connect' --target 'developer' --session 'discord:123'\n"
 	if !strings.HasPrefix(prompt, wantHeader) {
 		t.Fatalf("unexpected merge conflict wake: %s", prompt)
 	}
@@ -433,14 +431,14 @@ func TestMergeCompletionNotificationCarriesOutcomeAndReadOnlyStatusCommand(t *te
 		t.Fatal(err)
 	}
 	n := execution.Notification{EventID: "merge-event", Event: "pr_merged", SHA: "abc", Merge: &execution.MergeStatus{Enabled: true, State: "merged", MergeSHA: "def"}}
-	if err := e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n); err != nil {
+	if err := e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n, true); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
 		t.Fatal("completion sent more than once")
 	}
 	n.Event = "unsupported"
-	if err := e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n); err == nil || calls != 1 {
+	if err := e.Notify(context.Background(), execution.Route{Provider: Name, Target: "developer", Session: "discord:123"}, n, true); err == nil || calls != 1 {
 		t.Fatal("unsupported event was delivered")
 	}
 }

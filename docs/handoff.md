@@ -7,14 +7,14 @@
 用 `ink config set task_mode cooperative --repo owner/repository` 设置中心仓库策略，或注册时使用：
 
 ```sh
-ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PROJECT owner/repository
+ink register --task-mode cooperative --github-login REVIEWER --provider PROVIDER --target REVIEW_PROJECT owner/repository
 ```
 
 也可用 `ink config set task_mode cooperative --global` 设置动态继承的全局默认值。显式 `legacy` 覆盖全局值，unset 恢复继承。运行期改配无需重启；旧 JSON 仅用于首次迁移，详见 [中心化配置](configuration.md)。
 
 开关影响尚未首次派发的新任务；已派发任务的模式及负责人快照不被改写。旧任务和历史 `unknown` 仍按原执行确认规则处理，不能通过打开开关或普通 `retry` 绕过。首次启用应在工作空闲、旧任务已完成核验/恢复后进行。关闭开关也不会撤销已经领取的 cooperative 任务，仍需交接。旧交接完成后，新一轮 legacy 审批恢复 legacy 行为，不会被已完成的 cooperative 历史永久阻塞。
 
-当前只有 cc-connect 实现 `execution.TaskWaker`。其他 provider 不会退回直接执行，会在 API 中显示不支持唤醒；也可通过本机 CLI 人工领取。Agent 必须能访问同一个私有 Unix socket。
+所有在静态 `providers` 中声明了 `wake` 能力的 HTTP Adapter（包括独立入口 `ink-adapter-ccconnect`）均可发送唤醒通知。未声明 `wake` 能力的 provider 不会退回直接执行，会在 API 中显示不支持唤醒；也可通过本机 CLI 人工领取。Agent 必须能访问同一个私有 Unix socket。
 
 ## 三种信息分别保存
 
@@ -38,7 +38,7 @@ ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PRO
 
 ## Agent 初始化与回合边界
 
-在 Agent 所属用户下执行 `ink init` 和 `ink init --check`，安装完整协作 skill；具体位置、自定义目录及冲突处理见 [初始化说明](../README.md#初始化-agent-协作指令)。升级 CLI 后重新初始化。安装和链接不会刷新活跃会话，首次送审应明确要求 Agent 读取 `ink-commons-workflow`。
+在 Agent 所属用户下执行 `ink init` 和 `ink init --check`，安装完整协作 skill；具体位置、自定义目录及冲突处理见 [部署指南 · Agent 协作技能](deployment.md#agent-workflow-skills) 与 [CLI 参考](cli.md#health-state-and-setup)。升级 CLI 后重新初始化。安装和链接不会刷新活跃会话，首次送审应明确要求 Agent 读取 `ink-commons-workflow`。
 
 首次送审尚未领取 task：确认 PR 已关联、reviewer 已配置并标记 Ready 后，报告送审状态并结束回合，不伪造 task handoff。收到后续 wake 再领取；不能在原回合通过循环查询自行返工。任务交接后也应报告并结束回合；结果核验和下一轮唤醒由同砚负责，不用 sleep、后台轮询或马上领取后继任务来维持长回合。单次状态查询用于诊断，不作为等待循环。
 
@@ -50,7 +50,7 @@ ink register --task-mode cooperative --github-login REVIEWER --target REVIEW_PRO
 ink task claim --task TASK_UUID
 ```
 
-wake 会给出带路由的完整命令，例如 `--provider cc-connect --target PROJECT --session discord:THREAD`。ACP 等未注入 `CC_PROJECT` / `CC_SESSION_KEY` 的运行时直接使用这些参数；显式路由必须三项齐全，claim 成功后保存到私有 credential，后续 submit 无需重复。旧格式 wake 或兼容环境仍可使用进程环境中的 `CC_PROJECT` / `CC_SESSION_KEY`，通用路由可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
+wake 会给出带路由的完整命令，例如 `--provider cc-connect --target PROJECT --session discord:THREAD`。ACP 等未注入 `CC_PROJECT` / `CC_SESSION_KEY` 的运行时直接使用这些参数；显式路由必须三项齐全，claim 成功后保存到私有 credential，后续 submit 无需重复。也可通过 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 提供当前会话路由。没有执行路由的人类任务使用 `--github-login ASSIGNED_LOGIN`。
 
 如果旧版 CLI 在一次已确认的 HTTP 403 后留下了 credential（旧文件没有 `rejected` 或 `attempt_id`），不要删除文件。用同一个 `--task` 和同一个 `--claim-file` 重新 claim，并加 `--replace-route --provider ... --target ... --session ...`；CLI 保留原 token、替换路由，后续 submit 继续使用这个文件。只在确认收到 403 后使用；网络结果不明时保留原 credential 并原样重试，不能删除或重建。
 
@@ -92,7 +92,7 @@ reviewer 交接会核验 review ID、作者、精确 SHA 和结论；developer �
 
 PR 关闭或进入 Draft 后，不再发放新任务，旧领取也不会被静默释放。领取者仍可交回旧任务，结果记为 `superseded`，不声称完成新一轮。旧 SHA 已被其他 head 替代时，也仅记录旧任务的交接；迟到回执不能完成新任务。
 
-cooperative 审查的自动合入和 `postApproval` 脚本还需等待对应批准 review 的已验证交接。人类直接在 GitHub 批准、而没有对应 cooperative reviewer 交接时，不自动合入。审批通知仍独立报告 GitHub 批准事实，不代表已经合并。
+cooperative 审查的自动合入和 `post_approval` 脚本还需等待对应批准 review 的已验证交接。人类直接在 GitHub 批准、而没有对应 cooperative reviewer 交接时，不自动合入。审批通知仍独立报告 GitHub 批准事实，不代表已经合并。
 
 ## 阻塞和重试
 
@@ -124,9 +124,9 @@ ink task retry --task TASK_UUID
 
 ## 升级与回滚
 
-升级前用 `ink state backup` / `ink state export` 备份。状态数据库使用 schema version 4，保护任务领取/交接记录和中心配置；旧二进制拒绝打开该版本。任务及 outbox 仍在 work payload 内事务保存，运行期配置存入独立 runtime_config 表。
+备份 SQLite schema v7 可保留任务领取与交接记录。任务、交接与通知索引和 PR payload 在同一事务更新。从 v6 自动升级或跨版本切换按 [单实例检查清单](migration.md) 执行。
 
-不要把数据库 user_version 手工改回 2。若需降级，先交回/核查所有未决 cooperative 和旧执行任务，并保留最新完整备份；显式转换和核对状态之后才可使用旧版。恢复升级前快照会丢失之后发生的任务交接。
+不要手工调低数据库的 `PRAGMA user_version`。若需回滚旧版本，先交回/核查所有未决 cooperative 和旧执行任务，并保留最新完整备份；恢复升级前快照会丢失之后发生的任务交接。
 
 ## 本地 API
 
@@ -139,14 +139,14 @@ ink task retry --task TASK_UUID
 
 ## 阻塞通知
 
-可为仓库启用同砚的阻塞通知。空对象将通知发到任务领取时记录的 Discord 开发会话。之后改派开发者不会改变这个默认目标。也可以指定 Discord 频道或线程 ID。
+可为仓库启用同砚的阻塞通知。空对象将通知发到任务记录的开发会话。之后改派开发者不会改变这个默认目标。也可以显式指定具名 Provider 的目标路由。
 
 ~~~sh
 ink config set task_blocked '{}' --repo owner/repository
-ink config set task_blocked '{"discord_channel_id":"123456789012345678"}' --repo owner/repository
+ink config set task_blocked '{"route":{"provider":"chat","target":"alerts","session":"discord:123456789012345678"}}' --repo owner/repository
 ink config set task_blocked null --repo owner/repository
 ~~~
 
-守护进程通过已有的 INK_DISCORD_TOKEN 直接发消息，Bot 需要在目标会话拥有发送权限。消息包含 PR、提交 SHA、任务 ID、阻塞原因和手动重试命令。通知不唤醒 Agent，也不重派任务。
+目标 Provider 需具备 `blocked_notice` 能力。cc-connect Adapter 使用其 Discord Bot 身份在目标会话发消息。消息包含 PR、提交 SHA、任务 ID、阻塞原因和手动重试命令。通知不唤醒 Agent，也不重派任务。
 
 同砚在首次接受 blocked 交接时持久化通知和目标。重复提交不会创建新通知，启用配置也不会回填历史阻塞。投递失败由 daemon 在后续轮询退避重试，任务状态中的 blocked_notice 显示尝试次数、下次重试时间或发送结果。Discord 通过任务级固定 nonce 在其去重窗口内合并请求结果不明时的重复发送。如果响应丢失且重试超出 Discord 的去重窗口，仍可能收到重复消息。

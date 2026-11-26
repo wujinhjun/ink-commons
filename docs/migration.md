@@ -1,28 +1,40 @@
-# 迁移 Ink Commons 部署
+# Ink Commons 单实例切换检查清单
 
-## 确定是否接续原工作项
+## 从 SQLite v6 升级到 v7
 
-新环境独立接管新仓库时，从 [config.example.json](../config.example.json) 新建启动配置，再按需设置全局默认值、注册仓库和分配路由。公开示例使用虚构的仓库、身份和路径。
+先停止旧 daemon，并用旧二进制保存 SQLite 快照。将启动配置、配置管理调用和 hook 事件消费者的审批字段改成 `post_approval`。新版 `ink serve` 在持有状态目录锁时自动将 v6 数据库迁到 v7，保留配置 revision、审批去重收据、任务快照、通知和工作区状态。回滚 v6 时使用升级前的备份，按 GitHub 与执行端实际状态核对升级后产生的副作用。
+
+## 从旧版切换到新 SQLite 实例
+
+1. 选在途 PR 较少的窗口。让现有领取者完成交接，或记录每条在途 PR 的 head SHA、审查/合入状态、会话及本地 worktree。确认遗留执行和延迟请求已停止，再停止旧 daemon。
+2. 用旧版 `ink state backup` 保存 SQLite 快照（更早的 JSON 实例保存原始状态目录），另存启动配置、领取凭据和本地 worktree。保留原数据目录及旧二进制用于回滚。
+3. 选择新的空目录，使用新版执行 `ink state init --data /private/ink/state-v7`。用 `ink serve --config /private/ink/config.json --data /private/ink/state-v7 --config-only` 核对部署和运行期配置。将旧路由字段改为 `reviewer_route` 内的 `provider`、`target`、`session`，再注册所需仓库，先保持自动派发路由、自动合入和批准 hook 关闭。
+4. 对照 GitHub 核对仍开放的 PR，特别是已经批准或仍有合入请求的 PR。把 daemon 和本地 CLI 的路径切到新目录，启动轮询以观察开放 PR。核对工作项后按需重新关联开发会话、指派 reviewer、保留原 worktree，再逐项启用自动处理。旧任务凭据与未决回执留在旧实例。
+5. 需回滚时，先停止新版，核对新版运行期间已经发生的 GitHub 与执行端副作用。用旧二进制和保留的原状态目录恢复。始终让同一批 PR 由一个 daemon 处理。
+
+## 同版本迁移到另一环境
+
+新环境独立接管新仓库时，从 [config.example.json](../config.example.json) 新建启动配置，用 `ink state init` 创建状态库，再按需设置全局默认值、注册仓库和分配路由。公开示例使用虚构的仓库、身份和路径。
 
 需要接续既有 PR 时，在停机前盘点已投递、正在运行和待交接的任务。让原领取者完成能结清的交接。对仍需提交交接或显式重试的 cooperative 任务，安全保留执行侧的原领取凭据。SQLite 备份和 JSON 导出只含领取凭据的哈希，原凭据位于领取侧状态目录的 `claims/TASK_UUID.json`，或当时通过 `--claim-file` 指定的路径。保持文件归原领取者所有、权限为 `0600`，默认 `claims` 目录权限为 `0700`。更换领取侧路径时，将原文件安全移到新默认位置，或在后续命令中通过 `--claim-file` 指向保留的文件。之后用原凭据提交交接或重试已阻塞的任务。参见 [领取与交接](handoff.md#agent-操作)。
 
-停止源 daemon 时，核对是否有新增领取凭据需要保留。迁移窗口内只允许一套 daemon 处理这些 PR。使用 [状态备份流程](../README.md#状态备份与回滚) 生成完整备份，并在目标服务用户下恢复。将 SQLite 备份和 JSON 导出当作私有运行数据保存。里面可能含有真实账号、执行路由、文件路径、会话标识和历史配置，即使当前全局配置已经替换。
+停止源 daemon 时，核对是否有新增领取凭据需要保留。迁移窗口内只允许一套 daemon 处理这些 PR。使用 [离线备份流程](deployment.md#offline-backup--diagnostics-export) 生成完整备份，并在目标服务用户下恢复。将 SQLite 备份和 JSON 导出当作私有运行数据保存。里面可能含有真实账号、执行路由、文件路径、会话标识和历史配置，即使当前全局配置已经替换。
 
 ## 重建启动环境
 
-- 为目标服务用户安装 GitHub 客户端或包装器，更新 `github_command` 和需要的 `github_merger_command` 绝对路径。配置了 reader 摘要时，用目标可执行文件的已批准摘要更新 `github_command_sha256`。专用 merger 必须设置其已批准的 `github_merger_command_sha256`。使用 GitHub App 时，在目标安装中核对 reader、reviewer 和适用的 merger 身份及对受管仓库的权限。使用自动升级时也验证 reader 能读取发布仓库。参数与身份模式见 [GitHub CLI 适配](configuration.md#github-cli-适配) 和 [自动合入身份](../README.md#自动合入身份)。
-- 在私有启动配置中填入目标 `cc_connect_url` 或 `http_provider_url`。为目标服务用户单独配置所需的环境凭据，验证实际服务可达并能访问配置中的项目、会话或频道。macOS 版通过 `--credentials` 读取仅服务用户可读的凭据文件，其他部署从 daemon 环境注入。
-- 按目标平台准备服务。macOS 部署可指定发布仓库和 LaunchDaemon 的工具搜索路径。接续既有 PR 时，先暂存发布包，按下节核查后再激活。参见 [macOS 部署与恢复](../deploy/macos/README.md)。
+- 为目标服务用户安装 GitHub 客户端或包装器（或配置原生 `github_reader` / `github_merger`），更新 `github_command` 和需要的 `github_merger_command` 绝对路径。配置了 reader 摘要时，用目标可执行文件的已批准摘要更新 `github_command_sha256`。专用 merger 必须设置其已批准的 `github_merger_command_sha256`。使用 GitHub App 时，在目标安装中核对 reader、reviewer 和适用的 merger 身份及对受管仓库的权限。参数与身份模式见 [GitHub CLI 适配](configuration.md#github-cli-适配) 和 [GitHub 凭据与合入契约](github-contracts.md)。
+- 将旧 `cc_connect_url`、`http_provider_url` 和 `http_provider_execution` 转为 [具名 `providers`](adapters.md)。为保留已有路由，可沿用原 provider 名称。旧 cc-connect webhook 配置和 Discord 凭据放入独立 Adapter 环境，daemon 只持有对应的 Adapter Bearer 凭据。旧托管 HTTP 服务需要实现 [只读准入声明](adapter-http-v1.md#managed-admission) 后才能启用 `managed`。
+- 按目标平台准备服务，参见 [systemd 与 launchd 服务模板](../deploy/README.md)。接续既有 PR 时，先准备目标二进制与环境文件，按下节核查后再启动正式服务。
 
 ## 核对运行期配置和在途任务
 
 恢复后先以目标服务用户启动配置核查模式。该模式暂停轮询和派发。本地 socket 支持修改运行期配置、改派工作项、记录旧执行停止确认，以及使用原凭据交接或重试 cooperative 任务。领取新任务仍然关闭。以下命令中的路径应替换为目标环境的实际路径。
 
 ```sh
-ink serve -config /private/ink/config.json -data /private/ink/state -config-only
+ink serve --config /private/ink/config.json --data /private/ink/state --config-only
 ```
 
-macOS 可以用 `manage.py stage` 暂存发布包，确保 LaunchDaemon 已停止，再以服务用户用暂存时的 Python 在前台运行该版本目录中的 `runtime.py --config-only`。这个入口会加载部署凭据。下方的 `INK_DATA_DIR` 应设为暂存版本 `deployment.json` 中的 `data`。
+在服务停止后，使用目标服务的配置和凭据执行上述命令。
 
 在另一个终端用同一服务用户操作，并让本地 CLI 指向目标状态目录。以下命令依次查看全局配置、仓库显式覆盖、仓库最终配置和 PR 最终配置。将 `example/project` 和 PR 编号替换成待迁移的对象。
 
@@ -34,29 +46,29 @@ ink config list --repo example/project --effective
 ink config list --repo example/project --pr 42 --effective
 ```
 
-核对 `reviewer_login`、`reviewer_command`、`human_developer` 和 `reviewer_route`，用 [`ink config set` 或 `unset`](configuration.md#cli) 修正相应作用域。PR 的显式指派可覆盖仓库设置。将 `postApproval.command` 指向目标主机上可执行的绝对路径，并在恢复批准处理前部署该文件。另行检查 `task_blocked.discord_channel_id` 或它回退使用的开发会话。
+核对 `reviewer_login`、`reviewer_command`、`human_developer` 和 `reviewer_route`，用 [`ink config set` 或 `unset`](configuration.md#cli) 修正相应作用域。PR 的显式指派可覆盖仓库设置。将 `post_approval.command` 指向目标主机上可执行的绝对路径，并在恢复批准处理前部署该文件。将显式 `task_blocked.discord_channel_id` 改为包含 provider、target、session 的 `task_blocked.route`。沿用 v6 数据库时，由旧版 daemon 先 unset 所有含旧字段的阻塞通知配置，切换后通过新版恢复。纯会话 ID 的历史通知仅在能匹配原任务的冻结来源时恢复。若要保留按开发会话自动放置，移除旧 cc-connect 审查路由中此前被忽略的默认 `parent`，因为具名路由现在会采用它。
 
-已冻结的任务配置、投递回执、PR 负责人、会话绑定和已准备的批准事件会随备份恢复。用 [工作项 API](../README.md#本地-api) 逐项核对 `config_snapshot`、显式指派和运行状态。改全局或仓库默认值只会影响后续配置解析。已保留的批准事件继续沿用其已记录的命令和去重记录。参见 [任务生效边界](configuration.md#任务生效边界)。
+已冻结的任务配置、投递回执、PR 负责人、会话绑定和已准备的批准事件会随备份恢复。用 [`ink work` 命令](cli.md#work-items) 逐项核对 `config_snapshot`、显式指派和运行状态。改全局或仓库默认值只会影响后续配置解析。已保留的批准事件继续沿用其已记录的命令和去重记录。参见 [任务生效边界](configuration.md#任务生效边界)。
 
 发现旧路由时，可在目标端保持核查模式，按下面的顺序处理：
 
-1. 确认旧执行已停止且延迟请求无法重启。已领取的 cooperative 任务由原领取者使用原凭据提交交接。对需要迁移路由且无法继续的任务，可提交 `blocked`。旧版执行使用工作项 API 的 `confirm-stopped` 记录已核实的停止。
+1. 确认旧执行已停止且延迟请求无法重启。已领取的 cooperative 任务由原领取者使用原凭据提交交接。对需要迁移路由且无法继续的任务，可提交 `blocked`。没有状态回执的执行使用工作项 API 的 `confirm-stopped` 记录已核实的停止。
 2. 用 `ink review` 改派 reviewer，或用工作项 API 的 `assign` 改派 developer。改派会替换该角色的当前待办并保留旧记录，仍在等待交接的任务会继续阻塞后继待办。
 3. 对主动交回为 `blocked` 的旧任务，在核对新指派后，用原凭据执行 `ink task retry` 解除阻塞。已经提交的 GitHub 结果由正式服务恢复轮询后核验。参见 [阻塞和重试](handoff.md#阻塞和重试)。
 
 例如，把 reviewer 改派到已验证的新 cc-connect 项目。替换示例值，并按需用 `--github-command` 指定 reviewer 的客户端。
 
 ```sh
-ink review --github-login 'reviewer[bot]' --target new-review-project \
+ink review --github-login 'reviewer[bot]' --provider cc-connect --target new-review-project \
   https://github.com/example/project/pull/42
 ```
 
 **放行条件**。确认每个恢复的工作项可以继续使用已核对的路由，或已经改派到可用的新路由。只要首轮轮询仍可能向待停用或未经核对的旧项目发出唤醒或重试，就保持轮询关闭。
 
-满足放行条件后先停止核查进程，再省略 `-config-only` 启动正式服务。macOS 停止前台核查进程后，用 `manage.py activate` 激活暂存版本。正常激活会在验证后自动创建 `enabled` 并开始轮询。
+满足放行条件后先停止核查进程，再用服务管理器启动省略 `--config-only` 的正式服务。如果配置了 `--poll-gate`，在满足放行条件后创建门控文件。
 
 ## 重建用户级集成
 
 以实际运行 Agent 的用户执行 `ink init` 和 `ink init --check`。使用自定义发现目录时，两条命令都传相同的 `--skills-dir`。启动新的 Agent 会话加载指令。
 
-需要从 Git 推送登记开发来源时，在目标 checkout 检查 `git config --get core.hooksPath`。未设置时，使用 `git rev-parse --git-path hooks/pre-push` 确定安装位置。按 [pre-push 说明](../README.md#开始) 安装或接入现有 hook，再确认从实际运行 Git 的环境能通过 `PATH` 或设置的 `INK_BIN` 找到 `ink`，并能访问目标 daemon 的 socket。也可通过 [工作项 API](../README.md#本地-api) 显式登记来源。
+需要从 Git 推送登记开发来源时，在目标 checkout 检查 `git config --get core.hooksPath`。未设置时，使用 `git rev-parse --git-path hooks/pre-push` 确定安装位置。按 [pre-push 说明](deployment.md#optional-git-pre-push-provenance-hook) 安装或接入现有 hook，再确认从实际运行 Git 的环境能通过 `PATH` 或设置的 `INK_BIN` 找到 `ink`，并能访问目标 daemon 的 socket。也可通过 [`ink work link`](cli.md#work-items) 显式登记来源。

@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -10,7 +12,7 @@ import (
 )
 
 func TestConfigCLIUsesCentralSocketAndPreservesTypedValues(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-config-")
+	dir, err := os.MkdirTemp("/tmp", "ink-config-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +49,7 @@ func TestConfigCLIUsesCentralSocketAndPreservesTypedValues(t *testing.T) {
 		want request
 	}{
 		{[]string{"config", "set", "reviewer_login", "reviewer[bot]", "--global"}, request{"POST", "", "reviewer_login", "", "", `"reviewer[bot]"`}},
-		{[]string{"config", "set", "postApproval", "null", "--repo", "acme/project"}, request{"POST", "acme/project", "postApproval", "", "", "null"}},
+		{[]string{"config", "set", "post_approval", "null", "--repo", "acme/project"}, request{"POST", "acme/project", "post_approval", "", "", "null"}},
 		{[]string{"config", "--global", "set"}, request{}}, // rejected before contacting daemon
 		{[]string{"config", "set", "auto_merge", `{"enabled":false}`, "--repo=acme/project"}, request{"POST", "acme/project", "auto_merge", "", "", `{"enabled":false}`}},
 		{[]string{"config", "get", "reviewer_login", "--repo", "acme/project", "--pr", "42", "--effective", "--json"}, request{"GET", "acme/project", "reviewer_login", "42", "true", ""}},
@@ -70,7 +72,7 @@ func TestConfigCLIUsesCentralSocketAndPreservesTypedValues(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{{"list"}, {"list", "--repo", "acme/project", "--global"}, {"get", "reviewer_login", "--global", "--pr", "42", "--effective"}, {"set", "reviewer_login", "a", "--global", "--effective"}, {"list", "--repo", "invalid"}} {
-		if err := configurationCommand(args); err == nil {
+		if err := run(append([]string{"config"}, args...)); err == nil {
 			t.Errorf("accepted invalid scope/flags: %v", args)
 		}
 	}

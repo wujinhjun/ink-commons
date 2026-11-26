@@ -1,17 +1,37 @@
-# 项目文档
+# Ink Commons Documentation
 
-- [中心化配置](configuration.md)：全局默认值、仓库覆盖、动态 CLI、任务快照和兼容迁移。
-- [主动领取与业务交接](handoff.md)：cooperative 模式的启用、领取、幂等交接、结果核验和异常恢复。
-- [执行生命周期与可靠执行端](execution.md)：task/attempt、Monitor 协议、执行账本与恢复边界。
-- [macOS 部署与恢复](../deploy/macos/README.md)：指定版本构建、launchd 激活、校验及失败回滚。
+Welcome to the Ink Commons documentation index. For a 5-minute quickstart, see [`README.md`](../README.md) ([简体中文](../README.zh-CN.md)).
 
-## 流程图
+## Core Architecture & Operations
 
-[cooperative 流程图](diagrams/cooperative-workflow.png) 按纵向主线说明首次开发、审查、返工、交接核验和可选自动合入。右侧备注对应通用配置项，底部单独展示任务状态；所有配置示例均为占位值。
+- [Architecture & Dual-Layer State Machine](architecture.md): System components, `phase` × `workflow.state` × `attempt.state` / `handoff.state` diagrams, bounded concurrency, SQLite v7 persistence, and trust boundaries.
+- [CLI Reference](cli.md): Full command reference for `work`, `repo`, `config`, `task`, `notification`, `context`, `workspace`, `state`, `doctor`, `init`, and `hook` (with `--data` and `--json`).
+- [Deployment & Hardening Guide](deployment.md): Linux `systemd` and macOS `launchd` setup, service account isolation, local Git workspace pool requirements, skills/hooks, and backups.
+- [Service Templates](../deploy/README.md): Portable `systemd` units and `launchd` plists under `deploy/`.
+- [Single-Instance Cutover & Migration Checklist (中文)](migration.md): Upgrading SQLite v6→v7, clean cutovers from older schemas, and migrating between hosts.
 
-- 图片：[`diagrams/cooperative-workflow.png`](diagrams/cooperative-workflow.png)
-- 可编辑源文件：[`diagrams/cooperative-workflow.excalidraw`](diagrams/cooperative-workflow.excalidraw)
+## Protocol, Credentials & Adapters
 
-用 Excalidraw 打开源文件编辑，保留右侧配置与主流程的对应关系；导出 PNG 时同步更新图片和源文件，检查中文字体、标签及连线。修改后确认 README 的相对图片链接可用，并保持项目说明不包含具体使用者的账号、仓库、地址或本机路径。
+- [Configure and Run HTTP Adapters](adapters.md): Multi-provider `providers` map, running `ink-adapter-ccconnect`, and implementing custom adapters.
+- [Adapter HTTP v1 Wire Contract](adapter-http-v1.md): Request/response schemas, capability declarations, placement/allocation recovery, conversation context, and `managed: true` admission.
+- [Minimal HTTP Executor Example](../examples/http-executor/README.md): Standard-library reference adapter (`prepare` + `deliver`) and zero-credential end-to-end test.
+- [GitHub Credential & Merge Contracts](github-contracts.md): Role-isolated `TokenProvider` (`github_reader` / `github_merger`), `MergeStrategy` / `Merger`, and scoped paginated `ETag` caching.
 
-流程图描述 cooperative 模式；其他模式、协议细节和恢复条件以相应文档为准。
+## Policy, Execution & Handoff Deep Dives
+
+- [Centralized Configuration (中文)](configuration.md): Static vs SQLite runtime scopes, precedence, validation, `snake_case` keys (`post_approval`), `config.schema.json`, and safe repository removal.
+- [Execution Lifecycle & Durable Executor Integration](execution.md): `task_id` / `attempt_id`, Monitor `status`/`stop` receipts, internal SQLite executor ledger, and operator recovery (`confirm-stopped`).
+- [Cooperative Claim & Business Handoff (中文)](handoff.md): `task_mode: "cooperative"`, durable claim credentials, idempotent submission, GitHub evidence verification, and blocked notices.
+
+## Project Policies
+
+- [Security Policy](../SECURITY.md) · [Contributing](../CONTRIBUTING.md) · [Changelog](../CHANGELOG.md) · [Roadmap](../TODO.md) · [MIT License](../LICENSE)
+
+## Workflow Diagram
+
+The [cooperative workflow diagram](diagrams/cooperative-workflow.png) illustrates first-time development, review assignment, rework, cooperative handoff verification, and optional auto-merge alongside placeholder configuration callouts:
+
+- Rendered PNG: [`diagrams/cooperative-workflow.png`](diagrams/cooperative-workflow.png)
+- Editable Excalidraw source: [`diagrams/cooperative-workflow.excalidraw`](diagrams/cooperative-workflow.excalidraw)
+
+> Note: All configuration values in the diagram are placeholders; see [`config.example.json`](../config.example.json) and [Centralized Configuration](configuration.md) for the complete schema and policy rules.

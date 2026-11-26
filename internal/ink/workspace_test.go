@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -8,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/workspace"
+	"github.com/wujinhjun/ink-commons/internal/workspace"
 )
 
 func workspaceTestGit(t *testing.T, repo string, args ...string) {
@@ -21,7 +23,10 @@ func workspaceTestGit(t *testing.T, repo string, args ...string) {
 func TestWorkspaceFullLiteLifecycle(t *testing.T) {
 	ctx := context.Background()
 	source, _ := workspaceTestSource(t)
-	db := filepath.Join(t.TempDir(), stateDatabase)
+	db := filepath.Join(t.TempDir(), "state", stateDatabase)
+	if err := InitializeState(filepath.Dir(db)); err != nil {
+		t.Fatal(err)
+	}
 	open := func() *Service {
 		t.Helper()
 		s, err := NewService(Config{WorkspaceFullSlots: 1}, db, nil)
@@ -72,8 +77,16 @@ func TestWorkspaceFullLiteLifecycle(t *testing.T) {
 	if err := os.WriteFile(dirty, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
+	s.Close()
+	s = open()
 	if _, err := s.finishWorkspace(ctx, full.ID, "release"); err == nil {
 		t.Fatal("dirty Full worktree released")
+	}
+	if retry := acquire("first", "auto", "feature/full"); retry.State != "active" || retry.Path != full.Path {
+		t.Fatalf("dirty workspace lost its active reservation: %+v", retry)
+	}
+	if _, err := s.acquireWorkspace(ctx, workspaceRequest{Source: source, RequestID: "while-dirty", Preference: "full"}); err == nil {
+		t.Fatal("dirty Full slot was made available to another request")
 	}
 	if err := os.Remove(dirty); err != nil {
 		t.Fatal(err)
@@ -152,7 +165,7 @@ func TestWorkspaceCheckoutFailureReleasesUntouchedFull(t *testing.T) {
 		t.Run(fmt.Sprintf("%d slots", slots), func(t *testing.T) {
 			ctx := context.Background()
 			source, base := workspaceTestSource(t)
-			s, err := NewService(Config{WorkspaceFullSlots: slots}, filepath.Join(t.TempDir(), stateDatabase), nil)
+			s, err := newFixtureService(t, Config{WorkspaceFullSlots: slots}, filepath.Join(t.TempDir(), stateDatabase), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -218,7 +231,7 @@ func TestWorkspaceCheckoutFailureReleasesUntouchedFull(t *testing.T) {
 func TestWorkspaceCheckoutFailureRetainsChangedFull(t *testing.T) {
 	ctx := context.Background()
 	source, base := workspaceTestSource(t)
-	s, err := NewService(Config{WorkspaceFullSlots: 1}, filepath.Join(t.TempDir(), stateDatabase), nil)
+	s, err := newFixtureService(t, Config{WorkspaceFullSlots: 1}, filepath.Join(t.TempDir(), stateDatabase), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,14 +272,14 @@ func TestWorkspacePreparingRetryRequiresCurrentClaim(t *testing.T) {
 	f := newHandoffFixture(t)
 	source, head := workspaceTestSource(t)
 	workspaceTestGit(t, source, "remote", "set-url", "origin", "https://github.com/"+f.repo.Repo+".git")
-	st, err := f.s.store.load()
+	st, err := loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	w := st.Work[key(f.repo.Repo, f.pull.Number)]
 	w.Pull.Head.SHA = head
 	w.Task.SHA = head
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	task := f.work(t).Task
@@ -299,18 +312,18 @@ func TestWorkspacePreparingRetryRequiresCurrentClaim(t *testing.T) {
 	badToken.ClaimToken = strings.Repeat("z", 64)
 	assertNoCheckout(badToken)
 
-	st, err = f.s.store.load()
+	st, err = loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	w = st.Work[key(f.repo.Repo, f.pull.Number)]
 	w.Task.SHA = strings.Repeat("b", 40)
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	assertNoCheckout(req)
 	w.Task.SHA = head
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	f.submit(t, task, claimA, HandoffSubmission{RequestID: "blocked", Handoff: true, Outcome: "blocked", Reason: "fixture handoff"}, 200)

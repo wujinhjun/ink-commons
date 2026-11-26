@@ -1,9 +1,11 @@
+//go:build linux || darwin
+
 package ink
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,204 +13,159 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 
-	"ink-commons/internal/ink/statedb"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 	_ "modernc.org/sqlite"
 )
 
 const stateDatabase = "state.sqlite3"
-const legacyState = "state.json"
-const schemaVersion = 5
+const schemaVersion = 7
 
-type state struct {
-	// Configurations is populated only for JSON export/import. Workflow saves
-	// deliberately ignore it; runtime policy has a separate transactional API.
-	Configurations []ConfigRecord        `json:"configurations,omitempty"`
-	Workspaces     []WorkspaceAllocation `json:"workspaces,omitempty"`
-	Repositories   []Repository          `json:"repositories,omitempty"`
-	Pushes         []Push                `json:"pushes"`
-	Work           map[string]*Work      `json:"work"`
-}
+// The lock filename is shared with deployed daemons and the macOS service manager.
+const stateLock = "state.json.lock"
 
-// stateStore keeps the workflow snapshot API; each read and incremental save is a
-// transaction. Service.mu and the daemon lock serialize read-modify-write cycles.
-// Work payloads retain routes, reviews and delivery outcomes without re-deriving
-// them on restart (in particular, unknown/accepted tasks must not be replayed).
+//go:embed sql/schema.sql
+var stateSchema string
+
 type stateStore struct{ db *sql.DB }
 
-func openStore(path string) (*stateStore, error) {
+func openSQLite(path string) (*sql.DB, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
-	marker := path + ".initialized"
-	markerInfo, markerErr := os.Lstat(marker)
-	if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
-		return nil, markerErr
-	}
-	if markerErr == nil && (!markerInfo.Mode().IsRegular() || markerInfo.Mode().Perm()&0077 != 0) {
-		return nil, errors.New("state initialization marker must be a private regular file")
-	}
-	// Neither a removed database nor a recovery tool's empty placeholder may
-	// resurrect stale tasks after this state directory has been initialized.
-	if info, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) || (err == nil && info.Size() == 0 && markerErr == nil) {
-		backup := filepath.Join(filepath.Dir(path), legacyState+".pre-sqlite.bak")
-		_, backupErr := os.Lstat(backup)
-		if markerErr == nil || (backupErr == nil && errors.Is(err, os.ErrNotExist)) {
-			return nil, errors.New("state database is missing or empty after initialization; restore a SQLite backup; to reset state or intentionally import JSON, archive the initialization marker and migration backup first")
-		}
-		if backupErr != nil && !errors.Is(backupErr, os.ErrNotExist) {
-			return nil, backupErr
-		}
-	} else if err != nil {
-		return nil, err
-	}
-	// Pre-create privately: SQLite's default file mode depends on the process umask.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err == nil {
-		err = f.Close()
-	} else if errors.Is(err, os.ErrExist) {
-		var info os.FileInfo
-		info, err = os.Lstat(path)
-		if err == nil && (!info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0) {
-			err = errors.New("state database must be a private regular file")
-		}
-	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return nil, errors.New("state database must be a private regular file")
+	}
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()
+	q.Set("mode", "rw")
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "synchronous(FULL)")
+	q.Add("_pragma", "foreign_keys(ON)")
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &stateStore{db: db}
-	if err = s.initialize(filepath.Join(filepath.Dir(path), legacyState), marker); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if markerErr != nil {
-		if err := writeNewFile(marker, []byte("1\n")); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("persist state initialization marker: %w", err)
-		}
-	}
-	return s, nil
+	return db, nil
 }
 
-func (s *stateStore) initialize(legacy, marker string) error {
-	tx, err := s.db.Begin()
+func openStore(path string) (*stateStore, error) {
+	db, err := openSQLite(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("state database missing: check the data directory or restore a SQLite backup; for a new instance run ink state init")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open state database: %w", err)
+	}
+	return &stateStore{db: db}, nil
+}
+
+func checkSchema(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version != schemaVersion {
+		return fmt.Errorf("unsupported state schema version %d (expected %d); check the data directory, restore a compatible SQLite backup, or initialize a separate directory with ink state init", version, schemaVersion)
+	}
+	return verifyStateTables(db)
+}
+
+func verifyStateTables(db interface {
+	Query(string, ...any) (*sql.Rows, error)
+}) error {
+	// Fail before polling if a workflow table is missing from a damaged database.
+	for _, table := range []string{"work_items", "work_tasks", "work_notifications", "pushes", "runtime_config", "workspace_allocations"} {
+		rows, err := db.Query("SELECT * FROM " + table + " LIMIT 0")
+		if err != nil {
+			return fmt.Errorf("verify state table %s: %w", table, err)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkStateDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("state directory missing: check the configured path or run ink state init for a new instance")
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+		return errors.New("daemon state directory must be a directory with private permissions")
+	}
+	return nil
+}
+
+// InitializeState creates a new database on explicit request in an empty directory.
+func InitializeState(dir string) error {
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := checkStateDir(dir); err != nil {
+		return err
+	}
+	lock, err := lockState(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() != stateLock {
+			return errors.New("initialization requires a fresh state directory")
+		}
+	}
+	return createStateDatabase(filepath.Join(dir, stateDatabase))
+}
+
+func createStateDatabase(path string) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".ink-init-*")
+	if err != nil {
+		return err
+	}
+	temp := f.Name()
+	defer os.Remove(temp)
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := writeSchema(temp); err != nil {
+		return err
+	}
+	return publishFile(temp, path)
+}
+
+func writeSchema(path string) error {
+	db, err := openSQLite(path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var version int
-	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		return err
-	}
-	if version == 1 {
-		if _, err := tx.Exec(`CREATE TABLE repositories (name TEXT PRIMARY KEY, payload TEXT NOT NULL); PRAGMA user_version = 2;`); err != nil {
-			return err
-		}
-		version = 2
-	}
-	// Version 3 fences older binaries that would discard cooperative claims.
-	if version == 2 {
-		if _, err := tx.Exec("PRAGMA user_version = 3"); err != nil {
-			return err
-		}
-		version = 3
-	}
-	if version == 3 {
-		if _, err := tx.Exec(`CREATE TABLE runtime_config (scope TEXT PRIMARY KEY, payload TEXT NOT NULL, revision INTEGER NOT NULL); PRAGMA user_version = 4;`); err != nil {
-			return err
-		}
-		version = 4
-	}
-	if version == 4 {
-		if _, err := tx.Exec(workspaceSchema + " PRAGMA user_version = 5;"); err != nil {
-			return err
-		}
-		version = 5
-	}
-	if version == schemaVersion {
-		// Detect missing tables before serving; never recreate damaged workflow tables.
-		for _, table := range []string{"work_items", "pushes", "repositories", "runtime_config", "workspace_allocations"} {
-			rows, err := tx.Query("SELECT * FROM " + table + " LIMIT 0")
-			if err != nil {
-				return err
-			}
-			rows.Close()
-		}
-		return tx.Commit()
-	}
-	if version != 0 {
-		return fmt.Errorf("unsupported state schema version %d (expected %d)", version, schemaVersion)
-	}
-	if _, err := os.Lstat(marker); err == nil {
-		return errors.New("state database is uninitialized but an initialization marker exists; restore the database instead of importing stale JSON")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	// Only initialize an empty database. A foreign/unversioned database must not
-	// be silently adopted or overwritten.
-	var tables int
-	if err := tx.QueryRow("SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").Scan(&tables); err != nil {
-		return err
-	}
-	if tables != 0 {
-		return errors.New("unversioned state database is not empty")
-	}
-	if _, err := tx.Exec(`CREATE TABLE work_items (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
- CREATE TABLE pushes (position INTEGER PRIMARY KEY, payload TEXT NOT NULL);
- CREATE TABLE repositories (name TEXT PRIMARY KEY, payload TEXT NOT NULL);
- CREATE TABLE runtime_config (scope TEXT PRIMARY KEY, payload TEXT NOT NULL, revision INTEGER NOT NULL);` + workspaceSchema); err != nil {
-		return err
-	}
-	data, err := os.ReadFile(legacy)
-	if err == nil {
-		st, err := decodeState(data)
-		if err != nil {
-			return fmt.Errorf("import %s: %w", legacy, err)
-		}
-		backup := legacy + ".pre-sqlite.bak"
-		if previous, err := os.ReadFile(backup); err == nil {
-			info, statErr := os.Lstat(backup)
-			if statErr != nil {
-				return statErr
-			}
-			if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-				return errors.New("legacy migration backup must be a private regular file")
-			}
-			if !bytes.Equal(previous, data) {
-				return errors.New("legacy migration backup differs from state.json; preserve both before retrying")
-			}
-		} else if errors.Is(err, os.ErrNotExist) {
-			if err := writeNewFile(backup, data); err != nil {
-				return fmt.Errorf("back up legacy state: %w", err)
-			}
-		} else {
-			return err
-		}
-		if err := syncState(tx, st); err != nil {
-			return err
-		}
-		if err := importConfigRecords(tx, st.Configurations); err != nil {
-			return err
-		}
-		for _, a := range st.Workspaces {
-			if err := insertWorkspace(context.Background(), tx, a); err != nil {
-				return err
-			}
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if _, err := tx.Exec(stateSchema); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
@@ -217,256 +174,40 @@ func (s *stateStore) initialize(legacy, marker string) error {
 	return tx.Commit()
 }
 
-func validateState(st state) error {
-	if st.Work == nil {
-		return errors.New("state is missing its work index")
-	}
-	seen := map[string]bool{}
-	for _, repo := range st.Repositories {
-		if !ValidRepository(repo.Repo) || seen[repo.Repo] || strings.TrimSpace(repo.ReviewerLogin) == "" {
-			return errors.New("invalid registered repository")
-		}
-		if err := repo.AutoMerge.Validate(); err != nil {
-			return err
-		}
-		if err := repo.PostApproval.Validate(); err != nil {
-			return err
-		}
-		if err := repo.ValidateReviewFeatures(); err != nil {
-			return err
-		}
-		seen[repo.Repo] = true
-	}
-	for id, w := range st.Work {
-		if w == nil || !ValidRepository(w.Repo) || w.Pull.Number <= 0 || id != key(w.Repo, w.Pull.Number) {
-			return fmt.Errorf("invalid work index entry %q", id)
-		}
-	}
-	return nil
+type stateExport struct {
+	Configurations []ConfigRecord        `json:"configurations,omitempty"`
+	Workspaces     []WorkspaceAllocation `json:"workspaces,omitempty"`
+	Pushes         []Push                `json:"pushes"`
+	Work           map[string]*Work      `json:"work"`
 }
 
-func decodeState(data []byte) (state, error) {
-	var raw struct {
-		Configurations []ConfigRecord             `json:"configurations,omitempty"`
-		Workspaces     []WorkspaceAllocation      `json:"workspaces,omitempty"`
-		Repositories   []Repository               `json:"repositories,omitempty"`
-		Pushes         []Push                     `json:"pushes"`
-		Work           map[string]json.RawMessage `json:"work"`
-	}
-	var st state
-	d := json.NewDecoder(bytes.NewReader(data))
-	d.DisallowUnknownFields()
-	if err := d.Decode(&raw); err != nil {
-		return st, err
-	}
-	if d.Decode(new(any)) != io.EOF {
-		return st, errors.New("expected one state object")
-	}
-	st.Configurations = raw.Configurations
-	st.Workspaces = raw.Workspaces
-	st.Repositories = raw.Repositories
-	st.Pushes = raw.Pushes
-	if raw.Work != nil {
-		st.Work = make(map[string]*Work, len(raw.Work))
-	}
-	for id, payload := range raw.Work {
-		entry := struct {
-			*Work
-			ReviewThread string `json:"review_thread_id"`
-		}{Work: &Work{}}
-		decoder := json.NewDecoder(bytes.NewReader(payload))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&entry); err != nil {
-			return st, fmt.Errorf("work %s: %w", id, err)
-		}
-		if entry.ReviewThread != "" {
-			if strings.Trim(entry.ReviewThread, "0123456789") != "" {
-				return st, fmt.Errorf("work %s: invalid legacy review_thread_id", id)
-			}
-			route := entry.Reviewer.Route
-			if route == nil || route.Provider != "cc-connect" || strings.TrimSpace(route.Target) == "" {
-				return st, fmt.Errorf("work %s: legacy review_thread_id needs a cc-connect reviewer route", id)
-			}
-			session := "discord:" + entry.ReviewThread
-			if route.Session != "" && route.Session != session {
-				user, sameThread := strings.CutPrefix(route.Session, session+":")
-				if !sameThread || user == "" || strings.Trim(user, "0123456789") != "" {
-					return st, fmt.Errorf("work %s: review_thread_id conflicts with reviewer session", id)
-				}
-			}
-			// Route.UnmarshalJSON already maps legacy project/session_key fields.
-			copy := *route
-			if copy.Session == "" {
-				copy.Session = session
-			}
-			entry.Reviewer.Route = &copy
-		}
-		st.Work[id] = entry.Work
-	}
-	return st, validateState(st)
-}
-
-func (s *stateStore) loadWork(id string) (*Work, error) {
-	var payload string
-	err := s.db.QueryRow("SELECT payload FROM work_items WHERE id = ?", id).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var work Work
-	if err := json.Unmarshal([]byte(payload), &work); err != nil {
-		return nil, err
-	}
-	return &work, nil
-}
-
-func (s *stateStore) load() (state, error) {
-	st := state{Work: make(map[string]*Work)}
-	tx, err := s.db.Begin()
+func (s *stateStore) exportState() (stateExport, error) {
+	st := stateExport{Work: make(map[string]*Work)}
+	works, err := s.listWork()
 	if err != nil {
 		return st, err
 	}
-	defer tx.Rollback()
-	q := statedb.New(tx)
+	for _, work := range works {
+		st.Work[keyForWork(work)] = work
+	}
 	ctx := context.Background()
-	workRows, err := q.ListWork(ctx)
+	pushes, err := statedb.New(s.db).ListPushes(ctx)
 	if err != nil {
 		return st, err
 	}
-	for _, row := range workRows {
-		var work Work
-		if err := json.Unmarshal([]byte(row.Payload), &work); err != nil {
-			return st, err
-		}
-		st.Work[row.ID] = &work
-	}
-	pushRows, err := q.ListPushes(ctx)
-	if err != nil {
-		return st, err
-	}
-	for _, row := range pushRows {
-		var push Push
-		if err := json.Unmarshal([]byte(row.Payload), &push); err != nil {
+	for _, row := range pushes {
+		push, err := decodePush(row)
+		if err != nil {
 			return st, err
 		}
 		st.Pushes = append(st.Pushes, push)
 	}
-	repoRows, err := q.ListRepositories(ctx)
+	st.Configurations, err = s.configRecords()
 	if err != nil {
 		return st, err
 	}
-	for _, row := range repoRows {
-		var repo Repository
-		if err := json.Unmarshal([]byte(row.Payload), &repo); err != nil {
-			return st, err
-		}
-		st.Repositories = append(st.Repositories, repo)
-	}
-	if err := validateState(st); err != nil {
-		return st, err
-	}
-	return st, tx.Commit()
-}
-
-// syncState compares persisted payloads in the same transaction, avoiding a
-// mutable in-memory cache and preserving rollback/restart behavior. The snapshot
-// API still requires Service.mu and the daemon lock around read-modify-write.
-func syncState(tx *sql.Tx, st state) error {
-	if err := validateState(st); err != nil {
-		return err
-	}
-	ctx := context.Background()
-	q := statedb.New(tx)
-	workRows, err := q.ListWork(ctx)
-	if err != nil {
-		return err
-	}
-	repoRows, err := q.ListRepositories(ctx)
-	if err != nil {
-		return err
-	}
-	pushRows, err := q.ListPushes(ctx)
-	if err != nil {
-		return err
-	}
-	workPayloads := make(map[string]string, len(workRows))
-	for _, row := range workRows {
-		workPayloads[row.ID] = row.Payload
-	}
-	repoPayloads := make(map[string]string, len(repoRows))
-	for _, row := range repoRows {
-		repoPayloads[row.Name] = row.Payload
-	}
-	pushPayloads := make(map[int64]string, len(pushRows))
-	for _, row := range pushRows {
-		pushPayloads[row.Position] = row.Payload
-	}
-	for _, repo := range st.Repositories {
-		data, err := json.Marshal(repo)
-		if err != nil {
-			return err
-		}
-		if old, exists := repoPayloads[repo.Repo]; !exists || old != string(data) {
-			if err := q.PutRepository(ctx, statedb.PutRepositoryParams{Name: repo.Repo, Payload: string(data)}); err != nil {
-				return err
-			}
-		}
-		delete(repoPayloads, repo.Repo)
-	}
-	for id, work := range st.Work {
-		data, err := json.Marshal(work)
-		if err != nil {
-			return err
-		}
-		if old, exists := workPayloads[id]; !exists || old != string(data) {
-			if err := q.PutWork(ctx, statedb.PutWorkParams{ID: id, Payload: string(data)}); err != nil {
-				return err
-			}
-		}
-		delete(workPayloads, id)
-	}
-	for i, push := range st.Pushes {
-		data, err := json.Marshal(push)
-		if err != nil {
-			return err
-		}
-		if old, exists := pushPayloads[int64(i)]; !exists || old != string(data) {
-			if err := q.PutPush(ctx, statedb.PutPushParams{Position: int64(i), Payload: string(data)}); err != nil {
-				return err
-			}
-		}
-		delete(pushPayloads, int64(i))
-	}
-	for id := range workPayloads {
-		if err := q.DeleteWork(ctx, id); err != nil {
-			return err
-		}
-	}
-	for name := range repoPayloads {
-		if err := q.DeleteRepository(ctx, name); err != nil {
-			return err
-		}
-	}
-	for position := range pushPayloads {
-		if err := q.DeletePush(ctx, position); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *stateStore) save(st state) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := syncState(tx, st); err != nil {
-		return err
-	}
-	return tx.Commit()
+	st.Workspaces, err = s.exportWorkspaces()
+	return st, err
 }
 
 // Publish complete private files without replacing an existing destination.
@@ -499,8 +240,7 @@ func publishFileWithLink(temp, path string, link func(string, string) error) err
 			return err
 		}
 		// Filesystems without hard links still get exclusive creation and fsync.
-		// An interrupted copy may leave an incomplete destination; migration will
-		// reject it on retry rather than accept a different/partial legacy backup.
+		// An interrupted copy leaves a destination that must be inspected before retrying.
 		if err := copyExclusiveFile(temp, path); err != nil {
 			return err
 		}
@@ -542,34 +282,21 @@ func copyExclusiveFile(source, destination string) (err error) {
 	return output.Close()
 }
 
-// StateSnapshot requires the daemon to be stopped. It shares the legacy lock so
-// neither old nor new daemons can race a backup/export. Outputs never overwrite.
-// JSON export includes all current data, rather than the pre-migration snapshot.
+// StateSnapshot requires the daemon to be stopped. Outputs never overwrite.
 func StateSnapshot(dir, output string, asJSON bool) error {
-	lock, err := lockState(filepath.Join(dir, legacyState))
+	lock, err := lockState(dir)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
 	path := filepath.Join(dir, stateDatabase)
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("state database: %w", err)
-	}
 	s, err := openStore(path)
 	if err != nil {
 		return err
 	}
 	defer s.db.Close()
-	st, err := s.load()
-	if err != nil {
-		return err
-	}
-	st.Configurations, err = s.configRecords()
-	if err != nil {
-		return err
-	}
 	if asJSON {
-		st.Workspaces, err = s.exportWorkspaces()
+		st, err := s.exportState()
 		if err != nil {
 			return err
 		}
@@ -607,8 +334,8 @@ func StateSnapshot(dir, output string, asJSON bool) error {
 	return publishFile(temp, output)
 }
 
-func lockState(path string) (*os.File, error) {
-	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+func lockState(dir string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, stateLock), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -617,4 +344,28 @@ func lockState(path string) (*os.File, error) {
 		return nil, fmt.Errorf("lock daemon state (stop ink serve first): %w", err)
 	}
 	return f, nil
+}
+
+// CheckState inspects the existing state without initializing or changing it.
+func CheckState(dir string) error {
+	if err := checkStateDir(dir); err != nil {
+		return err
+	}
+	store, err := openStore(filepath.Join(dir, stateDatabase))
+	if err != nil {
+		return err
+	}
+	defer store.db.Close()
+	socket, err := os.Lstat(filepath.Join(dir, "ink.sock"))
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("daemon socket missing; start ink serve with this state directory")
+	}
+	if err != nil {
+		return err
+	}
+	owner, ok := socket.Sys().(*syscall.Stat_t)
+	if !ok || owner.Uid != uint32(os.Geteuid()) || socket.Mode()&os.ModeSocket == 0 || socket.Mode().Perm() != 0600 {
+		return errors.New("ink.sock must be a private Unix socket owned by the current UID")
+	}
+	return nil
 }

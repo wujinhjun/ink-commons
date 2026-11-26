@@ -1,9 +1,11 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"context"
 	"encoding/json"
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,10 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Existing workflow regressions change central policy through this helper
-// instead of editing the daemon's obsolete JSON import input in memory.
+// instead of editing the daemon's startup configuration in memory.
 func setRepositoryConfigForTest(t *testing.T, s *Service, repo Repository) {
 	t.Helper()
 	tx, err := s.store.db.Begin()
@@ -31,7 +34,7 @@ func setRepositoryConfigForTest(t *testing.T, s *Service, repo Repository) {
 	if err := putConfigRecord(tx, global); err != nil {
 		t.Fatal(err)
 	}
-	if err := putConfigRecord(tx, ConfigRecord{Scope: repo.Repo, Values: legacyRepositoryValues(repo), Revision: global.Revision}); err != nil {
+	if err := putConfigRecord(tx, ConfigRecord{Scope: repo.Repo, Values: repositoryValues(repo), Revision: global.Revision}); err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -58,7 +61,7 @@ func TestConfigInheritanceNullFalseAndValidation(t *testing.T) {
 	if inherited.Repository.ReviewerRoute.Session != "old" {
 		t.Fatal("missing key did not inherit")
 	}
-	for key, raw := range map[string]string{"execution.max_attempts": "0", "execution.ack_seconds": "null", "reviewer_login": "false", "reviewer_route": `{"provider":"test","unknown":true}`, "auto_merge": `{"enabled":null}`, "postApproval": `{"command":[null]}`, "task_mode": `""`, "unknown": "true"} {
+	for key, raw := range map[string]string{"execution.max_attempts": "0", "execution.ack_seconds": "null", "reviewer_login": "false", "reviewer_route": `{"provider":"test","unknown":true}`, "auto_merge": `{"enabled":null}`, "post_approval": `{"command":[null]}`, "task_mode": `""`, "unknown": "true"} {
 		if _, err := resolveConfig("", nil, RepositoryOverride{key: json.RawMessage(raw)}, 1); err == nil {
 			t.Errorf("accepted %s=%s", key, raw)
 		}
@@ -92,7 +95,7 @@ func registerConfigAPI(t *testing.T, s *Service, body string, want int) {
 func centralConfigService(t *testing.T, cfg Config, providers map[string]execution.Executor) (*Service, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), stateDatabase)
-	s, err := NewService(cfg, path, providers)
+	s, err := newFixtureService(t, cfg, path, providers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,12 +112,12 @@ func TestCentralConfigUpdatesInheritanceRestartAndSnapshotIsolation(t *testing.T
 	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "first"}}
 	s, path := centralConfigService(t, cfg, nil)
 	registerConfigAPI(t, s, `{"repo":"acme/project"}`, 201)
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	} // stale workflow snapshot
 	configAPI(t, s, "POST", "", "reviewer_login", `"second"`, 200)
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	effective, err := s.store.effectiveConfig("acme/project")
@@ -139,8 +142,8 @@ func TestCentralConfigUpdatesInheritanceRestartAndSnapshotIsolation(t *testing.T
 	if effective.Repository.ReviewerLogin != "third" {
 		t.Fatal("unset did not inherit")
 	}
-	configAPI(t, s, "POST", "", "postApproval", `{"command":["/bin/true"]}`, 200)
-	configAPI(t, s, "POST", "acme/project", "postApproval", `null`, 200)
+	configAPI(t, s, "POST", "", "post_approval", `{"command":["/bin/true"]}`, 200)
+	configAPI(t, s, "POST", "acme/project", "post_approval", `null`, 200)
 	configAPI(t, s, "POST", "", "auto_merge", `{"enabled":true}`, 200)
 	configAPI(t, s, "POST", "acme/project", "auto_merge", `{"enabled":false}`, 200)
 	effective, _ = s.store.effectiveConfig("acme/project")
@@ -151,7 +154,7 @@ func TestCentralConfigUpdatesInheritanceRestartAndSnapshotIsolation(t *testing.T
 	configAPI(t, s, "POST", "", "poll_seconds", "10", 400)
 	configAPI(t, s, "DELETE", "", "reviewer_login", "", 400) // would invalidate registered repository
 	configAPI(t, s, "POST", "acme/missing", "reviewer_login", `"other"`, 404)
-	raw := configAPI(t, s, "GET", "acme/project", "postApproval", "", 200)
+	raw := configAPI(t, s, "GET", "acme/project", "post_approval", "", 200)
 	if !strings.Contains(raw.Body.String(), `"present":true`) || !strings.Contains(raw.Body.String(), `"value":null`) {
 		t.Fatal(raw.Body)
 	}
@@ -172,71 +175,6 @@ func TestCentralConfigUpdatesInheritanceRestartAndSnapshotIsolation(t *testing.T
 	}
 }
 
-func TestCentralMigrationPreservesLegacyBehaviorAndExport(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, stateDatabase)
-	store, err := openStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := state{Work: map[string]*Work{}, Repositories: []Repository{{Repo: "acme/old", ReviewerLogin: "old"}, {Repo: "acme/conflict", ReviewerLogin: "sqlite"}}}
-	if err := store.save(old); err != nil {
-		t.Fatal(err)
-	}
-	store.db.Close()
-	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "global", PostApproval: &ApprovalHook{Command: []string{"/bin/true"}}}, Repositories: []Repository{{Repo: "acme/conflict", ReviewerLogin: "json"}}}
-	s, err := NewService(cfg, path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	effective, err := s.store.effectiveConfig("acme/old")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if effective.Repository.PostApproval != nil || effective.Repository.ReviewerLogin != "old" {
-		t.Fatal("legacy absence unexpectedly inherited")
-	}
-	conflict, _ := s.store.effectiveConfig("acme/conflict")
-	if conflict.Repository.ReviewerLogin != "json" {
-		t.Fatal("migration changed old precedence")
-	}
-	legacy, _ := s.store.load()
-	if legacy.Repositories[1].ReviewerLogin != "sqlite" && legacy.Repositories[0].ReviewerLogin != "sqlite" {
-		t.Fatal("shadowed original was not retained")
-	}
-	configAPI(t, s, "POST", "", "reviewer_login", `"new-global"`, 200)
-	configAPI(t, s, "DELETE", "acme/old", "reviewer_login", "", 200)
-	s.Close()
-	output := filepath.Join(t.TempDir(), "export.json")
-	if err := StateSnapshot(dir, output, true); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	restoredDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(restoredDir, legacyState), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	restored, err := NewService(Config{}, filepath.Join(restoredDir, stateDatabase), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restored.Close()
-	effective, err = restored.store.effectiveConfig("acme/old")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if effective.Repository.ReviewerLogin != "new-global" || effective.Repository.PostApproval != nil {
-		t.Fatal("export/import lost overrides")
-	}
-	records, _ := restored.store.configRecords()
-	if _, ok := recordMap(records)[legacyConfigScope]; !ok {
-		t.Fatal("JSON import archive lost")
-	}
-}
-
 func TestTaskConfigFreezesFirstDispatchAndRetryButRefreshesNewSHA(t *testing.T) {
 	executor := &testExecutor{}
 	cfg := Config{RepositoryDefaults: Repository{ReviewerLogin: "first", ReviewerRoute: &execution.Route{Provider: "test", Target: "first"}}}
@@ -248,11 +186,11 @@ func TestTaskConfigFreezesFirstDispatchAndRetryButRefreshesNewSHA(t *testing.T) 
 	if err := s.observe(repo, p, nil); err != nil {
 		t.Fatal(err)
 	}
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	w := st.Work[key(repo.Repo, 42)]
 	w.Linked = true
-	w.derive()
-	if err := s.store.save(st); err != nil {
+	w.derive(time.Now())
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	configAPI(t, s, "POST", "", "reviewer_login", `"second"`, 200)
@@ -261,7 +199,7 @@ func TestTaskConfigFreezesFirstDispatchAndRetryButRefreshesNewSHA(t *testing.T) 
 	if err := s.dispatch(context.Background(), repo, 42); err != nil {
 		t.Fatal(err)
 	}
-	st, _ = s.store.load()
+	st, _ = loadFixture(s.store)
 	w = st.Work[key(repo.Repo, 42)]
 	taskID := w.Task.ID
 	if w.Task.ConfigSnapshot == nil || w.Task.ConfigSnapshot.Execution.MaxAttempts != 5 || executor.deliveries[0].task.GitHubLogin != "second" {
@@ -271,17 +209,17 @@ func TestTaskConfigFreezesFirstDispatchAndRetryButRefreshesNewSHA(t *testing.T) 
 	configAPI(t, s, "POST", "", "reviewer_login", `"third"`, 200)
 	configAPI(t, s, "POST", "", "reviewer_route", `{"provider":"test","target":"third"}`, 200)
 	configAPI(t, s, "POST", "", "execution.max_attempts", "1", 200)
-	st, _ = s.store.load()
+	st, _ = loadFixture(s.store)
 	w = st.Work[key(repo.Repo, 42)]
 	w.Task.Runs[0].State = "failed"
 	w.Task.Delivery = "pending"
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.dispatch(context.Background(), repo, 42); err != nil {
 		t.Fatal(err)
 	}
-	st, _ = s.store.load()
+	st, _ = loadFixture(s.store)
 	w = st.Work[key(repo.Repo, 42)]
 	after, _ := json.Marshal(w.Task.ConfigSnapshot)
 	if w.Task.ID != taskID || string(frozen) != string(after) || executor.deliveries[1].task.GitHubLogin != "second" || executor.deliveries[1].route.Target != "first" {
@@ -291,7 +229,7 @@ func TestTaskConfigFreezesFirstDispatchAndRetryButRefreshesNewSHA(t *testing.T) 
 	if err := s.observe(repo, p, []Review{reviewFor(9, p.Head.SHA, "third", "APPROVED")}); err != nil {
 		t.Fatal(err)
 	}
-	st, _ = s.store.load()
+	st, _ = loadFixture(s.store)
 	if st.Work[key(repo.Repo, 42)].Phase != "review_pending" {
 		t.Fatal("new default reinterpreted old review")
 	}
@@ -299,7 +237,7 @@ func TestTaskConfigFreezesFirstDispatchAndRetryButRefreshesNewSHA(t *testing.T) 
 	for i := range w.Task.Runs {
 		w.Task.Runs[i].State = "failed"
 	}
-	s.store.save(st)
+	saveFixture(s.store, st)
 	p.Head.SHA = strings.Repeat("b", 40)
 	if err := s.observe(repo, p, nil); err != nil {
 		t.Fatal(err)
@@ -307,7 +245,7 @@ func TestTaskConfigFreezesFirstDispatchAndRetryButRefreshesNewSHA(t *testing.T) 
 	if err := s.dispatch(context.Background(), repo, 42); err != nil {
 		t.Fatal(err)
 	}
-	st, _ = s.store.load()
+	st, _ = loadFixture(s.store)
 	w = st.Work[key(repo.Repo, 42)]
 	if w.Task.ID == taskID || w.Task.ConfigSnapshot.Execution.MaxAttempts != 1 || w.Reviewer.GitHubLogin != "third" || executor.deliveries[2].route.Target != "third" || executor.prepared != 2 {
 		t.Fatalf("new SHA did not refresh route and policy: %+v", w.Task)
@@ -323,15 +261,15 @@ func TestEffectivePRConfigShowsExplicitSources(t *testing.T) {
 	if err := s.observe(repo, p, nil); err != nil {
 		t.Fatal(err)
 	}
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	w := st.Work[key(repo.Repo, 42)]
-	if err := applyChange(w, "link", workChange{GitHubLogin: "dev"}); err != nil {
+	if err := applyChange(w, "link", workChange{GitHubLogin: "dev"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyChange(w, "assign", workChange{Role: "reviewer", GitHubLogin: "explicit"}); err != nil {
+	if err := applyChange(w, "assign", workChange{Role: "reviewer", GitHubLogin: "explicit"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	out := httptest.NewRecorder()
@@ -402,13 +340,13 @@ func TestEqualReviewerAssignmentStillPinsPROverride(t *testing.T) {
 	if err := s.observe(repo, p, nil); err != nil {
 		t.Fatal(err)
 	}
-	st, _ := s.store.load()
+	st, _ := loadFixture(s.store)
 	w := st.Work[key(repo.Repo, 42)]
-	if err := applyChange(w, "link", workChange{GitHubLogin: "dev"}); err != nil {
+	if err := applyChange(w, "link", workChange{GitHubLogin: "dev"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	taskID := w.Task.ID
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	out := httptest.NewRecorder()
@@ -416,7 +354,7 @@ func TestEqualReviewerAssignmentStillPinsPROverride(t *testing.T) {
 	if out.Code != 200 {
 		t.Fatal(out.Code, out.Body)
 	}
-	st, _ = s.store.load()
+	st, _ = loadFixture(s.store)
 	w = st.Work[key(repo.Repo, 42)]
 	if w.ReviewerOverride == nil || w.Task.ID != taskID {
 		t.Fatal("equal assignment reset task or failed to pin override")
@@ -426,15 +364,15 @@ func TestEqualReviewerAssignmentStillPinsPROverride(t *testing.T) {
 	if err := s.observe(repo, p, nil); err != nil {
 		t.Fatal(err)
 	}
-	st, _ = s.store.load()
+	st, _ = loadFixture(s.store)
 	w = st.Work[key(repo.Repo, 42)]
 	if w.Reviewer.GitHubLogin != "original" || w.Task.ConfigSnapshot.Sources["reviewer_login"] != "pr" {
 		t.Fatal("explicit equal-valued assignment started inheriting")
 	}
 }
 
-func TestConfigurationExportOmitsLegacyImportArchive(t *testing.T) {
-	s, err := NewService(Config{Repositories: []Repository{{Repo: "acme/project", ReviewerLogin: "reviewer"}}},
+func TestConfigurationExportIncludesRegisteredRepositories(t *testing.T) {
+	s, err := newFixtureService(t, Config{Repositories: []Repository{{Repo: "acme/project", ReviewerLogin: "reviewer"}}},
 		filepath.Join(t.TempDir(), stateDatabase), nil)
 	if err != nil {
 		t.Fatal(err)

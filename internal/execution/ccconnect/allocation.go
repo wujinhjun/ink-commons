@@ -3,17 +3,21 @@ package ccconnect
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/url"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
+
+var errAllocationMissing = errors.New("reserved Discord thread was not found")
+var errAllocationAmbiguous = errors.New("multiple threads match the reserved Discord allocation")
 
 const discordAPI = "https://discord.com/api/v10"
 
-func (e *Executor) PlanConversation(placement execution.ReviewPlacement, task execution.Delivery) execution.ConversationAllocation {
-	id := sha256.Sum256([]byte(task.TaskID))
+func (e *Executor) PlanConversation(placement execution.ReviewPlacement, task execution.Delivery, identity string) execution.ConversationAllocation {
+	id := sha256.Sum256([]byte(identity))
 	return threadAllocation(placement, task, fmt.Sprintf(" · %x", id[:8]))
 }
 
@@ -94,7 +98,7 @@ func (e *Executor) FindConversation(ctx context.Context, allocation execution.Co
 				continue
 			}
 			if match != "" && match != thread.ID {
-				return fmt.Errorf("multiple Discord threads match allocation %q", allocation.Name)
+				return errAllocationAmbiguous
 			}
 			match = thread.ID
 		}
@@ -144,7 +148,7 @@ func (e *Executor) FindConversation(ctx context.Context, allocation execution.Co
 		before = next
 	}
 	if match == "" {
-		return "", fmt.Errorf("Discord thread %q was not found in channel %s", allocation.Name, allocation.Parent)
+		return "", errAllocationMissing
 	}
 	return "discord:" + match, nil
 }

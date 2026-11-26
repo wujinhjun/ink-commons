@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -5,16 +7,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type workChange struct {
@@ -35,9 +35,6 @@ type apiError struct {
 
 func (e apiError) Error() string { return e.message }
 
-// BuildRevision 在部署构建时由 ldflags 注入，用于核对正在运行的提交。
-var BuildRevision = "development"
-
 func (s *Service) Handler() http.Handler {
 	const workPath = "/v1/work/{owner}/{repo}/{number}"
 	const taskPath = "/v1/tasks/{task}"
@@ -57,6 +54,9 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/config", s.configuration)
 	mux.HandleFunc("GET /v1/repositories", s.listRepositories)
 	mux.HandleFunc("POST /v1/repositories", s.registerRepository)
+	const repositoryPath = "/v1/repositories/{owner}/{repo}"
+	mux.HandleFunc("PATCH "+repositoryPath, s.updateRepository)
+	mux.HandleFunc("DELETE "+repositoryPath, s.removeRepository)
 	mux.HandleFunc("GET /v1/work", s.listWork)
 	mux.HandleFunc("GET /v1/workspaces", s.workspaces)
 	mux.HandleFunc("POST /v1/workspaces", s.workspaces)
@@ -70,7 +70,10 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/notifications/ack", s.ackNotification)
 	mux.HandleFunc("GET /v1/notifications/status", s.notificationStatus)
 
-	pausedWrites := map[string]bool{"POST /v1/config": true, "DELETE /v1/config": true}
+	pausedWrites := map[string]bool{
+		"POST /v1/config": true, "DELETE /v1/config": true,
+		"PATCH " + repositoryPath: true, "DELETE " + repositoryPath: true,
+	}
 	allowWhilePaused := func(path, action string, handle http.HandlerFunc) {
 		pattern := "POST " + path + "/" + action
 		pausedWrites[pattern] = true
@@ -118,10 +121,15 @@ func timestamp(unix int64) string {
 func (s *Service) selfCheck(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	for _, repo := range s.repositories() {
+	repos, err := s.runtimeRepositories()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	for _, repo := range repos {
 		var pulls []Pull
 		if _, err := s.up.gitHubGet(ctx, "/repos/"+repo.Repo+"/pulls?state=open&per_page=1", &pulls); err != nil {
-			reply(w, 503, map[string]string{"repository": repo.Repo, "error": err.Error()})
+			reply(w, 503, map[string]string{"repository": repo.Repo, "error": redactedError(err)})
 			return
 		}
 	}
@@ -161,22 +169,12 @@ func decode(w http.ResponseWriter, r *http.Request, result any) error {
 
 func (s *Service) listWork(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	st, err := s.store.load()
+	list, err := s.store.listWork()
 	s.mu.Unlock()
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	list := make([]*Work, 0, len(st.Work))
-	for _, work := range st.Work {
-		list = append(list, work)
-	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].Repo != list[j].Repo {
-			return list[i].Repo < list[j].Repo
-		}
-		return list[i].Pull.Number < list[j].Pull.Number
-	})
 	reply(w, 200, list)
 }
 
@@ -196,15 +194,7 @@ func (s *Service) pushes(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	now := time.Now()
-	prunePushes(&st, now)
-	s.recordPushes(&st, input, now)
-	if err := s.store.save(st); err != nil {
+	if err := s.recordPushes(input, s.now()); err != nil {
 		fail(w, err)
 		return
 	}
@@ -235,12 +225,11 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	work, err := s.store.loadWork(key(repo, number))
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	work := st.Work[key(repo, number)]
 	if work == nil {
 		fail(w, apiError{404, "PR not observed yet"})
 		return
@@ -249,17 +238,29 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, work)
 		return
 	}
+	if _, err := s.store.effectiveConfig(repo); err != nil {
+		fail(w, err)
+		return
+	}
 	// Return an existing reviewer assignment even during delivery so a
 	// repeated request cannot reset the task or allocate another session.
 	if action == "assign" && change.Role == "reviewer" && work.Linked {
 		requested := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
-		if requested.GitHubLogin != "" && sameReviewer(work.Reviewer, requested) {
+		sameAssignment := sameReviewer(work.Reviewer, requested)
+		if !sameAssignment && requested.Route != nil && requested.Route.Session == "" {
+			configured := work.ReviewerOverride
+			if configured == nil && work.RoundConfig != nil && work.RoundConfig.SHA == work.Pull.Head.SHA {
+				configured = &work.RoundConfig.Reviewer
+			}
+			sameAssignment = configured != nil && sameReviewer(*configured, requested)
+		}
+		if requested.GitHubLogin != "" && sameAssignment {
 			// Equal values still express an explicit PR override. Preserve the active
 			// task/session while recording that future rounds must not inherit.
 			if work.ReviewerOverride == nil || !bytes.Equal(jsonValue(work.ReviewerOverride), jsonValue(requested)) {
 				work.ReviewerOverride = cloneAssignee(requested)
 				work.Version++
-				if err := s.store.save(st); err != nil {
+				if err := s.store.saveWork(work); err != nil {
 					fail(w, err)
 					return
 				}
@@ -278,22 +279,45 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "assign" && change.Role == "reviewer" && change.Route != nil {
 		route := *change.Route
+		if t := work.Task; t != nil && t.Role == "reviewer" && route.Session == "" {
+			state := t.Preparation
+			if t.Handoff != nil {
+				state = &t.Handoff.Wake
+			}
+			if state != nil && state.Preparation == "preparing" {
+				fail(w, apiError{409, "conversation allocation is unresolved; bind a verified session before reassigning"})
+				return
+			}
+		}
 		preparation := execution.Delivery{Role: "reviewer", Source: reviewSource(work)}
 		if repository, ok := s.repo(repo); ok {
-			route = allocationRoute(repository, route)
 			repository.ReviewerRoute = change.Route
 			if err := repository.ValidateReviewFeatures(); err != nil {
 				fail(w, apiError{400, err.Error()})
 				return
 			}
-			if repository.Review != nil && repository.Review.Context.ThreadHistory && (reviewSource(work) == nil || reviewSource(work).Provider != "cc-connect") {
-				fail(w, apiError{400, "thread history requires a Discord development source"})
+			if err := s.validateEffective(repository); err != nil {
+				fail(w, apiError{400, err.Error()})
 				return
+			}
+			if repository.Review != nil && repository.Review.Context.ThreadHistory {
+				if err := s.validateHistorySource(preparation.Source); err != nil {
+					fail(w, apiError{400, err.Error()})
+					return
+				}
 			}
 			if repository.Review != nil {
 				preparation.RequireSameChannel = repository.Review.RequireSameChannel
 				preparation.ReuseDevelopmentThread = repository.Review.ReuseDevelopmentThread
 			}
+		}
+		binding := reviewChannelBinding{route: route, requireSame: preparation.RequireSameChannel, reuseThread: preparation.ReuseDevelopmentThread}
+		if preparation.Source != nil {
+			binding.source = *preparation.Source
+		}
+		if err := validatePlacementInput(binding); err != nil {
+			fail(w, apiError{400, err.Error()})
+			return
 		}
 		if route.Session == "" || preparation.RequireSameChannel {
 			if err := execution.ValidatePreparation(s.providers, route, preparation); err != nil {
@@ -302,19 +326,19 @@ func (s *Service) work(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := applyChange(work, action, change); err != nil {
+	if err := applyChange(work, action, change, s.now()); err != nil {
 		fail(w, err)
 		return
 	}
-	work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-	if err := s.store.save(st); err != nil {
+	s.refreshWorkflow(work, s.now())
+	if err := s.store.saveWork(work); err != nil {
 		fail(w, err)
 		return
 	}
 	reply(w, 200, work)
 }
 
-func applyChange(work *Work, action string, change workChange) error {
+func applyChange(work *Work, action string, change workChange, now time.Time) error {
 	assignee := Assignee{GitHubLogin: strings.TrimSpace(change.GitHubLogin), GitHubCommand: strings.TrimSpace(change.GitHubCommand), Route: change.Route}
 	switch action {
 	case "link":
@@ -363,7 +387,7 @@ func applyChange(work *Work, action string, change workChange) error {
 				if execution.Terminal(a.State) {
 					return apiError{409, "attempt already ended"}
 				}
-				a.State, a.EndedAt, a.ManualReason, a.Error = "stopped", time.Now(), change.Reason, ""
+				a.State, a.EndedAt, a.ManualReason, a.Error = "stopped", now, change.Reason, ""
 				found = true
 			}
 		}
@@ -381,11 +405,12 @@ func applyChange(work *Work, action string, change workChange) error {
 			return apiError{409, "no retryable task"}
 		}
 		work.Task.Delivery, work.Task.Error, work.Task.RetryAt = "pending", "", time.Time{}
+		work.Task.AttemptsExhausted = false
 	default:
-		return apiError{404, fmt.Sprintf("unknown action %q", action)}
+		return apiError{404, "unknown work action"}
 	}
 	work.Version++
-	work.derive()
+	work.derive(now)
 	return nil
 }
 

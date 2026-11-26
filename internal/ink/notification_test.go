@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -11,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type notificationExecutor struct {
@@ -25,7 +27,7 @@ type notificationExecutor struct {
 
 func (e *notificationExecutor) NotificationACKRequired() bool { return e.requireACK }
 
-func (e *notificationExecutor) Notify(_ context.Context, r execution.Route, n execution.Notification) error {
+func (e *notificationExecutor) Notify(_ context.Context, r execution.Route, n execution.Notification, _ bool) error {
 	if e.onNotify != nil {
 		e.onNotify()
 	}
@@ -38,7 +40,7 @@ func notificationFixture(t *testing.T, executor execution.Executor) (*Service, R
 	t.Helper()
 	path := filepath.Join(t.TempDir(), stateDatabase)
 	repo := Repository{Repo: "acme/project", ReviewerLogin: "reviewer"}
-	s, err := NewService(Config{Repositories: []Repository{repo}}, path, map[string]execution.Executor{"test": executor})
+	s, err := newFixtureService(t, Config{Repositories: []Repository{repo}}, path, map[string]execution.Executor{"test": executor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +49,16 @@ func notificationFixture(t *testing.T, executor execution.Executor) (*Service, R
 	p.Head.SHA = strings.Repeat("a", 40)
 	r := Review{ID: 9, SHA: p.Head.SHA, State: "APPROVED", URL: p.URL + "#pullrequestreview-9", SubmittedAt: time.Now()}
 	r.User.Login = "Reviewer"
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Work[key(repo.Repo, p.Number)] = &Work{Repo: repo.Repo, Pull: p, Linked: true,
+	w := &Work{Repo: repo.Repo, Pull: p, Linked: true,
 		Developer: Assignee{Route: &execution.Route{Provider: "test", Target: "developer", Session: "dev-session"}},
 		Reviewer:  Assignee{GitHubLogin: repo.ReviewerLogin}}
-	if err := s.store.save(st); err != nil {
+	w.DeveloperOverride = cloneAssignee(w.Developer)
+	st.Work[key(repo.Repo, p.Number)] = w
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	return s, repo, p, r, path
@@ -62,7 +66,7 @@ func notificationFixture(t *testing.T, executor execution.Executor) (*Service, R
 
 func notificationWork(t *testing.T, s *Service, repo Repository, p Pull) *Work {
 	t.Helper()
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,8 +82,10 @@ func TestPollNotifiesDeveloperOfApprovalOnceAcrossRestart(t *testing.T) {
 			w := httptest.NewRecorder()
 			if strings.HasSuffix(req.URL.Path, "/reviews") {
 				reply(w, 200, []Review{r})
-			} else {
+			} else if strings.HasSuffix(req.URL.Path, "/pulls") {
 				reply(w, 200, []Pull{p})
+			} else {
+				reply(w, 200, p)
 			}
 			return w.Result(), nil
 		})
@@ -156,9 +162,9 @@ func TestApprovalNotificationRequiresCurrentAssignedReview(t *testing.T) {
 			case "merged":
 				p.State, p.Merged = "closed", true
 			case "unlinked":
-				st, _ := s.store.load()
+				st, _ := loadFixture(s.store)
 				st.Work[key(repo.Repo, p.Number)].Linked = false
-				if err := s.store.save(st); err != nil {
+				if err := saveFixture(s.store, st); err != nil {
 					t.Fatal(err)
 				}
 			case "newer request changes":
@@ -211,10 +217,12 @@ func TestApprovalNotificationUnsupportedAndHuman(t *testing.T) {
 	for _, human := range []bool{false, true} {
 		s, repo, p, r, _ := notificationFixture(t, &testExecutor{})
 		if human {
-			st, _ := s.store.load()
-			st.Work[key(repo.Repo, p.Number)].Developer.Route = nil
+			st, _ := loadFixture(s.store)
+			work := st.Work[key(repo.Repo, p.Number)]
+			work.Developer.Route = nil
+			work.DeveloperOverride = cloneAssignee(work.Developer)
 			st.Work[key(repo.Repo, p.Number)].Origin = &execution.Route{Provider: "test", Target: "old-bot", Session: "old-session"}
-			if err := s.store.save(st); err != nil {
+			if err := saveFixture(s.store, st); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -241,27 +249,27 @@ func TestNotificationPreservesConcurrentWorkChangesAndExecutionHistory(t *testin
 	if err := s.observe(repo, p, []Review{r}); err != nil {
 		t.Fatal(err)
 	}
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	w := st.Work[key(repo.Repo, p.Number)]
 	w.History = []*Task{{ID: "old-review", Role: "reviewer", SHA: p.Head.SHA, Runs: []Attempt{{ID: "old-attempt", State: "unknown"}}}}
-	if err := s.store.save(st); err != nil {
+	if err := saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	e.onNotify = func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		st, err := s.store.load()
+		st, err := loadFixture(s.store)
 		if err != nil {
 			t.Fatal(err)
 		}
 		live := st.Work[key(repo.Repo, p.Number)]
 		live.Developer = Assignee{GitHubLogin: "human-takeover"}
 		live.Pull.Head.SHA = strings.Repeat("c", 40)
-		live.derive()
-		if err := s.store.save(st); err != nil {
+		live.derive(time.Now())
+		if err := saveFixture(s.store, st); err != nil {
 			t.Fatal(err)
 		}
 	}

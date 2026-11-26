@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -65,12 +67,12 @@ func TestMissingReviewRemainsWaitingAcrossRestartWithoutRedispatch(t *testing.T)
 		t.Fatal(err)
 	}
 	reconcile(t, s)
-	st, err := s.store.load()
+	st, err := loadFixture(s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Work["acme/project#42"].Task.Runs[0].EndedAt = time.Now().Add(-time.Minute)
-	if err = s.store.save(st); err != nil {
+	if err = saveFixture(s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	reconcile(t, s)
@@ -120,9 +122,11 @@ func TestWrongSHAReviewDiagnosticOnlyForNewlySubmittedStaleResult(t *testing.T) 
 // Guard the source identity contract as well as the transport lifecycle.
 func TestDeliveryCarriesConfiguredGitHubIdentity(t *testing.T) {
 	s, e, repo, _ := reliabilityService(t, Reliability{})
-	st, _ := s.store.load()
-	st.Work["acme/project#42"].Reviewer.GitHubCommand = "reviewer-app"
-	s.store.save(st)
+	st, _ := loadFixture(s.store)
+	work := st.Work["acme/project#42"]
+	work.Reviewer.GitHubCommand = "reviewer-app"
+	work.ReviewerOverride = cloneAssignee(work.Reviewer)
+	saveFixture(s.store, st)
 	dispatch(t, s, repo)
 	d := e.deliveries[0].task
 	if d.GitHubLogin != "reviewer" || d.GitHubCommand != "reviewer-app" {

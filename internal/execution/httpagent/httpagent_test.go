@@ -3,11 +3,13 @@ package httpagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func TestAuthenticatedStatusAndStop(t *testing.T) {
@@ -31,7 +33,7 @@ func TestAuthenticatedStatusAndStop(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"receipt": execution.Receipt{TaskID: d.TaskID, AttemptID: d.AttemptID, Sequence: 4, State: "stopped"}})
 	}))
 	defer server.Close()
-	e, err := NewManaged(server.Client(), server.URL, "executor-secret")
+	e, err := New(server.Client(), server.URL, "executor-secret", []string{"deliver", "status", "stop"}, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,7 @@ func TestAuthenticatedStatusAndStop(t *testing.T) {
 func TestLegacyEndpointReceivesNoMonitoringRequests(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("legacy endpoint received execution operation") }))
 	defer server.Close()
-	e, err := New(server.Client(), server.URL, "")
+	e, err := New(server.Client(), server.URL, "", []string{"prepare", "deliver"}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,5 +65,28 @@ func TestLegacyEndpointReceivesNoMonitoringRequests(t *testing.T) {
 	}
 	if _, err = e.Stop(context.Background(), execution.Route{}, execution.Delivery{}); err == nil {
 		t.Fatal("legacy stop was enabled")
+	}
+}
+
+func TestAdapterRejectsRedirectsAndRedactsResponseBody(t *testing.T) {
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("adapter followed a redirect")
+	}))
+	defer destination.Close()
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusBadGateway} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", destination.URL)
+			http.Error(w, "secret-token /private/agent/state", status)
+		}))
+		executor, err := New(server.Client(), server.URL, "secret-token", []string{"deliver"}, false, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = executor.Deliver(context.Background(), execution.Route{}, execution.Delivery{})
+		server.Close()
+		var got execution.HTTPStatusError
+		if !errors.As(err, &got) || int(got) != status || strings.Contains(err.Error(), "secret-token") || strings.Contains(err.Error(), "/private/") {
+			t.Fatalf("expected redacted HTTP status %d, got %v", status, err)
+		}
 	}
 }

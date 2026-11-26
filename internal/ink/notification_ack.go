@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -22,12 +24,12 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	work, err := s.store.loadNotification(input.EventID)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	for _, work := range st.Work {
+	if work != nil {
 		for i := range work.Notifications {
 			n := &work.Notifications[i]
 			if n.EventID != input.EventID {
@@ -41,8 +43,12 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 			switch n.State {
 			case "acknowledged", "superseded":
 			case "unknown", "awaiting_ack":
+				sameRoute := work.Developer.Route != nil && n.Route != nil && *work.Developer.Route == *n.Route
+				if sameRoute && work.approvalReceiptPaused(n) {
+					break
+				}
 				n.State = "superseded"
-				if (work.Phase == "approved" || work.Phase == "merged") && work.Pull.Head.SHA == n.SHA && work.Developer.Route != nil && n.Route != nil && *work.Developer.Route == *n.Route {
+				if sameRoute && work.Pull.Head.SHA == n.SHA && (work.Phase == "approved" || work.Phase == "merged") {
 					n.State, first = "acknowledged", true
 				}
 				// 完成通知已被消费后，不再补发同 SHA 的旧批准提示。
@@ -51,14 +57,14 @@ func (s *Service) ackNotification(w http.ResponseWriter, r *http.Request) {
 						old := &work.Notifications[j]
 						if old.Event == "review_approved" && old.SHA == n.SHA && (old.State == "unknown" || old.State == "awaiting_ack") {
 							old.State = "superseded"
-							old.FinishedAt = time.Now()
+							old.FinishedAt = s.now()
 							old.RetryAt = time.Time{}
 						}
 					}
 				}
-				n.FinishedAt, n.RetryAt, n.Error = time.Now(), time.Time{}, ""
-				work.refreshWorkflow(time.Now(), s.config.Reliability.defaults())
-				if err := s.store.save(st); err != nil {
+				n.FinishedAt, n.RetryAt, n.Error = s.now(), time.Time{}, ""
+				s.refreshWorkflow(work, s.now())
+				if err := s.store.saveWork(work); err != nil {
 					fail(w, err)
 					return
 				}

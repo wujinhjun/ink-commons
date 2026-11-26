@@ -1,0 +1,199 @@
+//go:build linux || darwin
+
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/wujinhjun/ink-commons/internal/ink"
+)
+
+type cliOptions struct {
+	data string
+	json bool
+}
+
+func (options *cliOptions) directory() (string, error) {
+	if options.data != "" {
+		return filepath.Abs(options.data)
+	}
+	return directory()
+}
+
+func main() {
+	os.Exit(executeCLI(os.Args[1:], os.Stderr))
+}
+
+func executeCLI(args []string, stderr io.Writer) int {
+	_, command := cli()
+	args = legacyFlags(args)
+	command.SetArgs(args)
+	cmd, err := command.ExecuteC()
+	if err == nil {
+		return 0
+	}
+	message := cliDiagnostic(err)
+	if jsonErrorRequested(cmd, args) {
+		_ = json.NewEncoder(stderr).Encode(map[string]string{"error": message})
+	} else {
+		fmt.Fprintln(stderr, "ink:", message)
+	}
+	return 1
+}
+
+// Cobra may stop before parsing the persistent flag. Recover its value for
+// diagnostics while respecting the delimiter and recognized flag arguments.
+func jsonErrorRequested(cmd *cobra.Command, args []string) bool {
+	requested := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		name, value, assigned := strings.Cut(arg[2:], "=")
+		if name == "json" {
+			if !assigned {
+				requested = true
+			} else if enabled, err := strconv.ParseBool(value); err == nil {
+				requested = enabled
+			}
+		} else if flag := cmd.Flag(name); !assigned && flag != nil && flag.NoOptDefVal == "" {
+			i++
+		}
+	}
+	return requested
+}
+
+func run(args []string) error {
+	_, command := cli()
+	command.SetArgs(legacyFlags(args))
+	return command.Execute()
+}
+
+func cli() (*cliOptions, *cobra.Command) {
+	options := &cliOptions{}
+	root := &cobra.Command{
+		Use: "ink", Short: "Coordinate GitHub pull requests",
+		SilenceUsage: true, SilenceErrors: true,
+		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
+	}
+	root.PersistentFlags().StringVar(&options.data, "data", "", "private daemon state directory (overrides INK_DATA_DIR)")
+	root.PersistentFlags().BoolVar(&options.json, "json", false, "emit machine-readable JSON")
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, _ error) error {
+		return fmt.Errorf("invalid flags; see %s --help", cmd.CommandPath())
+	})
+	root.AddCommand(serve(options), initialize(options), register(options), review(options), readContext(options),
+		versionCommand(options), prePushCommand(options), doctorCommand(options))
+	skills := initialize(options)
+	skills.Use = "skills"
+	root.AddCommand(skills)
+	root.AddCommand(
+		commandGroup("config", "Inspect or change central configuration",
+			[]string{"get", "set", "unset", "list"}, options, configurationCommand,
+			&cobra.Command{Use: "export", Short: "Export central policy", Args: cobra.NoArgs,
+				RunE: func(_ *cobra.Command, args []string) error { return options.exportConfiguration(args) }}),
+		commandGroup("task", "Manage cooperative task handoffs", []string{"claim", "status", "submit", "retry"}, options, taskCommand),
+		commandGroup("hook", "Manage the Git pre-push hook", []string{"install", "status"}, options, hookCommand),
+		commandGroup("workspace", "Manage Git workspaces", []string{"list", "acquire", "release", "remove"}, options, workspaceCommand),
+		commandGroup("state", "Initialize or snapshot the state database", []string{"init", "backup", "export"}, options, stateCommand),
+		commandGroup("notification", "Inspect or acknowledge notifications", []string{"ack", "status"}, options, notificationCommand),
+		workCommands(options), repoCommands(options),
+	)
+	return options, root
+}
+
+func commandGroup(name, description string, actions []string, options *cliOptions, build func(*cliOptions, string) *cobra.Command, extra ...*cobra.Command) *cobra.Command {
+	group := &cobra.Command{Use: name, Short: description,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return fmt.Errorf("expected a subcommand; see %s --help", cmd.CommandPath())
+		}}
+	for _, action := range actions {
+		group.AddCommand(build(options, action))
+	}
+	group.AddCommand(extra...)
+	return group
+}
+
+func versionCommand(options *cliOptions) *cobra.Command {
+	return &cobra.Command{Use: "version", Short: "Show the build revision", Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if options.json {
+				return json.NewEncoder(os.Stdout).Encode(map[string]string{"version": ink.BuildVersion, "revision": ink.BuildRevision})
+			}
+			fmt.Println(ink.BuildRevision)
+			return nil
+		}}
+}
+
+func prePushCommand(options *cliOptions) *cobra.Command {
+	return &cobra.Command{Use: "pre-push REMOTE_URL", Hidden: true, Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			// Recording provenance must never stop a normal Git push.
+			status := "ok"
+			if err := options.push(args[0]); err != nil {
+				status = "association_unavailable"
+				fmt.Fprintln(os.Stderr, "ink: push association could not be recorded:", cliDiagnostic(err))
+			}
+			if options.json {
+				return json.NewEncoder(os.Stdout).Encode(map[string]string{"status": status})
+			}
+			return nil
+		}}
+}
+
+// Existing CLI callers may use the Go flag package's single-dash spellings.
+func legacyFlags(args []string) []string {
+	result := append([]string{}, args...)
+	for i, arg := range result {
+		if arg == "--" {
+			break
+		}
+		name, _, _ := strings.Cut(arg, "=")
+		switch name {
+		case "-data", "-config", "-config-only", "-poll-gate", "-output", "-repo", "-pr":
+			result[i] = "-" + arg
+		}
+	}
+	return result
+}
+
+func cliDiagnostic(err error) string {
+	message := ink.StartupDiagnostic(err)
+	if strings.HasPrefix(message, "unknown command ") {
+		return "unknown command; see ink --help"
+	}
+	var path *os.PathError
+	if errors.As(err, &path) {
+		message = strings.ReplaceAll(message, path.Path, "[path]")
+	}
+	if sensitiveDiagnostic.MatchString(message) {
+		return "details withheld; check the local configuration and command arguments"
+	}
+	return message
+}
+
+// Keep daemon validation and conflict messages. Older daemon releases may
+// return subprocess diagnostics with paths, authenticated URLs or credentials.
+var sensitiveDiagnostic = regexp.MustCompile(`(?i)(https?://|(^|[[:space:]="'(:])/[^[:space:]]|[\r\n]|bearer[[:space:]]|(?:gh[pousr]_|github_pat_|sk-)[a-z0-9_-]+|(?:token|password|authorization|secret)[=:])`)
+
+func daemonProblem(status int, message string) error {
+	if sensitiveDiagnostic.MatchString(message) || len(message) > 512 {
+		message = "details withheld; inspect the local configuration or status command"
+	}
+	if message == "" {
+		return fmt.Errorf("daemon HTTP %d", status)
+	}
+	return fmt.Errorf("daemon HTTP %d: %s", status, message)
+}

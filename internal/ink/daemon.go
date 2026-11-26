@@ -1,36 +1,34 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func Serve(ctx context.Context, cfg Config, dir string, providers map[string]execution.Executor) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := checkStateDir(dir); err != nil {
 		return err
-	}
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return fmt.Errorf("daemon state directory must be a directory with private permissions")
 	}
 	statePath := filepath.Join(dir, stateDatabase)
-	lock, err := lockState(filepath.Join(dir, legacyState))
+	lock, err := lockState(dir)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
+	if err := migrateStateV6(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("migrate state database: %w", err)
+	}
 	service, err := NewService(cfg, statePath, providers)
 	if err != nil {
 		return err
@@ -50,14 +48,20 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 	}
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
-		return err
+		return fmt.Errorf("listen on daemon socket: %w", err)
 	}
 	defer ln.Close()
 	if err := os.Chmod(socket, 0600); err != nil {
 		return err
 	}
 
-	server := &http.Server{Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second}
+	server := &http.Server{
+		Handler:           service.Handler(),
+		ErrorLog:          slog.NewLogLogger(httpErrorHandler{service.log.Handler()}, slog.LevelError),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+	}
 	pollCtx, cancel := context.WithCancel(ctx)
 	var done = make(chan struct{})
 	go func() {
@@ -87,7 +91,7 @@ func Serve(ctx context.Context, cfg Config, dir string, providers map[string]exe
 			_ = server.Close()
 		}
 	}()
-	log.Printf("Ink Commons listening on Unix socket %s", socket)
+	service.log.Info("Ink Commons listening on Unix socket")
 	err = server.Serve(ln)
 	cancel()
 	<-stopped

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.example.ink</string>
+    <key>UserName</key>
+    <string>INK_SERVICE_USER</string>
+    <key>GroupName</key>
+    <string>INK_SERVICE_GROUP</string>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-ec</string>
+        <string>set -a; . "$1"; set +a; shift; exec "$@"</string>
+        <string>ink-env</string>
+        <string>/path/to/ink/daemon.env</string>
+        <string>/path/to/bin/ink</string>
+        <string>serve</string>
+        <string>--config</string>
+        <string>/path/to/ink/config.json</string>
+        <string>--data</string>
+        <string>/path/to/ink-state</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

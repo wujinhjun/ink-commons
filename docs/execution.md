@@ -6,7 +6,7 @@ A task gets a random, durable `task_id` when derived for a repository, PR, head
 SHA, role and applicable review ID. A changed tuple or explicit reassignment
 creates a new task identity. Repeating an identical reviewer assignment preserves
 the existing task and allocated session. Retries retain the task ID and increment
-`attempt`, generating a new `attempt_id` before any external request.
+`attempt`, generating a new `attempt_id` before delivery. Session preparation has its own durable reservation.
 
 The current task contains `runs`; retired tasks with runs move into
 `execution_history`. Each run stores the immutable request, destination, receipt,
@@ -21,11 +21,10 @@ This protects the PR resource; runtimes sharing one working directory across
 
 ## Opt-in HTTP monitoring
 
-Legacy `prepare` and `deliver` retain `version: 1` and their response format.
-Requests additionally contain `task_id`, `attempt_id` and positive `attempt` in
-`task`. Preparation and delivery use the same identity. Set
-`http_provider_execution: true` only after implementing the following operations.
-Without this opt-in no status/stop POSTs are sent to a legacy endpoint.
+Set `managed: true` on a [named Provider](adapters.md) only after implementing
+the [authenticated admission and runtime guarantees](adapter-http-v1.md#managed-admission).
+Delivery and monitoring use the persisted `task_id`, `attempt_id` and positive
+`attempt` in `task`. Ink only sends status and stop to managed providers.
 
 `status` and `stop` use the same configured endpoint, route, task and Bearer
 credential as delivery. Remote endpoints require HTTPS and a token; redirects
@@ -67,8 +66,7 @@ Return an error or a nonterminal receipt when termination cannot be established.
 
 `internal/execution/ledger` supplies a SQLite implementation for in-repository
 HTTP executor integrations. It is a building block; configuring an arbitrary
-HTTP server does not automatically install it in that server. Integrations in
-other Go modules must port/export this helper or implement equivalent semantics.
+HTTP server does not automatically install it in that server. Integrations in other modules implement equivalent semantics through the HTTP contract.
 
 The normal executor flow is:
 
@@ -136,22 +134,11 @@ current failed/stopped task will enter backoff if attempts remain. An explicit
 `retry` may bypass backoff or retry after exhaustion, but never bypass unresolved
 executions. Successful runs do not advance GitHub state or automatically rerun.
 
-Existing tasks with evidence of prior delivery but no run records get synthetic
-legacy runs with stable persisted IDs. This includes accepted/unknown deliveries
-and any task with `attempts > 0`, including `pending` tasks left by the old retry
-API. They migrate to `unknown`; genuinely unattempted pending tasks remain ready
-for first delivery. Legacy attempt numbers are normalized to at least one. Since
-the executor never received these IDs, only operator confirmation can resolve them. cc-connect's current webhook
-has the same conservative behavior; it receives task/attempt IDs in the prompt
-for diagnostics, but does not yet implement durable admission, status, stop or
-conversation reservation. These integrations remain explicitly tracked in TODO.
-
-The new fields live in the existing SQLite work JSON, so the storage schema stays
-at version 1. Back up before upgrading. Older binaries do not enforce execution
-ownership and may discard the added fields when saving: do not run an older
-daemon against active new-version executions. Stop/fence them first and retain
-a backup containing the execution history before using the documented rollback.
-
+cc-connect's webhook receives task and attempt IDs for diagnostics. Ambiguous
+delivery through a provider without status and stop support requires explicit
+operator confirmation before retry. The v7 database records new attempts before
+delivery. Follow the [single-instance checklist](migration.md) to switch from
+an earlier schema.
 
 ## Review waiting and diagnostics
 
@@ -170,16 +157,11 @@ The reviewer is instructed to verify its identity and report a blocker instead
 of falling back to another account. Developer deliveries explicitly request
 checks and a pushed fix so the existing head-change observer can trigger review.
 
-If the existing HTTP execution protocol confirms a succeeded run but no formal
-review/new SHA follows, `execution.result_seconds` (default 120, zero selects the
-default) controls when a diagnostic appears. This never sets a retry deadline or
-replays the successful attempt. A legacy cc-connect `accepted` response cannot
-prove an execution ended; the existing unknown/stop-confirmation rules still
-apply. The diagnostics feature adds no new executor operations, native queue,
-automatic notifications, process control or automatic missing-result follow-up.
-It runs with the unchanged cc-connect webhook. Reliable wake-up/queue integration
-remains a separate deferred change.
-
+If a managed execution succeeds and there is still no formal review or new SHA,
+`execution.result_seconds` (default 120) controls when a diagnostic appears.
+The diagnostic does not replay the successful attempt. An unmanaged adapter's
+`accepted` response confirms transport only. Ambiguous executions remain
+subject to the stop-confirmation rules above.
 
 ## Cooperative business handoff
 

@@ -17,7 +17,7 @@ description: Use Ink Commons (同砚 / ink common) to send a GitHub PR for revie
 
 ## 收到 task wake（reviewer 或 developer）
 
-唤醒只是通知。先执行 wake 中给出的 `ink task claim --task TASK_ID` 命令；它通常带有 `--provider` / `--target` / `--session`，不依赖当前进程的 `CC_PROJECT` / `CC_SESSION_KEY`。只有旧格式 wake 才沿用这些环境变量（通用执行端使用 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION`）；不要冒充其他会话。
+唤醒只是通知。先执行 wake 中给出的 `ink task claim --task TASK_ID` 命令；它通常带有 `--provider` / `--target` / `--session`，也可从当前进程的 `INK_PROVIDER` / `INK_TARGET` / `INK_SESSION` 读取完整路由。不要冒充其他会话。
 
 - 只有领取成功且 `first:true` 才开始本次工作。`first:false` 或冲突时不要再次执行，必要时查询一次状态并结束回合。若首次领取响应丢失，先核对已有工作记录，不把重试当新授权。
 - 如果旧 credential 在一次已确认的 403 后没有 `rejected` 标记，使用同一 `--task` 和 `--claim-file` 加 `--replace-route` 与显式路由重试；保留 credential 供 submit，不要删除。只在确认 403 后使用。

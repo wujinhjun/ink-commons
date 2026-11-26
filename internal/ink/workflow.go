@@ -1,13 +1,14 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"crypto/sha256"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 func (w *Work) raiseAlert(code, key, message string, now time.Time) {
@@ -21,7 +22,6 @@ func (w *Work) raiseAlert(code, key, message string, now time.Time) {
 		}
 	}
 	w.Alerts = append(w.Alerts, Alert{ID: id, Code: code, Message: message, SHA: w.Pull.Head.SHA, Active: true, CreatedAt: now})
-	log.Printf("workflow %s: %s: %s", keyForWork(w), code, message)
 }
 func keyForWork(w *Work) string { return key(w.Repo, w.Pull.Number) }
 func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
@@ -50,13 +50,13 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 	t := w.Task
 	for _, task := range w.executionTasks() {
 		for _, a := range task.Runs {
-			if !execution.Terminal(a.State) && (a.Legacy || a.Error != "" || task.reliability(c).expired(a, now)) {
+			if !execution.Terminal(a.State) && (a.Error != "" || task.reliability(c).expired(a, now)) {
 				w.raiseAlert("execution_unresolved", a.ID, "旧执行尚未确认结束，后续任务已保留并等待处理。轮次 "+a.ID+"："+a.Error, now)
 			}
 		}
 	}
 	if t != nil {
-		if len(t.Runs) == 0 && strings.HasPrefix(t.Error, "review preparation:") {
+		if len(t.Runs) == 0 && t.PreparationInvalid {
 			w.raiseAlert("review_preparation_invalid", t.ID, "审查上下文或会话准备配置无效，任务未启动："+t.Error, now)
 		}
 		w.Workflow.State = "waiting_agent"
@@ -106,8 +106,8 @@ func (w *Work) refreshWorkflow(now time.Time, c Reliability) {
 				}
 			}
 		}
-		if strings.Contains(t.Error, "attempts exhausted") {
-			w.raiseAlert("attempts_exhausted", t.ID, t.Error, now)
+		if t.AttemptsExhausted || legacyAttemptsExhausted(t, c) {
+			w.raiseAlert("attempts_exhausted", t.ID, "execution attempts exhausted; manual intervention required", now)
 		}
 	}
 	if w.executionBlocked() && (t == nil || len(t.Runs) == 0) {

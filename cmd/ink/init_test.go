@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -6,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/skills"
+	"github.com/wujinhjun/ink-commons/skills"
 )
 
 func TestWorkflowInstallCheckAndUpgrade(t *testing.T) {

@@ -22,50 +22,45 @@ func (r Route) Valid(allocate bool) bool {
 	return strings.TrimSpace(r.Provider) != "" && strings.TrimSpace(r.Target) != "" && (allocate || strings.TrimSpace(r.Session) != "")
 }
 
-// UnmarshalJSON accepts the original cc-connect route in persisted state and API requests.
+// UnmarshalJSON rejects unknown fields, including inside configuration values.
 func (r *Route) UnmarshalJSON(data []byte) error {
 	type route Route
-	var value struct {
-		route
-		Project    string `json:"project"`
-		SessionKey string `json:"session_key"`
-	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
-		return err
-	}
-	if value.Project != "" || value.SessionKey != "" {
-		if value.route != (route{}) {
-			return fmt.Errorf("cannot mix legacy and provider route fields")
-		}
-		*r = Route{Provider: "cc-connect", Target: value.Project, Session: value.SessionKey}
-		return nil
-	}
-	*r = Route(value.route)
-	return nil
+	return decoder.Decode((*route)(r))
 }
 
-// ReviewPlacement records the Discord destination resolved before execution starts.
+// ReviewPlacement reports the effective and source parents and any reusable session.
 type ReviewPlacement struct {
-	Parent          string
-	DevelopmentName string
-	Session         string
+	Parent          string `json:"parent,omitempty"`
+	SourceParent    string `json:"source_parent,omitempty"`
+	DevelopmentName string `json:"-"`
+	Session         string `json:"session,omitempty"`
 }
 
 // ConversationAllocation identifies a thread across ambiguous creation results.
 type ConversationAllocation struct {
+	ID         string     `json:"id,omitempty"`
 	Parent     string     `json:"parent"`
-	Name       string     `json:"name"`
+	Name       string     `json:"name,omitempty"`
 	ReservedAt *time.Time `json:"reserved_at,omitempty"`
 }
 
-// ConversationAllocator separates the single creation request from read-only recovery.
-type ConversationAllocator interface {
+type PlacementResolver interface {
 	ResolveReviewPlacement(context.Context, Route, Delivery) (*ReviewPlacement, error)
-	PlanConversation(ReviewPlacement, Delivery) ConversationAllocation
-	CreateConversation(context.Context, ConversationAllocation) (string, error)
-	FindConversation(context.Context, ConversationAllocation) (string, error)
+}
+
+type ConversationAllocator interface {
+	PrepareAllocation(context.Context, Route, Delivery, ConversationAllocation, string) (string, error)
+}
+
+// Supports checks declared capabilities before an operation can cause effects.
+// In-process implementations may provide the capability via a typed interface.
+func Supports(provider Executor, operation string, implemented bool) bool {
+	if declared, ok := provider.(interface{ Supports(string) bool }); ok {
+		return declared.Supports(operation)
+	}
+	return implemented
 }
 
 // Delivery is the work description shared by execution providers.
@@ -90,15 +85,12 @@ type Delivery struct {
 	ConflictBaseSHA        string `json:"conflict_base_sha,omitempty"`
 	// Source is the development conversation associated with this task.
 	Source *Route `json:"source,omitempty"`
-
-	// ReviewPlacement is used only during local session preparation.
-	ReviewPlacement *ReviewPlacement `json:"-"`
 }
 
 // ConversationReader reads only the provided source conversation. Pages are
 // bounded and returned chronologically; NextBefore reads an older page.
 type ConversationReader interface {
-	ReadConversation(context.Context, Route, string) (ConversationPage, error)
+	ReadConversation(context.Context, Route, Delivery, string) (ConversationPage, error)
 }
 
 type ConversationPage struct {
@@ -181,7 +173,7 @@ type Notification struct {
 // an approval notification as a developer fix task. Success is transport
 // acceptance, not proof that the agent consumed the notification.
 type Notifier interface {
-	Notify(context.Context, Route, Notification) error
+	Notify(context.Context, Route, Notification, bool) error
 }
 
 func ValidateDestination(providers map[string]Executor, route Route, allocate bool) error {
@@ -246,5 +238,5 @@ type TaskWaker interface {
 
 // TaskBlockedNotifier delivers an informational alert without waking an agent.
 type TaskBlockedNotifier interface {
-	NotifyTaskBlocked(ctx context.Context, session string, task Delivery, reason string) error
+	NotifyTaskBlocked(ctx context.Context, route Route, task Delivery, reason string) error
 }

@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -21,7 +23,7 @@ func TestAutoMergeConfigDefaultsAndValidation(t *testing.T) {
 			t.Fatal("lost auto merge config")
 		}
 	}
-	if err := register([]string{"--auto-merge-after-approval", "--merge-method", "invalid", "acme/project"}); err == nil {
+	if err := run([]string{"register", "--auto-merge-after-approval", "--merge-method", "invalid", "acme/project"}); err == nil {
 		t.Fatal("invalid method accepted")
 	}
 }

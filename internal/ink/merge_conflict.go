@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -107,18 +109,17 @@ func (w *Work) blockedConflictTask() bool {
 func (s *Service) observeMergeConflict(repoName string, number int, version uint64, pull Pull, base PullBase, dirty bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	w, err := s.store.loadWork(key(repoName, number))
 	if err != nil {
 		return err
 	}
-	w := st.Work[key(repoName, number)]
 	repo, ok := s.repo(repoName)
 	if w == nil || w.Version != version || w.Phase != "approved" || !ok || (repo.AutoMerge == nil || !repo.AutoMerge.Enabled) ||
 		w.Pull.Head.SHA != pull.Head.SHA || w.Pull.Base.Ref != pull.Base.Ref || hasInFlightAutoMerge(w) {
 		return nil
 	}
 
-	now := time.Now()
+	now := s.now()
 	if !dirty {
 		mergeable := pull.Mergeable != nil && *pull.Mergeable
 		t := w.Task
@@ -167,12 +168,12 @@ func (s *Service) observeMergeConflict(repoName string, number int, version uint
 			if now.Sub(c.Since) < mergeConflictConfirmation {
 				return nil
 			}
-			w.setTask(Task{Role: "developer", SHA: pull.Head.SHA, ReviewID: review.ID, ReviewURL: review.URL, ConflictBase: &base}, w.Developer)
+			w.setTask(Task{Role: "developer", SHA: pull.Head.SHA, ReviewID: review.ID, ReviewURL: review.URL, ConflictBase: &base}, w.Developer, now)
 			if err := s.freezeTaskConfig(w); err != nil {
 				return err
 			}
 		}
 	}
 	w.refreshWorkflow(now, s.config.Reliability.defaults())
-	return s.store.save(st)
+	return s.store.saveWork(w)
 }

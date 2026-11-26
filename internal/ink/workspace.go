@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package ink
 
 import (
@@ -15,20 +17,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"ink-commons/internal/execution"
-	"ink-commons/internal/workspace"
+	"github.com/wujinhjun/ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/workspace"
 )
-
-const workspaceSchema = `
-CREATE TABLE workspace_allocations (
-	id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE,
-	common_dir TEXT NOT NULL, source TEXT NOT NULL, path TEXT NOT NULL,
-	kind TEXT NOT NULL, preference TEXT NOT NULL,
-	ref TEXT NOT NULL, branch TEXT NOT NULL, head TEXT NOT NULL, previous_head TEXT NOT NULL,
-	state TEXT NOT NULL, owner_route TEXT NOT NULL, task_id TEXT NOT NULL
-);
-CREATE UNIQUE INDEX workspace_active_path ON workspace_allocations(path)
-WHERE state IN ('preparing', 'active');`
 
 const workspaceColumns = "id, request_id, common_dir, source, path, kind, preference, ref, branch, head, previous_head, state, owner_route, task_id"
 
@@ -198,7 +189,7 @@ func (s *Service) activateWorkspace(ctx context.Context, req workspaceRequest, a
 		if workspaceStillReleased(ctx, a) {
 			return a, true, apiError{409, err.Error()}
 		}
-		return a, false, apiError{409, fmt.Sprintf("%v; workspace %s remains preparing; inspect %s, then retry request %s or run ink workspace release --id %s", err, a.ID, a.Path, a.RequestID, a.ID)}
+		return a, false, apiError{409, fmt.Sprintf("%s; workspace %s remains preparing; inspect ink workspace list, then retry the same request or run ink workspace release --id %s", StartupDiagnostic(err), a.ID, a.ID)}
 	}
 	active, err := s.workspaceState(ctx, a, "active")
 	return active, false, err
@@ -231,11 +222,10 @@ func (s *Service) validateWorkspaceOwner(ctx context.Context, req workspaceReque
 	if req.TaskID == "" {
 		return nil
 	}
-	st, err := s.store.load()
+	w, task, err := s.store.loadTask(req.TaskID)
 	if err != nil {
 		return err
 	}
-	w, task := findTask(st, req.TaskID)
 	if w == nil || task == nil || w.Task != task || task.Handoff == nil ||
 		task.Handoff.State != "claimed" || len(req.ClaimToken) < 32 || task.Handoff.ClaimHash != claimHash(req.ClaimToken) ||
 		req.Owner == nil || !sameWorkspaceOwner(req.Owner, task.Handoff.Assignee.Route) {
@@ -303,7 +293,7 @@ func (s *Service) reserveWorkspace(ctx context.Context, req workspaceRequest, co
 	}
 	for _, tree := range repo.Worktree {
 		if req.Branch != "" && tree.Branch == req.Branch {
-			return a, apiError{409, "branch is already checked out in " + tree.Path}
+			return a, apiError{409, "branch is already checked out; inspect ink workspace list"}
 		}
 	}
 	if req.Preference != "lite" {
@@ -328,18 +318,19 @@ func (s *Service) reserveWorkspace(ctx context.Context, req workspaceRequest, co
 		}
 		a.Path = filepath.Join(dir, "lite-"+a.ID)
 	}
-	return a, insertWorkspace(ctx, s.store.db, a)
+	remote, _ := workspace.Git(ctx, a.Source, "remote", "get-url", "origin")
+	return a, insertWorkspace(ctx, s.store.db, a, GitHubRepository(strings.TrimSpace(string(remote))))
 }
 
 func insertWorkspace(ctx context.Context, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, a WorkspaceAllocation) error {
+}, a WorkspaceAllocation, repo string) error {
 	route, err := json.Marshal(a.Owner)
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, "INSERT INTO workspace_allocations ("+workspaceColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		a.ID, a.RequestID, a.Common, a.Source, a.Path, a.Kind, a.Preference, a.Ref, a.Branch, a.Head, a.Previous, a.State, string(route), a.TaskID)
+	_, err = db.ExecContext(ctx, "INSERT INTO workspace_allocations ("+workspaceColumns+", repository) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		a.ID, a.RequestID, a.Common, a.Source, a.Path, a.Kind, a.Preference, a.Ref, a.Branch, a.Head, a.Previous, a.State, string(route), a.TaskID, sql.NullString{String: repo, Valid: repo != ""})
 	return err
 }
 

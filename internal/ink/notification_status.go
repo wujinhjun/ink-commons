@@ -1,9 +1,11 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"net/http"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 // 只返回当前持久化观测；不调用 GitHub、不触发合入或修改通知回执。
@@ -90,12 +92,12 @@ func (s *Service) notificationStatus(out http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, err := s.store.load()
+	w, err := s.store.loadNotification(event)
 	if err != nil {
 		fail(out, err)
 		return
 	}
-	for _, w := range st.Work {
+	if w != nil {
 		for _, n := range w.Notifications {
 			if n.EventID != event {
 				continue

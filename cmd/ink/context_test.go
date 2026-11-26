@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 import (
@@ -9,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"ink-commons/internal/ink"
+	"github.com/wujinhjun/ink-commons/internal/ink"
 )
 
 func TestContextCLIUsesPrivateDaemonAndBoundSHA(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-ctx-")
+	dir, err := os.MkdirTemp("/tmp", "ink-ctx-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,13 +37,13 @@ func TestContextCLIUsesPrivateDaemonAndBoundSHA(t *testing.T) {
 	})}
 	go server.Serve(ln)
 	defer server.Close()
-	if err := readContext([]string{"--sha", sha, "--before", "1000", "https://github.com/acme/project/pull/42"}); err != nil {
+	if err := run([]string{"context", "--sha", sha, "--before", "1000", "https://github.com/acme/project/pull/42"}); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 1 {
 		t.Fatal("CLI did not read daemon")
 	}
-	if err := readContext([]string{"https://github.com/acme/project/pull/42"}); err == nil {
+	if err := run([]string{"context", "https://github.com/acme/project/pull/42"}); err == nil {
 		t.Fatal("context requires task SHA")
 	}
 }
@@ -70,7 +72,7 @@ func TestReviewFeatureConfiguration(t *testing.T) {
 }
 
 func TestRegisterExplicitFeatureFlags(t *testing.T) {
-	dir, err := os.MkdirTemp("/private/tmp", "ink-feat-")
+	dir, err := os.MkdirTemp("/tmp", "ink-feat-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +93,7 @@ func TestRegisterExplicitFeatureFlags(t *testing.T) {
 	})}
 	go server.Serve(ln)
 	defer server.Close()
-	if err := register([]string{"--require-same-channel", "--reuse-development-thread", "--thread-history", "--auto-merge-after-approval", "--merge-method", "squash", "--reuse-reader-identity", "acme/project"}); err != nil {
+	if err := run([]string{"register", "--require-same-channel", "--reuse-development-thread", "--thread-history", "--auto-merge-after-approval", "--merge-method", "squash", "--reuse-reader-identity", "acme/project"}); err != nil {
 		t.Fatal(err)
 	}
 	v := <-received

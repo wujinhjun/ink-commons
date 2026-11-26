@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -38,11 +37,9 @@ func Git(ctx context.Context, path string, args ...string) ([]byte, error) {
 		}
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("git %s failed: %w", args[0], err)
 	}
 	return out, nil
 }

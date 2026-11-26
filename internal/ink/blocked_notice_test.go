@@ -1,15 +1,18 @@
+//go:build linux || darwin
+
 package ink
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/wujinhjun/ink-commons/internal/ink/statedb"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"ink-commons/internal/execution"
+	"github.com/wujinhjun/ink-commons/internal/execution"
 )
 
 type blockedNoticeExecutor struct {
@@ -21,15 +24,15 @@ type blockedNoticeExecutor struct {
 	err     error
 }
 
-func (e *blockedNoticeExecutor) NotifyTaskBlocked(_ context.Context, session string, task execution.Delivery, reason string) error {
+func (e *blockedNoticeExecutor) NotifyTaskBlocked(_ context.Context, route execution.Route, task execution.Delivery, reason string) error {
 	e.calls++
-	e.session, e.task, e.reason = session, task, reason
+	e.session, e.task, e.reason = route.Session, task, reason
 	return e.err
 }
 
 func TestBlockedNoticeRetriesAfterRestart(t *testing.T) {
 	f := newHandoffFixture(t)
-	if _, err := f.s.changeConfig(f.repo.Repo, "task_blocked", jsonValue(TaskBlockedHook{DiscordChannelID: "123"}), false); err != nil {
+	if _, err := f.s.changeConfig(f.repo.Repo, "task_blocked", jsonValue(TaskBlockedHook{Route: &execution.Route{Provider: "chat", Target: "alerts", Session: "discord:123"}}), false); err != nil {
 		t.Fatal(err)
 	}
 	task := f.work(t).Task
@@ -39,7 +42,7 @@ func TestBlockedNoticeRetriesAfterRestart(t *testing.T) {
 	f.submit(t, task, claimA, result, 200)
 
 	executor := &blockedNoticeExecutor{err: fmt.Errorf("Discord unavailable")}
-	f.s.providers["cc-connect"] = executor
+	f.s.providers["chat"] = executor
 	run := func() {
 		t.Helper()
 		if err := f.s.reconcileBlockedNotices(context.Background()); err != nil {
@@ -54,17 +57,17 @@ func TestBlockedNoticeRetriesAfterRestart(t *testing.T) {
 	}
 
 	f.restart(t)
-	f.s.providers["cc-connect"] = executor
+	f.s.providers["chat"] = executor
 	run()
 	if executor.calls != 1 {
 		t.Fatal("restart ignored the persisted retry lease")
 	}
-	st, err := f.s.store.load()
+	st, err := loadFixture(f.s.store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Work[key(f.repo.Repo, 42)].Task.Handoff.BlockedNotice.RetryAt = time.Time{}
-	if err := f.s.store.save(st); err != nil {
+	if err := saveFixture(f.s.store, st); err != nil {
 		t.Fatal(err)
 	}
 	executor.err = nil
@@ -94,10 +97,10 @@ func TestBlockedNoticeOptInAndDefaultDestination(t *testing.T) {
 		t.Fatal("repeated handoff backfilled a historical notification")
 	}
 	w := f.work(t)
-	w.Developer.Route = &execution.Route{Provider: "cc-connect", Target: "developer", Session: "discord:456"}
+	w.Developer.Route = &execution.Route{Provider: "chat", Target: "developer", Session: "discord:456"}
 	w.Task.ConfigSnapshot = nil // Historical task without a frozen source.
 	f.s.reserveBlockedNotice(w, w.Task)
-	if n := w.Task.Handoff.BlockedNotice; n == nil || n.Session != "discord:456" {
+	if n := w.Task.Handoff.BlockedNotice; n == nil || n.Route == nil || n.Route.Session != "discord:456" {
 		t.Fatalf("unexpected default destination: %+v", n)
 	}
 }
@@ -113,13 +116,17 @@ func TestBlockedNoticeKeepsClaimedTaskDestinationAfterDeveloperReassignment(t *t
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHandoffFixture(t)
-			f.s.providers["cc-connect"] = &blockedNoticeExecutor{}
-			if _, err := f.s.changeConfig(f.repo.Repo, "task_blocked", jsonValue(TaskBlockedHook{DiscordChannelID: tc.override}), false); err != nil {
+			f.s.providers["chat"] = &blockedNoticeExecutor{}
+			hook := TaskBlockedHook{}
+			if tc.override != "" {
+				hook.Route = &execution.Route{Provider: "chat", Target: "alerts", Session: "discord:" + tc.override}
+			}
+			if _, err := f.s.changeConfig(f.repo.Repo, "task_blocked", jsonValue(hook), false); err != nil {
 				t.Fatal(err)
 			}
 			assign := func(session string) {
 				t.Helper()
-				route := &execution.Route{Provider: "cc-connect", Target: "developer", Session: session}
+				route := &execution.Route{Provider: "chat", Target: "developer", Session: session}
 				body := jsonValue(workChange{Role: "developer", GitHubLogin: "developer", Route: route})
 				req := httptest.NewRequest(http.MethodPost, "/v1/work/acme/project/42/assign", bytes.NewReader(body))
 				out := httptest.NewRecorder()
@@ -143,9 +150,24 @@ func TestBlockedNoticeKeepsClaimedTaskDestinationAfterDeveloperReassignment(t *t
 				RequestID: "blocked", Handoff: true, Outcome: "blocked", Reason: "GitHub unavailable",
 			}, 200)
 			n := f.work(t).Task.Handoff.BlockedNotice
-			if n == nil || n.Session != tc.want {
+			if n == nil || n.Route == nil || n.Route.Session != tc.want {
 				t.Fatalf("expected notice to %s, got %+v", tc.want, n)
 			}
 		})
 	}
+}
+
+func (s *Service) reconcileBlockedNotices(ctx context.Context) error {
+	s.mu.Lock()
+	ids, err := statedb.New(s.store.db).ListBlockedNoticePending(ctx)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := s.reconcileBlockedWork(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
